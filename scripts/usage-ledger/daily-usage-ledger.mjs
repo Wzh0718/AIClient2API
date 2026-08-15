@@ -1488,7 +1488,9 @@ function preserveRepairPeaks(candidate, current) {
 }
 
 function usageDelta(next = {}, previous = {}) {
-  return Object.fromEntries(REPAIR_USAGE_FIELDS.map(field => [field, toNumber(next[field]) - toNumber(previous[field])]));
+  const safeNext = next || {};
+  const safePrevious = previous || {};
+  return Object.fromEntries(REPAIR_USAGE_FIELDS.map(field => [field, toNumber(safeNext[field]) - toNumber(safePrevious[field])]));
 }
 
 function applyUsageDelta(target = {}, delta = {}) {

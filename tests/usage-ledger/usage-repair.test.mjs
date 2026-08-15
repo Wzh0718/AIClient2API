@@ -38,7 +38,7 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-async function makeEligibleRepairFixture() {
+async function makeEligibleRepairFixture({ missingModelDay = false } = {}) {
   const base = makeTempDir();
   const auditDir = path.join(base, 'request-audit');
   const outDir = path.join(base, 'repair-output');
@@ -78,7 +78,9 @@ async function makeEligibleRepairFixture() {
     accounts: {}, accountUsageEvents: {},
     daily: {
       '2026-07-20': { ...usageBucket(3, 30), models: { 'gpt-5.6': usageBucket(3, 30) }, accounts: {} },
-      '2026-07-21': { ...usageBucket(1, 5), models: { 'gpt-5.6': usageBucket(1, 5) }, accounts: {} },
+      ...(!missingModelDay ? {
+        '2026-07-21': { ...usageBucket(1, 5), models: { 'gpt-5.6': usageBucket(1, 5) }, accounts: {} },
+      } : {}),
     },
   });
   const events = [
@@ -383,6 +385,24 @@ test('applyRepairBundle updates approved dates by delta, preserves live fields a
 
   const repeated = await applyRepairBundle(options);
   assert.equal(repeated.status, 'already-applied');
+});
+
+test('applyRepairBundle treats a missing previous model day as an empty usage bucket', async () => {
+  const fixture = await makeEligibleRepairFixture({ missingModelDay: true });
+
+  const applied = await applyRepairBundle({
+    base: fixture.base,
+    bundle: fixture.outDir,
+    approvedManifestSha256: fixture.bundle.manifestSha256,
+    approvedReportSha256: fixture.bundle.reportSha256,
+    backupDir: path.join(fixture.base, 'repair-backup-missing-model-day'),
+    now: new Date('2026-07-23T01:00:00.000Z'),
+  });
+
+  assert.equal(applied.status, 'applied');
+  const modelStats = JSON.parse(fs.readFileSync(path.join(fixture.base, 'model-usage-stats.json'), 'utf8'));
+  assert.equal(modelStats.daily['2026-07-21'].requestCount, 2);
+  assert.equal(modelStats.daily['2026-07-21'].totalTokens, 15);
 });
 
 test('createRepairBundle blocks dates with unknown potluck keys or corrupt required source lines', async () => {
