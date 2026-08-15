@@ -16,7 +16,10 @@ import { createShutdownCoordinator } from './shutdown-coordinator.js';
 import { registerWorkerShutdownHandlers } from './worker-shutdown-handlers.js';
 import { createRuntimeCoordination } from '../runtime/runtime-coordination.js';
 import { waitForCoordinationReady } from '../runtime/runtime-coordination-readiness.js';
-import { RuntimeEventConsumer } from '../runtime/runtime-event-consumer.js';
+import { RuntimeEventConsumer, createDurableRuntimeHookApply } from '../runtime/runtime-event-consumer.js';
+import { createRuntimeHookStreamFromEnv } from '../runtime/runtime-hook-stream.js';
+import { flushPendingChanges as flushPotluckUsage } from '../plugins/api-potluck/key-manager.js';
+import { flushStatsPersistence as flushModelUsage } from '../plugins/model-usage-stats/stats-manager.js';
 import { migrateCodexFingerprintProviderPoolsFile } from '../utils/codex-fingerprint-migration.js';
 import { invalidateServiceAdapter } from '../providers/adapter.js';
 
@@ -130,7 +133,7 @@ import 'dotenv/config'; // Import dotenv and configure it
 import '../converters/register-converters.js'; // 注册所有转换器
 import { isRetryableNetworkError } from '../utils/common.js';
 import { runtimeMetrics } from '../runtime/runtime-metrics.js';
-import { applyRawCaptureRuntimeConfig } from '../plugins/request-audit/index.js';
+import { applyRawCaptureRuntimeConfig, drainAuditQueue } from '../plugins/request-audit/index.js';
 
 // 检测是否作为子进程运行
 const IS_WORKER_PROCESS = process.env.IS_WORKER_PROCESS === 'true';
@@ -144,15 +147,89 @@ let codexPrewarmService = null;
 let usageCacheAutoRefreshService = null;
 let heartbeatTimerId = null;
 let runtimeMetricsTimerId = null;
+let runtimeHookRetryTimerId = null;
+let runtimeHookStream = null;
+let runtimeHookPollPromise = null;
+let runtimeHookPollStopped = false;
+let runtimeHookStreamStatus = { pending: 0, consumerLag: 0, available: true, error: null };
 let startupPromise = Promise.resolve();
 const requestActivityTracker = createAsyncActivityTracker();
 const heartbeatActivityTracker = createAsyncActivityTracker();
 const healthCheckActivityTracker = createAsyncActivityTracker();
 const startupShutdownGate = createStartupShutdownGate({ logger });
 const runtimeHookConsumer = new RuntimeEventConsumer({
-    apply: message => getPluginManager()?.executeHook?.(message.hookName, ...(message.args || [])),
-    ack: message => sendToMaster({ type: 'runtime_hook_ack', sourceWorkerId: message.sourceWorkerId, eventId: message.eventId })
+    apply: createDurableRuntimeHookApply({
+        executeHook: (hookName, ...args) => getPluginManager()?.executeHook?.(hookName, ...args),
+        flushers: [flushPotluckUsage, flushModelUsage, drainAuditQueue]
+    }),
+    ack: message => sendToMaster({ type: 'runtime_hook_ack', sourceWorkerId: message.sourceWorkerId, eventId: message.eventId }),
+    durableState: {
+        hasApplied: message => runtimeHookStream?.hasApplied?.(message) || false,
+        commit: message => runtimeHookStream?.commit?.(message)
+    }
 });
+
+function getRuntimeHookSnapshot() {
+    const bridgeSnapshot = getPluginManager()?.runtimeHookBridge?.snapshot?.() || {};
+    const streamSnapshot = runtimeHookStream?.snapshot?.() || {};
+    return {
+        pending: Number(bridgeSnapshot.pending || runtimeHookStreamStatus.pending || 0),
+        dropped: Number(bridgeSnapshot.dropped || 0),
+        backpressured: Number(bridgeSnapshot.backpressured || 0),
+        spooled: Number(bridgeSnapshot.spooled || streamSnapshot.spooled || 0),
+        spoolBytes: Number(bridgeSnapshot.spoolBytes || streamSnapshot.spoolBytes || 0),
+        consumerLag: Number(runtimeHookStreamStatus.consumerLag || 0),
+        available: runtimeHookStreamStatus.available !== false,
+        error: runtimeHookStreamStatus.error || null,
+        oldestPendingAgeMs: Math.max(
+            Number(bridgeSnapshot.oldestPendingAgeMs || 0),
+            Number(streamSnapshot.oldestPendingAgeMs || 0)
+        ),
+        lastPublishedAt: streamSnapshot.lastPublishedAt || null,
+        lastCommittedAt: streamSnapshot.lastCommittedAt || null,
+        lastError: streamSnapshot.lastError || null
+    };
+}
+
+function buildRuntimeMetricsSnapshot() {
+    return {
+        ...runtimeMetrics.snapshot(),
+        workerId: process.env.RUNTIME_WORKER_ID || RUNTIME_WORKER_ROLE,
+        hooks: getRuntimeHookSnapshot()
+    };
+}
+
+function startRuntimeHookPolling() {
+    if (!runtimeHookStream || RUNTIME_WORKER_ROLE !== 'control' || runtimeHookPollPromise) return;
+    runtimeHookPollStopped = false;
+    runtimeHookPollPromise = (async () => {
+        while (!runtimeHookPollStopped) {
+            try {
+                const events = await runtimeHookStream.readBatch({ count: 100, blockMs: 1000 });
+                for (const event of events) await runtimeHookConsumer.consume(event);
+                runtimeHookStreamStatus = await runtimeHookStream.pendingSnapshot();
+            } catch (error) {
+                if (!runtimeHookPollStopped) {
+                    runtimeHookStreamStatus = { pending: 0, consumerLag: 0, available: false, error: error.message };
+                    logger.error('[Runtime Hook] Redis stream poll failed:', error.message);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            }
+        }
+    })().finally(() => { runtimeHookPollPromise = null; });
+}
+
+async function stopRuntimeHookTransport() {
+    if (runtimeHookRetryTimerId) {
+        clearInterval(runtimeHookRetryTimerId);
+        runtimeHookRetryTimerId = null;
+    }
+    runtimeHookPollStopped = true;
+    await runtimeHookPollPromise;
+    await getPluginManager()?.runtimeHookBridge?.drain?.({ timeoutMs: 20000 });
+    await runtimeHookStream?.flushSpool?.();
+    await runtimeHookStream?.close?.();
+}
 
 /**
  * 发送消息给主进程
@@ -203,6 +280,8 @@ async function stopBackgroundServices() {
             runtimeMetricsTimerId = null;
         }
     });
+
+    await stopOne('runtime hook transport', stopRuntimeHookTransport);
 
     await stopOne('provider refresh queue', async () => {
         const providerPoolManager = getProviderPoolManager();
@@ -295,6 +374,21 @@ async function startServer() {
         CONFIG._requestAuditRawCaptureEventSink = event => sendToMaster(event);
     }
     await pluginManager.initAll(CONFIG);
+    if (IS_WORKER_PROCESS && ['execution', 'control'].includes(RUNTIME_WORKER_ROLE)) {
+        runtimeHookStream = createRuntimeHookStreamFromEnv({ workerId: process.env.RUNTIME_WORKER_ID });
+        if (IS_EXECUTION_WORKER) {
+            pluginManager.configureRuntimeHookBridge({ durableTransport: runtimeHookStream });
+            runtimeHookRetryTimerId = setInterval(() => {
+                pluginManager.runtimeHookBridge?.retryUnacked?.();
+                runtimeHookStream?.flushSpool?.().catch(error => {
+                    logger.error('[Runtime Hook] Spool flush failed:', error.message);
+                });
+            }, Number(process.env.RUNTIME_HOOK_RETRY_MS || 5000));
+            runtimeHookRetryTimerId.unref?.();
+        } else {
+            startRuntimeHookPolling();
+        }
+    }
     if (startupShutdownGate.shouldAbort('plugin status logging')) return null;
     
     // Log loaded plugins
@@ -550,9 +644,9 @@ async function startServer() {
             logger.info(`[Runtime] Coordination recovery barrier ready: ${coordinationStatus.readyWorkers}/${runtimeCoordination.expectedWorkers}`);
         }
         if (IS_WORKER_PROCESS) {
-            sendToMaster({ type: 'runtime_metrics', snapshot: runtimeMetrics.snapshot() });
+            sendToMaster({ type: 'runtime_metrics', snapshot: buildRuntimeMetricsSnapshot() });
             runtimeMetricsTimerId = setInterval(() => {
-                sendToMaster({ type: 'runtime_metrics', snapshot: runtimeMetrics.snapshot() });
+                sendToMaster({ type: 'runtime_metrics', snapshot: buildRuntimeMetricsSnapshot() });
             }, 5000);
             runtimeMetricsTimerId.unref?.();
             sendToMaster({
@@ -611,7 +705,9 @@ const shutdownHandlers = registerWorkerShutdownHandlers({
             return true;
         }
         if (message.type === 'runtime_hook_ack' && IS_EXECUTION_WORKER) {
-            getPluginManager()?.runtimeHookBridge?.ack?.(message.eventId);
+            getPluginManager()?.runtimeHookBridge?.ack?.(message.eventId).catch?.(error => {
+                logger.error('[Runtime Hook] Failed to acknowledge local event:', error.message);
+            });
             return true;
         }
         if (message.type === 'runtime_hook_retry' && IS_EXECUTION_WORKER) {

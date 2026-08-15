@@ -3,7 +3,7 @@ import {
     fingerprintCredentialManifest
 } from '../src/runtime/credential-manifest.js';
 import { RuntimeMetrics } from '../src/runtime/runtime-metrics.js';
-import { aggregateWorkerMetrics } from '../src/runtime/multi-worker-runtime.js';
+import { aggregateWorkerMetrics, shutdownWorkerStages } from '../src/runtime/multi-worker-runtime.js';
 import { Readable } from 'stream';
 import requestContext from '../src/utils/context.js';
 import { getRequestBody } from '../src/utils/common.js';
@@ -125,9 +125,63 @@ describe('runtime observability baseline', () => {
         expect(aggregateWorkerMetrics(snapshots)).toEqual({
             requests: { total: 12, success: 11, failed: 1, byWorker: { 'execution-1': 5, 'execution-2': 7 }, byKind: { model: 10, image: 2 } },
             output: { bytes: 300, backpressureMs: 10 },
+            hooks: { pending: 0, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 0, consumerLag: 0, oldestPendingAgeMs: 0, available: true, unavailableWorkers: [], byWorker: {} },
             inFlight: 3,
             process: { rss: 2200, heapUsed: 1100, maxEventLoopUtilization: 0.3, eventLoopDelay: { p95: 15, p99: 22, max: 30 } }
         });
         expect(JSON.stringify(aggregateWorkerMetrics(snapshots))).not.toMatch(/prompt|imageData|credential/i);
+    });
+
+    test('aggregates durable hook backlog and dropped counters', () => {
+        const snapshots = new Map([
+            ['execution-1', { hooks: { pending: 2, spooled: 3, spoolBytes: 400, dropped: 0, backpressured: 1, oldestPendingAgeMs: 1200 } }],
+            ['execution-2', { hooks: { pending: 1, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 2, oldestPendingAgeMs: 800 } }],
+            ['control-1', { hooks: { pending: 4, consumerLag: 5, dropped: 0, oldestPendingAgeMs: 2000 } }]
+        ]);
+
+        expect(aggregateWorkerMetrics(snapshots).hooks).toEqual({
+            pending: 7,
+            spooled: 3,
+            spoolBytes: 400,
+            dropped: 0,
+            backpressured: 3,
+            consumerLag: 5,
+            oldestPendingAgeMs: 2000,
+            available: true,
+            unavailableWorkers: [],
+            byWorker: {
+                'execution-1': snapshots.get('execution-1').hooks,
+                'execution-2': snapshots.get('execution-2').hooks,
+                'control-1': snapshots.get('control-1').hooks
+            }
+        });
+    });
+
+    test('aggregates unavailable durable hook transports for degraded health', () => {
+        const snapshots = new Map([
+            ['control-1', { hooks: { available: false, error: 'Redis connection timeout' } }],
+            ['execution-1', { hooks: { available: true } }]
+        ]);
+
+        expect(aggregateWorkerMetrics(snapshots).hooks).toMatchObject({
+            available: false,
+            unavailableWorkers: ['control-1']
+        });
+    });
+
+    test('shutdown drains execution hooks before stopping control', async () => {
+        const order = [];
+        let backlog = 2;
+        await shutdownWorkerStages({
+            closeProxy: async () => order.push('proxy'),
+            stopRole: async role => {
+                order.push(role);
+                if (role === 'execution') backlog = 0;
+            },
+            getBacklog: () => backlog,
+            wait: async () => {},
+            drainTimeoutMs: 100
+        });
+        expect(order).toEqual(['proxy', 'execution', 'control']);
     });
 });

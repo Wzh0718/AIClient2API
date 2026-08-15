@@ -325,6 +325,12 @@ class PluginManager {
         }
     }
 
+    configureRuntimeHookBridge({ durableTransport } = {}) {
+        if (!this.runtimeHookBridge) return null;
+        this.runtimeHookBridge.durableTransport = durableTransport || null;
+        return this.runtimeHookBridge;
+    }
+
     /**
      * 检查插件是否启用
      * @param {string} name - 插件名称

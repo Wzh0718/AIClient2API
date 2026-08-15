@@ -1,6 +1,7 @@
 import { describe, expect, test } from '@jest/globals';
 
 import {
+    buildAveragePricingProfile,
     buildCost,
     estimateUsageCost,
     getConversionModels,
@@ -212,6 +213,61 @@ describe('api potluck cost estimator', () => {
         expect(cost.actualUsd).toBe(0);
         expect(cost.missingPriceTokens).toBe(1500);
         expect(cost.convertedUsd).toBeCloseTo(0.0003, 8);
+    });
+
+    test('estimates an unknown text model from the weighted known-model token mix', () => {
+        const profile = buildAveragePricingProfile({
+            'gpt-5.4-mini': {
+                promptTokens: 1_000_000,
+                cachedTokens: 200_000,
+                completionTokens: 100_000,
+                totalTokens: 1_100_000
+            },
+            'gpt-5.5': {
+                promptTokens: 500_000,
+                cachedTokens: 100_000,
+                completionTokens: 50_000,
+                totalTokens: 550_000
+            }
+        });
+        const usage = {
+            promptTokens: 1000,
+            cachedTokens: 200,
+            completionTokens: 100,
+            totalTokens: 1100
+        };
+        const cost = estimateUsageCost(usage, 'unknown', {
+            averageProfile: profile,
+            averageScope: 'provider-day'
+        });
+
+        expect(cost.actualUsd).toBe(0);
+        expect(cost.estimatedUsd).toBeGreaterThan(0);
+        expect(cost.usd).toBe(cost.estimatedUsd);
+        expect(cost.estimatedPriceTokens).toBe(1100);
+        expect(cost.missingPriceTokens).toBe(0);
+        expect(cost.pricingSource).toBe('estimated-average');
+        expect(cost.estimationMethod).toBe('provider-day-weighted-average');
+    });
+
+    test('does not use image models as average text pricing samples', () => {
+        const profile = buildAveragePricingProfile({
+            'gpt-image-2': {
+                promptTokens: 1000,
+                cachedTokens: 0,
+                completionTokens: 500,
+                totalTokens: 1500
+            }
+        });
+        const cost = estimateUsageCost({ totalTokens: 1000 }, 'unknown', {
+            averageProfile: profile,
+            averageScope: 'provider-day'
+        });
+
+        expect(profile).toBeNull();
+        expect(cost.estimatedUsd).toBe(0);
+        expect(cost.missingPriceTokens).toBe(1000);
+        expect(cost.pricingSource).toBe('missing');
     });
 
     test('prices every public non-Claude Antigravity model without missing tokens', () => {

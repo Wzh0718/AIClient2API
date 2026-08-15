@@ -88,6 +88,49 @@ test('aggregator reprices stale GPT-5.6 ledger rows with current prices', () => 
   assert.ok(Math.abs(result.models['gpt-5.6-sol-fast'].cost.actualUsd - normalCost * 2.5) < 1e-12);
 });
 
+test('aggregator estimates unknown models from the same provider and date', () => {
+  const aggregator = createLedgerRangeAggregator({ conversionModel: 'gemini-2.5-flash' });
+  aggregator.addRow(row({
+    date: '2026-08-14',
+    provider: 'openai-codex-oauth',
+    model: 'gpt-5.4-mini',
+    promptTokens: 1_000_000,
+    cachedTokens: 200_000,
+    completionTokens: 100_000,
+    totalTokens: 1_100_000,
+  }));
+  aggregator.addRow(row({
+    date: '2026-08-14',
+    provider: 'openai-codex-oauth',
+    model: 'unknown',
+    promptTokens: 1000,
+    cachedTokens: 200,
+    completionTokens: 100,
+    totalTokens: 1100,
+  }));
+
+  const result = aggregator.result();
+  const unknownCost = result.models.unknown.cost;
+  assert.equal(unknownCost.actualUsd, 0);
+  assert.ok(unknownCost.estimatedUsd > 0);
+  assert.equal(unknownCost.usd, unknownCost.estimatedUsd);
+  assert.equal(unknownCost.estimatedPriceTokens, 1100);
+  assert.equal(unknownCost.missingPriceTokens, 0);
+  assert.equal(unknownCost.pricingSource, 'estimated-average');
+  assert.equal(unknownCost.estimationScope, 'provider-day');
+  assert.ok(result.summary.cost.usd > result.summary.cost.actualUsd);
+});
+
+test('aggregator leaves unknown prices missing when only image samples exist', () => {
+  const aggregator = createLedgerRangeAggregator({ conversionModel: 'gemini-2.5-flash' });
+  aggregator.addRow(row({ date: '2026-08-14', model: 'gpt-image-2', totalTokens: 1500 }));
+  aggregator.addRow(row({ date: '2026-08-14', model: 'unknown', totalTokens: 1000, promptTokens: 0, completionTokens: 0 }));
+
+  const result = aggregator.result();
+  assert.equal(result.models.unknown.cost.estimatedUsd, 0);
+  assert.equal(result.models.unknown.cost.missingPriceTokens, 1000);
+});
+
 test('aggregated output never contains key material', () => {
   const aggregator = createLedgerRangeAggregator({});
   aggregator.addRow(row({}));

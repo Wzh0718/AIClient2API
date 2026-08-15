@@ -1712,7 +1712,7 @@
         }
         function getActualCostUsd(cost) {
             if (!cost) return 0;
-            return Number(cost.actualUsd || 0);
+            return Number(cost.usd ?? (Number(cost.actualUsd || 0) + Number(cost.estimatedUsd || 0)));
         }
         function getDisplayCostUsd(cost) {
             if (!cost) return 0;
@@ -1918,9 +1918,12 @@
                 maxRpm: 0,
                 maxTps: 0,
                 cost: {
+                    usd: 0,
                     actualUsd: 0,
+                    estimatedUsd: 0,
                     convertedUsd: 0,
-                    missingPriceTokens: 0
+                    missingPriceTokens: 0,
+                    estimatedPriceTokens: 0
                 }
             };
         }
@@ -1934,18 +1937,24 @@
             target.maxQps = Math.max(target.maxQps || 0, Number(usage?.maxQps || 0));
             target.maxRpm = Math.max(target.maxRpm || 0, Number(usage?.maxRpm || 0));
             target.maxTps = Math.max(target.maxTps || 0, Number(usage?.maxTps || 0));
+            target.cost.usd += Number(usage?.cost?.usd ?? (Number(usage?.cost?.actualUsd || 0) + Number(usage?.cost?.estimatedUsd || 0)));
             target.cost.actualUsd += Number(usage?.cost?.actualUsd || 0);
+            target.cost.estimatedUsd += Number(usage?.cost?.estimatedUsd || 0);
             target.cost.convertedUsd += Number(usage?.cost?.convertedUsd || 0);
             target.cost.missingPriceTokens += Number(usage?.cost?.missingPriceTokens || 0);
+            target.cost.estimatedPriceTokens += Number(usage?.cost?.estimatedPriceTokens || 0);
             target.cost.conversionModel = usage?.cost?.conversionModel || target.cost.conversionModel || currentConversionModel;
             target.cost.pricingVersion = usage?.cost?.pricingVersion || target.cost.pricingVersion || '';
         }
 
         function addCostBucket(targetCost, sourceCost) {
             if (!targetCost || !sourceCost) return targetCost;
+            targetCost.usd = Number(targetCost.usd || 0) + Number(sourceCost.usd ?? (Number(sourceCost.actualUsd || 0) + Number(sourceCost.estimatedUsd || 0)));
             targetCost.actualUsd = Number(targetCost.actualUsd || 0) + Number(sourceCost.actualUsd || 0);
+            targetCost.estimatedUsd = Number(targetCost.estimatedUsd || 0) + Number(sourceCost.estimatedUsd || 0);
             targetCost.convertedUsd = Number(targetCost.convertedUsd || 0) + Number(sourceCost.convertedUsd || 0);
             targetCost.missingPriceTokens = Number(targetCost.missingPriceTokens || 0) + Number(sourceCost.missingPriceTokens || 0);
+            targetCost.estimatedPriceTokens = Number(targetCost.estimatedPriceTokens || 0) + Number(sourceCost.estimatedPriceTokens || 0);
             targetCost.conversionModel = sourceCost.conversionModel || targetCost.conversionModel || currentConversionModel;
             targetCost.pricingVersion = sourceCost.pricingVersion || targetCost.pricingVersion || '';
             return targetCost;
@@ -2184,7 +2193,7 @@
 
         function shouldShowStatsMetaBar(result) {
             if (!result) return false;
-            if (result.status === 'ok') return false;
+            if (result.status === 'ok' && result.hourlyCoverage?.status !== 'partial') return false;
             const generatedAt = new Date(result.generatedAt);
             if (!Number.isNaN(generatedAt.getTime())) {
                 const ageMs = Date.now() - generatedAt.getTime();
@@ -2204,9 +2213,17 @@
                 if (!shouldShowStatsMetaBar(result)) { bar.style.display = 'none'; return; }
 
                 updatedAt.textContent = formatStatsUpdatedAt(result.generatedAt);
-                badge.textContent = '统计异常';
-                badge.className = 'stats-meta-badge stats-meta-badge-bad';
-                badge.title = `对账日期 ${result.date || ''}，请核对 ledger / audit / potluck 口径`;
+                if (result.hourlyCoverage?.status === 'partial' && result.status === 'ok') {
+                    const requestCoverage = Number(result.hourlyCoverage.requestCount?.coverageRatio || 0) * 100;
+                    const tokenCoverage = Number(result.hourlyCoverage.totalTokens?.coverageRatio || 0) * 100;
+                    badge.textContent = '小时明细不完整';
+                    badge.className = 'stats-meta-badge';
+                    badge.title = `小时明细覆盖：请求 ${requestCoverage.toFixed(2)}%，Token ${tokenCoverage.toFixed(4)}%；日统计不受影响，未进行虚构分配`;
+                } else {
+                    badge.textContent = '统计异常';
+                    badge.className = 'stats-meta-badge stats-meta-badge-bad';
+                    badge.title = `对账日期 ${result.date || ''}，请核对 ledger / audit / potluck 口径`;
+                }
                 bar.style.display = 'flex';
             } catch {
                 bar.style.display = 'none';
@@ -2790,6 +2807,9 @@
                 const tokens = usageTokens(item);
                 const percent = Math.round((count / total) * 100);
                 const costHtml = item?.cost ? ` · ${formatDisplayCost(item.cost)}` : '';
+                const estimatedCostHtml = Number(item?.cost?.estimatedPriceTokens || 0) > 0
+                    ? ` <span class="cost-inline alt" title="${formatTokenCompact(item.cost.estimatedPriceTokens)} Tokens 使用${item.cost.estimationScope === 'provider-day' ? '同 Provider 当日' : '当日全局'}加权均价估算；价格版本 ${escapeHtml(item.cost.pricingVersion || 'unknown')}">均价估算</span>`
+                    : '';
                 const missingCostHtml = Number(item?.cost?.missingPriceTokens || 0) > 0
                     ? ` <span class="cost-inline alt" title="有 ${formatTokenCompact(item.cost.missingPriceTokens)} Tokens 缺失模型价格">缺失价格</span>`
                     : '';
@@ -2797,7 +2817,7 @@
                     <div class="distribution-item">
                         <div class="dist-info">
                             <span class="dist-name">${escapeHtml(name)}</span>
-                            <span class="dist-count">${formatNumber(count)} 次 / ${formatTokenCompact(tokens)} Tokens (${percent}%)${costHtml}${missingCostHtml}</span>
+                            <span class="dist-count">${formatNumber(count)} 次 / ${formatTokenCompact(tokens)} Tokens (${percent}%)${costHtml}${estimatedCostHtml}${missingCostHtml}</span>
                         </div>
                         <div class="dist-bar">
                             <div class="dist-fill" style="width: ${percent}%"></div>
@@ -2812,12 +2832,15 @@
                     sum.tokens += usageTokens(item[1]);
                     addCostBucket(sum.cost, item[1]?.cost);
                     return sum;
-                }, { count: 0, tokens: 0, cost: { actualUsd: 0, convertedUsd: 0, missingPriceTokens: 0 } });
+                }, { count: 0, tokens: 0, cost: { usd: 0, actualUsd: 0, estimatedUsd: 0, convertedUsd: 0, missingPriceTokens: 0, estimatedPriceTokens: 0 } });
                 const otherCount = other.count;
                 const otherTokens = other.tokens;
                 const otherPercent = Math.round((otherCount / total) * 100);
                 const otherCostHtml = other.cost.actualUsd > 0 || other.cost.convertedUsd > 0 || other.cost.missingPriceTokens > 0
                     ? ` · ${formatDisplayCost(other.cost)}`
+                    : '';
+                const otherEstimatedCostHtml = Number(other.cost.estimatedPriceTokens || 0) > 0
+                    ? ` <span class="cost-inline alt" title="${formatTokenCompact(other.cost.estimatedPriceTokens)} Tokens 使用加权均价估算">均价估算</span>`
                     : '';
                 const otherMissingCostHtml = Number(other.cost.missingPriceTokens || 0) > 0
                     ? ` <span class="cost-inline alt" title="有 ${formatTokenCompact(other.cost.missingPriceTokens)} Tokens 缺失模型价格">缺失价格</span>`
@@ -2826,7 +2849,7 @@
                     <div class="distribution-item">
                         <div class="dist-info">
                             <span class="dist-name" style="font-style: italic;">其他 (${sorted.length - maxItems} 个)</span>
-                            <span class="dist-count">${formatNumber(otherCount)} 次 / ${formatTokenCompact(otherTokens)} Tokens (${otherPercent}%)${otherCostHtml}${otherMissingCostHtml}</span>
+                            <span class="dist-count">${formatNumber(otherCount)} 次 / ${formatTokenCompact(otherTokens)} Tokens (${otherPercent}%)${otherCostHtml}${otherEstimatedCostHtml}${otherMissingCostHtml}</span>
                         </div>
                         <div class="dist-bar">
                             <div class="dist-fill" style="width: ${otherPercent}%; background: #94a3b8;"></div>

@@ -76,28 +76,45 @@ function compactMetadata(context = {}) {
 }
 
 export class RuntimeHookBridge {
-    constructor({ send, maxPending = 1000 }) {
+    constructor({ send, durableTransport = null, maxPending = 1000 }) {
         this.send = send;
+        this.durableTransport = durableTransport;
         this.pending = new Map();
         this.maxPending = Math.max(1, Number(maxPending) || 1);
         this.outbound = new Map();
         this.dropped = 0;
+        this.backpressured = 0;
     }
 
-    _send(message) {
-        if (this.outbound.size >= this.maxPending) {
-            this.dropped += 1;
-            return false;
-        }
+    async _send(message) {
         const eventId = message.eventId || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const outbound = { ...message, eventId };
-        this.outbound.set(eventId, outbound);
-        this.send(outbound);
+        const outbound = {
+            ...message,
+            eventId,
+            sourceWorkerId: process.env.RUNTIME_WORKER_ID || null,
+            createdAt: new Date().toISOString()
+        };
+        if (this.durableTransport) {
+            const durableEvent = JSON.parse(JSON.stringify(outbound));
+            for (const arg of durableEvent.args || []) {
+                if (arg?.potluckApiKey) {
+                    arg.potluckKeyHash = hashSecret(arg.potluckApiKey, 16);
+                    delete arg.potluckApiKey;
+                }
+            }
+            const durableResult = await this.durableTransport.publish(durableEvent);
+            if (durableResult?.streamId) outbound.streamId = durableResult.streamId;
+        }
+        if (this.outbound.size < this.maxPending) this.outbound.set(eventId, outbound);
+        else this.backpressured += 1;
+        this.send?.(outbound);
         return true;
     }
 
-    ack(eventId) {
-        return this.outbound.delete(eventId);
+    async ack(eventId) {
+        const deleted = this.outbound.delete(eventId);
+        await this.durableTransport?.acknowledge?.(eventId);
+        return deleted;
     }
 
     retryUnacked() {
@@ -105,7 +122,15 @@ export class RuntimeHookBridge {
     }
 
     snapshot() {
-        return { pending: this.outbound.size, dropped: this.dropped, maxPending: this.maxPending };
+        const oldestCreatedAt = [...this.outbound.values()].map(item => Date.parse(item.createdAt)).filter(Number.isFinite).sort()[0];
+        return {
+            pending: this.outbound.size,
+            dropped: this.dropped,
+            backpressured: this.backpressured,
+            maxPending: this.maxPending,
+            oldestPendingAgeMs: oldestCreatedAt ? Math.max(0, Date.now() - oldestCreatedAt) : 0,
+            ...(this.durableTransport?.snapshot?.() || {})
+        };
     }
 
     async handle(hookName, context = {}) {
@@ -158,22 +183,33 @@ export class RuntimeHookBridge {
         if (hookName === 'onContentGenerated') {
             const pending = this.pending.get(requestId) || { metadata: {}, usage: {}, hasImage: false };
             this.pending.delete(requestId);
-            const metadata = { ...pending.metadata, ...compactMetadata(context) };
-            this._send({
-                type: 'runtime_hook',
-                hookName: 'onUnaryResponse',
-                args: [{
-                    ...metadata,
-                    nativeResponse: { usage: toWireUsage(pending.usage) },
-                    clientResponse: pending.hasImage ? { data: [{ url: 'image://result' }] } : { usage: toWireUsage(pending.usage) }
-                }]
-            });
-            this._send({ type: 'runtime_hook', hookName, args: [metadata] });
+            const metadata = {
+                ...pending.metadata,
+                ...compactMetadata(context),
+                _runtimeUsage: toWireUsage(pending.usage),
+                _runtimeHasImage: pending.hasImage
+            };
+            await this._send({ type: 'runtime_hook', hookName, args: [metadata] });
             return;
         }
 
         if (hookName === 'onRequestCompleted') {
-            this._send({ type: 'runtime_hook', hookName, args: [compactMetadata(context)] });
+            await this._send({ type: 'runtime_hook', hookName, args: [compactMetadata(context)] });
         }
+    }
+
+    async drain({ timeoutMs = 30000, pollIntervalMs = 25 } = {}) {
+        const deadline = Date.now() + timeoutMs;
+        do {
+            this.retryUnacked();
+            await this.durableTransport?.flushSpool?.();
+            const snapshot = this.snapshot();
+            if (snapshot.pending === 0 && Number(snapshot.spooled || 0) === 0) {
+                return { drained: true, pending: 0, spooled: 0 };
+            }
+            await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+        } while (Date.now() < deadline);
+        const snapshot = this.snapshot();
+        return { drained: false, pending: snapshot.pending, spooled: Number(snapshot.spooled || 0) };
     }
 }

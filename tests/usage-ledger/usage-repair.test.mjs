@@ -587,3 +587,26 @@ test('createRepairBundle blocks unsafe old-provider attribution when candidate d
   assert.equal(result.report.days[0].eligible, false);
   assert.equal(result.report.days[0].nonDecreasing.modelProviderAttribution, false);
 });
+
+test('current Beijing date repair requires an explicit stopped-service override', async () => {
+  const fixture = await makeEligibleRepairFixture();
+  const blocked = await createRepairBundle({
+    base: fixture.base,
+    from: '2026-07-21',
+    to: '2026-07-21',
+    outDir: path.join(fixture.base, 'current-date-blocked'),
+    now: new Date('2026-07-21T12:00:00.000Z'),
+  });
+  assert.equal(blocked.report.days[0].eligible, false);
+
+  const allowed = await createRepairBundle({
+    base: fixture.base,
+    from: '2026-07-21',
+    to: '2026-07-21',
+    outDir: path.join(fixture.base, 'current-date-allowed'),
+    now: new Date('2026-07-21T12:00:00.000Z'),
+    allowCurrentDate: true,
+  });
+  assert.equal(allowed.report.days[0].eligible, true);
+  assert.equal(allowed.report.currentDateOverride, true);
+});

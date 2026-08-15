@@ -59,6 +59,7 @@ export class RedisRespClient {
         this.database = Number(options.database || 0);
         this.useTls = options.tls === true;
         this.connectTimeoutMs = Number(options.connectTimeoutMs || 2000);
+        this.commandTimeoutMs = Number(options.commandTimeoutMs || 5000);
         this.socket = null;
         this.buffer = Buffer.alloc(0);
         this.pending = [];
@@ -73,21 +74,40 @@ export class RedisRespClient {
             const socket = this.useTls
                 ? tls.connect({ host: this.host, port: this.port })
                 : net.createConnection({ host: this.host, port: this.port });
-            const timeout = setTimeout(() => socket.destroy(new Error('Redis connection timeout')), this.connectTimeoutMs);
+            let settled = false;
+            const rejectConnection = error => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeout);
+                if (this.socket === socket) this.socket = null;
+                reject(error);
+            };
+            const timeout = setTimeout(() => {
+                const error = new Error('Redis connection timeout');
+                rejectConnection(error);
+                socket.destroy(error);
+            }, this.connectTimeoutMs);
             socket.setNoDelay(true);
             socket.on('data', chunk => this._onData(chunk));
-            socket.on('error', error => this._failPending(error));
-            socket.on('close', () => { if (this.socket === socket) this.socket = null; });
+            socket.on('error', error => {
+                this._failPending(error);
+                rejectConnection(error);
+            });
+            socket.on('close', () => {
+                if (this.socket === socket) this.socket = null;
+                rejectConnection(new Error('Redis connection closed before ready'));
+            });
             socket.once(this.useTls ? 'secureConnect' : 'connect', async () => {
                 clearTimeout(timeout);
                 this.socket = socket;
                 try {
                     if (this.password) await this.command(['AUTH', this.password], { skipConnect: true });
                     if (this.database) await this.command(['SELECT', this.database], { skipConnect: true });
+                    settled = true;
                     resolve();
                 } catch (error) {
+                    rejectConnection(error);
                     socket.destroy();
-                    reject(error);
                 }
             });
         }).finally(() => { this.connecting = null; });
@@ -120,12 +140,34 @@ export class RedisRespClient {
         if (!options.skipConnect) await this.connect();
         if (!this.socket || this.socket.destroyed) throw new Error('Redis socket is unavailable');
         return new Promise((resolve, reject) => {
-            this.pending.push({ resolve, reject });
+            const timeoutMs = Math.max(1, Number(options.timeoutMs ?? this.commandTimeoutMs) || this.commandTimeoutMs);
+            let timer = null;
+            let settled = false;
+            const pending = {
+                resolve: value => {
+                    if (settled) return;
+                    settled = true;
+                    if (timer) clearTimeout(timer);
+                    resolve(value);
+                },
+                reject: error => {
+                    if (settled) return;
+                    settled = true;
+                    if (timer) clearTimeout(timer);
+                    reject(error);
+                }
+            };
+            this.pending.push(pending);
+            timer = setTimeout(() => {
+                const error = new Error(`Redis command timeout after ${timeoutMs}ms`);
+                this._failPending(error);
+                this.socket?.destroy(error);
+            }, timeoutMs);
             this.socket.write(encodeCommand(parts), error => {
                 if (!error) return;
-                const index = this.pending.findIndex(item => item.resolve === resolve);
+                const index = this.pending.indexOf(pending);
                 if (index >= 0) this.pending.splice(index, 1);
-                reject(error);
+                pending.reject(error);
             });
         });
     }

@@ -37,4 +37,36 @@ describe('RedisRespClient', () => {
             .resolves.toBe('{"ok":true}');
         await client.close();
     });
+
+    test('rejects the connection promise when Redis is unavailable', async () => {
+        const unavailable = net.createServer();
+        await new Promise(resolve => unavailable.listen(0, '127.0.0.1', resolve));
+        const unavailablePort = unavailable.address().port;
+        await new Promise(resolve => unavailable.close(resolve));
+
+        const client = new RedisRespClient({
+            host: '127.0.0.1',
+            port: unavailablePort,
+            connectTimeoutMs: 50
+        });
+        const didNotSettle = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('connect did not settle')), 500);
+        });
+
+        await expect(Promise.race([client.command(['PING']), didNotSettle]))
+            .rejects.toThrow(/ECONNREFUSED|Redis connection/i);
+        await client.close();
+    });
+
+    test('times out a command when an established Redis socket stops responding', async () => {
+        const client = new RedisRespClient({
+            host: '127.0.0.1',
+            port,
+            connectTimeoutMs: 1000,
+            commandTimeoutMs: 50
+        });
+
+        await expect(client.command(['SILENT'])).rejects.toThrow(/Redis command timeout/i);
+        await client.close();
+    });
 });

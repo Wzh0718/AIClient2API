@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 
-import { DEFAULT_CONVERSION_MODEL, PRICING_VERSION, estimateUsageCost, normalizeConversionModel } from './cost-estimator.js';
+import { buildAveragePricingProfile, DEFAULT_CONVERSION_MODEL, PRICING_VERSION, estimateUsageCost, normalizeConversionModel } from './cost-estimator.js';
 
 function toNumber(value) {
     const num = Number(value);
@@ -27,23 +27,32 @@ function createBucket() {
         maxRpm: 0,
         maxTps: 0,
         cost: {
+            usd: 0,
             actualUsd: 0,
+            estimatedUsd: 0,
             convertedUsd: 0,
-            missingPriceTokens: 0
+            missingPriceTokens: 0,
+            estimatedPriceTokens: 0,
+            _pricingSources: new Set(),
+            _estimationScopes: new Set()
         }
     };
 }
 
-function addRowToBucket(bucket, row) {
+function addRowToBucket(bucket, row, currentCost = estimateUsageCost(row.usage || {}, row.model || 'unknown')) {
     const usage = row.usage || {};
-    const currentCost = estimateUsageCost(usage, row.model || 'unknown');
     bucket.requestCount += toNumber(usage.requestCount);
     bucket.promptTokens += toNumber(usage.promptTokens);
     bucket.completionTokens += toNumber(usage.completionTokens);
     bucket.totalTokens += toNumber(usage.totalTokens);
     bucket.cachedTokens += toNumber(usage.cachedTokens);
-    bucket.cost.actualUsd += currentCost.usd;
+    bucket.cost.usd += currentCost.usd;
+    bucket.cost.actualUsd += currentCost.actualUsd;
+    bucket.cost.estimatedUsd += currentCost.estimatedUsd;
     bucket.cost.missingPriceTokens += currentCost.missingPriceTokens;
+    bucket.cost.estimatedPriceTokens += currentCost.estimatedPriceTokens;
+    if (currentCost.pricingSource) bucket.cost._pricingSources.add(currentCost.pricingSource);
+    if (currentCost.estimationScope) bucket.cost._estimationScopes.add(currentCost.estimationScope);
 }
 
 function ensureBucket(map, name) {
@@ -60,8 +69,45 @@ function finalizeBucket(bucket, conversionModel) {
     }, conversionModel).usd;
     bucket.cost.conversionModel = conversionModel;
     bucket.cost.pricingVersion = PRICING_VERSION;
+    const pricingSources = [...bucket.cost._pricingSources];
+    bucket.cost.pricingSource = pricingSources.includes('estimated-average')
+        ? (pricingSources.some(source => source !== 'estimated-average') ? 'mixed' : 'estimated-average')
+        : (pricingSources.includes('missing') ? (pricingSources.length > 1 ? 'mixed' : 'missing') : 'official');
+    const estimationScopes = [...bucket.cost._estimationScopes];
+    if (estimationScopes.length === 1) bucket.cost.estimationScope = estimationScopes[0];
+    else if (estimationScopes.length > 1) bucket.cost.estimationScope = 'mixed';
+    delete bucket.cost._pricingSources;
+    delete bucket.cost._estimationScopes;
     bucket.cacheHitRatio = bucket.promptTokens > 0 ? bucket.cachedTokens / bucket.promptTokens : 0;
     return bucket;
+}
+
+function addUsage(target, usage = {}) {
+    for (const field of ['promptTokens', 'cachedTokens', 'completionTokens', 'reasoningTokens', 'totalTokens']) {
+        target[field] = toNumber(target[field]) + toNumber(usage[field]);
+    }
+}
+
+function addPricingSample(groups, key, row) {
+    if (!groups.has(key)) groups.set(key, {});
+    const models = groups.get(key);
+    const model = row.model || 'unknown';
+    if (!models[model]) models[model] = {};
+    addUsage(models[model], row.usage);
+}
+
+function buildPricingProfiles(rows) {
+    const providerSamples = new Map();
+    const globalSamples = new Map();
+    for (const row of rows) {
+        const date = row.date || 'unknown-date';
+        const provider = row.provider || 'unknown';
+        addPricingSample(providerSamples, `${date}\u0000${provider}`, row);
+        addPricingSample(globalSamples, date, row);
+    }
+    const providerProfiles = new Map([...providerSamples].map(([key, models]) => [key, buildAveragePricingProfile(models)]));
+    const globalProfiles = new Map([...globalSamples].map(([key, models]) => [key, buildAveragePricingProfile(models)]));
+    return { providerProfiles, globalProfiles };
 }
 
 function ensureAccount(accounts, row) {
@@ -101,6 +147,8 @@ export function createLedgerRangeAggregator({
     const accounts = {};
     const daily = {};
     const keySummaries = {};
+    const rows = [];
+    let cachedResult = null;
 
     function ensureKeySummary(keyId) {
         if (!keySummaries[keyId]) {
@@ -117,33 +165,45 @@ export function createLedgerRangeAggregator({
     return {
         addRow(row) {
             if (!row || typeof row !== 'object') return;
-            addRowToBucket(summary, row);
-
-            const providerName = row.provider || 'unknown';
-            addRowToBucket(ensureBucket(providers, providerName), row);
-
-            const modelName = row.model || 'unknown';
-            addRowToBucket(ensureBucket(models, modelName), row);
-
-            if (row.date) addRowToBucket(ensureBucket(daily, row.date), row);
-
-            const account = ensureAccount(accounts, row);
-            addRowToBucket(account.summary, row);
-            if (!account.models[modelName]) account.models[modelName] = createBucket();
-            addRowToBucket(account.models[modelName], row);
-
-            if (includeKeySummaries && keyHashToId instanceof Map) {
-                const keyId = keyHashToId.get(row.keyHash);
-                if (keyId) {
-                    const keySummary = ensureKeySummary(keyId);
-                    addRowToBucket(keySummary.summary, row);
-                    addRowToBucket(ensureBucket(keySummary.providers, providerName), row);
-                    if (includeKeyModels) addRowToBucket(ensureBucket(keySummary.models, modelName), row);
-                    if (row.date) addRowToBucket(ensureBucket(keySummary.daily, row.date), row);
-                }
-            }
+            rows.push(row);
         },
         result() {
+            if (cachedResult) return cachedResult;
+            const { providerProfiles, globalProfiles } = buildPricingProfiles(rows);
+            for (const row of rows) {
+                const date = row.date || 'unknown-date';
+                const providerName = row.provider || 'unknown';
+                const providerProfile = providerProfiles.get(`${date}\u0000${providerName}`);
+                const globalProfile = globalProfiles.get(date);
+                const averageProfile = providerProfile || globalProfile;
+                const averageScope = providerProfile ? 'provider-day' : 'global-day';
+                const currentCost = estimateUsageCost(row.usage || {}, row.model || 'unknown', { averageProfile, averageScope });
+
+                addRowToBucket(summary, row, currentCost);
+
+                addRowToBucket(ensureBucket(providers, providerName), row, currentCost);
+
+                const modelName = row.model || 'unknown';
+                addRowToBucket(ensureBucket(models, modelName), row, currentCost);
+
+                if (row.date) addRowToBucket(ensureBucket(daily, row.date), row, currentCost);
+
+                const account = ensureAccount(accounts, row);
+                addRowToBucket(account.summary, row, currentCost);
+                if (!account.models[modelName]) account.models[modelName] = createBucket();
+                addRowToBucket(account.models[modelName], row, currentCost);
+
+                if (includeKeySummaries && keyHashToId instanceof Map) {
+                    const keyId = keyHashToId.get(row.keyHash);
+                    if (keyId) {
+                        const keySummary = ensureKeySummary(keyId);
+                        addRowToBucket(keySummary.summary, row, currentCost);
+                        addRowToBucket(ensureBucket(keySummary.providers, providerName), row, currentCost);
+                        if (includeKeyModels) addRowToBucket(ensureBucket(keySummary.models, modelName), row, currentCost);
+                        if (row.date) addRowToBucket(ensureBucket(keySummary.daily, row.date), row, currentCost);
+                    }
+                }
+            }
             finalizeBucket(summary, normalizedConversionModel);
             for (const bucket of Object.values(providers)) finalizeBucket(bucket, normalizedConversionModel);
             for (const bucket of Object.values(models)) finalizeBucket(bucket, normalizedConversionModel);
@@ -163,7 +223,7 @@ export function createLedgerRangeAggregator({
                 }
                 if (!includeKeyModels) delete keySummary.models;
             }
-            return {
+            cachedResult = {
                 summary,
                 providers,
                 models,
@@ -173,6 +233,7 @@ export function createLedgerRangeAggregator({
                 conversionModel: normalizedConversionModel,
                 pricingVersion: PRICING_VERSION
             };
+            return cachedResult;
         }
     };
 }

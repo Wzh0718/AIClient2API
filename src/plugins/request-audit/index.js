@@ -314,7 +314,7 @@ async function drainExecutionRawCaptureQueue() {
     while (executionRawCaptureFlushPromise) await executionRawCaptureFlushPromise;
 }
 
-async function drainAuditQueue() {
+export async function drainAuditQueue() {
     while (flushPromise || auditQueue.length > 0) {
         if (!flushPromise && auditQueue.length > 0) {
             scheduleAuditFlush();
@@ -615,6 +615,13 @@ const requestAuditPlugin = {
             if (!requestId) return;
 
             try {
+                if (context._runtimeUsage) setPendingUsage(requestId, extractUsage(context._runtimeUsage));
+                if (context._runtimeHasImage === true) {
+                    const entry = pendingUsage.get(requestId) || { usage: normalizeUsage({}), updatedAt: Date.now() };
+                    entry.hasImageResult = true;
+                    entry.updatedAt = Date.now();
+                    pendingUsage.set(requestId, entry);
+                }
                 if (context._requestAuditLifecycle === true) {
                     setPendingUsage(requestId, {});
                     pendingAuditContexts.set(requestId, { ...context, requestId });

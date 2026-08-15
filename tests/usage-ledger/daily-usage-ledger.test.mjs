@@ -8,6 +8,8 @@ import {
   hashSecret,
   makeKeyRef,
   summarizeAggregationResult,
+  buildUniqueEmailProviderMap,
+  resolveAuditProvider,
 } from '../../scripts/usage-ledger/daily-usage-ledger.mjs';
 
 test('potluck daily rows canonicalize account email and preserve original key', () => {
@@ -62,7 +64,7 @@ test('potluck daily rows canonicalize account email and preserve original key', 
   assert.equal(rows[0].usage.requestCount, 2);
   assert.equal(rows[0].usage.totalTokens, 1050);
   assert.ok(rows[0].cost.actualUsd > 0);
-  assert.equal(rows[0].pricingVersion, 'official-2026-07-12-r1');
+  assert.equal(rows[0].pricingVersion, 'official-2026-08-01-r1');
 });
 
 test('potluck daily rows price GPT-5.6 fast models with the configured multiplier', () => {
@@ -97,7 +99,51 @@ test('potluck daily rows price GPT-5.6 fast models with the configured multiplie
 
   assert.equal(row.cost.missingPriceTokens, 0);
   assert.ok(Math.abs(row.cost.actualUsd - normalCost * 2.5) < 1e-12);
-  assert.equal(row.pricingVersion, 'official-2026-07-12-r1');
+  assert.equal(row.pricingVersion, 'official-2026-08-01-r1');
+});
+
+test('potluck daily rows estimate unknown models from same-provider daily text usage', () => {
+  const knownUsage = {
+    requestCount: 1,
+    promptTokens: 1_000_000,
+    cachedTokens: 200_000,
+    completionTokens: 100_000,
+    totalTokens: 1_100_000,
+  };
+  const unknownUsage = {
+    requestCount: 1,
+    promptTokens: 1000,
+    cachedTokens: 200,
+    completionTokens: 100,
+    totalTokens: 1100,
+  };
+  const store = {
+    keys: {
+      average_price_key: {
+        usageHistory: {
+          '2026-08-14': {
+            accounts: {
+              'openai-codex-oauth:user@example.com': {
+                provider: 'openai-codex-oauth',
+                accountEmail: 'user@example.com',
+                models: { 'gpt-5.4-mini': knownUsage, unknown: unknownUsage },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const rows = buildDailyRowsFromPotluck(store, { from: '2026-08-14', to: '2026-08-14' });
+  const unknown = rows.find(row => row.model === 'unknown');
+  assert.equal(unknown.cost.actualUsd, 0);
+  assert.ok(unknown.cost.estimatedUsd > 0);
+  assert.equal(unknown.cost.usd, unknown.cost.estimatedUsd);
+  assert.equal(unknown.cost.estimatedPriceTokens, 1100);
+  assert.equal(unknown.cost.missingPriceTokens, 0);
+  assert.equal(unknown.cost.pricingSource, 'estimated-average');
+  assert.equal(unknown.cost.estimationScope, 'provider-day');
 });
 
 test('potluck hourly rows preserve hour while using the same key reference', () => {
@@ -349,5 +395,22 @@ test('summarizeAggregationResult omits raw rows from CLI output', () => {
     hourlyRows: 1,
   });
   assert.equal(JSON.stringify(summary).includes('example_secret_original_value'), false);
+});
+
+test('audit provider fallback uses only an unambiguous email mapping', () => {
+  const store = {
+    keys: {
+      key_a: { usageHistory: { '2026-08-14': { accounts: {
+        'openai-codex-oauth:user@example.com': { provider: 'openai-codex-oauth', accountEmail: 'user@example.com' },
+        'gemini-antigravity:other@example.com': { provider: 'gemini-antigravity', accountEmail: 'other@example.com' },
+      } } } },
+      key_b: { usageHistory: { '2026-08-14': { accounts: {
+        'gemini-antigravity:user@example.com': { provider: 'gemini-antigravity', accountEmail: 'user@example.com' },
+      } } } },
+    },
+  };
+  const mapping = buildUniqueEmailProviderMap(store);
+  assert.equal(resolveAuditProvider({ request: { toProvider: 'unknown' }, account: { accountEmail: 'other@example.com' } }, mapping), 'gemini-antigravity');
+  assert.equal(resolveAuditProvider({ request: { toProvider: 'unknown' }, account: { accountEmail: 'user@example.com' } }, mapping), 'unknown');
 });
 

@@ -207,14 +207,110 @@ function canonicalAccount(account = {}, fallbackProvider = 'unknown') {
   };
 }
 
-function estimateUsageCost(usage, model) {
+function buildAveragePricingProfile(models = {}) {
+  const totals = {
+    billableInputTokens: 0, cachedTokens: 0, outputTokens: 0, totalTokens: 0,
+    inputUsd: 0, cachedInputUsd: 0, outputUsd: 0, usd: 0,
+  };
+  let sampleModelCount = 0;
+  for (const [model, usage] of Object.entries(models || {})) {
+    if (!isTextPricingModel(model)) continue;
+    const resolvedModel = resolvePricedModel(model);
+    const pricing = PRICE_PER_MILLION[resolvedModel.pricedModel];
+    if (!pricing) continue;
+    const normalized = normalizeUsage(usage);
+    if (normalized.totalTokens <= 0) continue;
+    const cachedTokens = Math.min(normalized.promptTokens, normalized.cachedTokens);
+    const billableInputTokens = Math.max(0, normalized.promptTokens - cachedTokens);
+    const inputUsd = billableInputTokens * pricing.input * resolvedModel.multiplier / 1_000_000;
+    const cachedInputUsd = cachedTokens * pricing.cachedInput * resolvedModel.multiplier / 1_000_000;
+    const outputUsd = normalized.completionTokens * pricing.output * resolvedModel.multiplier / 1_000_000;
+    totals.billableInputTokens += billableInputTokens;
+    totals.cachedTokens += cachedTokens;
+    totals.outputTokens += normalized.completionTokens;
+    totals.totalTokens += normalized.totalTokens;
+    totals.inputUsd += inputUsd;
+    totals.cachedInputUsd += cachedInputUsd;
+    totals.outputUsd += outputUsd;
+    totals.usd += inputUsd + cachedInputUsd + outputUsd;
+    sampleModelCount += 1;
+  }
+  if (sampleModelCount === 0 || totals.totalTokens <= 0 || totals.usd <= 0) return null;
+  return {
+    input: totals.billableInputTokens > 0 ? totals.inputUsd * 1_000_000 / totals.billableInputTokens : null,
+    cachedInput: totals.cachedTokens > 0 ? totals.cachedInputUsd * 1_000_000 / totals.cachedTokens : null,
+    output: totals.outputTokens > 0 ? totals.outputUsd * 1_000_000 / totals.outputTokens : null,
+    effective: totals.usd * 1_000_000 / totals.totalTokens,
+    sampleTokens: totals.totalTokens,
+    sampleModelCount,
+  };
+}
+
+export function buildUniqueEmailProviderMap(store = {}) {
+  const providersByEmail = new Map();
+  for (const keyData of Object.values(store.keys || {})) {
+    for (const day of Object.values(keyData?.usageHistory || {})) {
+      for (const account of Object.values(day?.accounts || {})) {
+        const email = normalizeEmail(account?.accountEmail || account?.accountIdentity);
+        const provider = account?.provider;
+        if (!email || !provider || provider === 'unknown') continue;
+        if (!providersByEmail.has(email)) providersByEmail.set(email, new Set());
+        providersByEmail.get(email).add(provider);
+      }
+    }
+  }
+  return new Map([...providersByEmail]
+    .filter(([, providers]) => providers.size === 1)
+    .map(([email, providers]) => [email, [...providers][0]]));
+}
+
+export function resolveAuditProvider(event = {}, providerByEmail = new Map()) {
+  const provider = event.request?.toProvider || event.request?.fromProvider || 'unknown';
+  if (provider !== 'unknown') return provider;
+  const email = normalizeEmail(event.account?.accountEmail);
+  return (email && providerByEmail.get(email)) || 'unknown';
+}
+
+function estimateUsageCost(usage, model, { averageProfile = null, averageScope = null } = {}) {
   const resolvedModel = resolvePricedModel(model);
   const pricing = PRICE_PER_MILLION[resolvedModel.pricedModel];
   if (!pricing) {
+    const normalized = normalizeUsage(usage);
+    if (averageProfile?.effective > 0 && normalized.totalTokens > 0) {
+      const cachedTokens = Math.min(normalized.promptTokens, normalized.cachedTokens);
+      const billableInputTokens = Math.max(0, normalized.promptTokens - cachedTokens);
+      const classifiedTokens = billableInputTokens + cachedTokens + normalized.completionTokens;
+      const fallback = averageProfile.effective;
+      const estimatedUsd = classifiedTokens > 0
+        ? (
+          billableInputTokens * (averageProfile.input || fallback) +
+          cachedTokens * (averageProfile.cachedInput || fallback) +
+          normalized.completionTokens * (averageProfile.output || fallback) +
+          Math.max(0, normalized.totalTokens - classifiedTokens) * fallback
+        ) / 1_000_000
+        : normalized.totalTokens * fallback / 1_000_000;
+      return {
+        usd: estimatedUsd,
+        actualUsd: 0,
+        estimatedUsd,
+        estimatedPriceTokens: normalized.totalTokens,
+        missingPriceTokens: 0,
+        pricingModel: resolvedModel.displayModel,
+        pricingSource: 'estimated-average',
+        estimationScope: averageScope,
+        estimationMethod: `${averageScope}-weighted-average`,
+        averageSampleTokens: averageProfile.sampleTokens,
+        averageSampleModelCount: averageProfile.sampleModelCount,
+      };
+    }
     return {
+      usd: 0,
       actualUsd: 0,
-      missingPriceTokens: normalizeUsage(usage).totalTokens,
+      estimatedUsd: 0,
+      estimatedPriceTokens: 0,
+      missingPriceTokens: normalized.totalTokens,
       pricingModel: resolvedModel.displayModel,
+      pricingSource: 'missing',
     };
   }
 
@@ -228,10 +324,47 @@ function estimateUsageCost(usage, model) {
   ) / 1_000_000) * resolvedModel.multiplier;
 
   return {
+    usd: actualUsd,
     actualUsd,
+    estimatedUsd: 0,
+    estimatedPriceTokens: 0,
     missingPriceTokens: 0,
     pricingModel: resolvedModel.displayModel,
+    pricingSource: pricing.source,
   };
+}
+
+function addUsageToModelMap(models, model, usage) {
+  if (!models[model]) models[model] = emptyUsage();
+  addUsage(models[model], usage);
+}
+
+function applyAveragePricing(rows) {
+  const providerSamples = new Map();
+  const globalSamples = new Map();
+  for (const row of rows) {
+    const date = row.date || 'unknown-date';
+    const provider = row.provider || 'unknown';
+    const providerKey = `${date}\u0000${provider}`;
+    if (!providerSamples.has(providerKey)) providerSamples.set(providerKey, {});
+    if (!globalSamples.has(date)) globalSamples.set(date, {});
+    addUsageToModelMap(providerSamples.get(providerKey), row.model || 'unknown', row.usage);
+    addUsageToModelMap(globalSamples.get(date), row.model || 'unknown', row.usage);
+  }
+  const providerProfiles = new Map([...providerSamples].map(([key, models]) => [key, buildAveragePricingProfile(models)]));
+  const globalProfiles = new Map([...globalSamples].map(([key, models]) => [key, buildAveragePricingProfile(models)]));
+  return rows.map(row => {
+    const date = row.date || 'unknown-date';
+    const providerProfile = providerProfiles.get(`${date}\u0000${row.provider || 'unknown'}`);
+    const globalProfile = globalProfiles.get(date);
+    const averageProfile = providerProfile || globalProfile;
+    const averageScope = providerProfile ? 'provider-day' : 'global-day';
+    return {
+      ...row,
+      cost: estimateUsageCost(row.usage, row.model, { averageProfile, averageScope }),
+      pricingVersion: PRICING_VERSION,
+    };
+  });
 }
 
 function baseRow({
@@ -263,9 +396,13 @@ function baseRow({
     model: normalizeModelName(model),
     usage: normalizedUsage,
     cost: {
+      usd: cost.usd,
       actualUsd: cost.actualUsd,
+      estimatedUsd: cost.estimatedUsd,
       missingPriceTokens: cost.missingPriceTokens,
+      estimatedPriceTokens: cost.estimatedPriceTokens,
       pricingModel: cost.pricingModel,
+      pricingSource: cost.pricingSource,
     },
     pricingVersion: PRICING_VERSION,
   };
@@ -290,17 +427,20 @@ function mergeRows(rows) {
       grouped.set(key, {
         ...row,
         usage: emptyUsage(),
-        cost: { actualUsd: 0, missingPriceTokens: 0, pricingModel: row.cost?.pricingModel },
+        cost: { usd: 0, actualUsd: 0, estimatedUsd: 0, missingPriceTokens: 0, estimatedPriceTokens: 0, pricingModel: row.cost?.pricingModel },
         providerUuids: [...row.providerUuids],
       });
     }
     const target = grouped.get(key);
     addUsage(target.usage, row.usage);
     target.providerUuids = [...new Set([...target.providerUuids, ...row.providerUuids])];
+    target.cost.usd += toNumber(row.cost.usd);
     target.cost.actualUsd += row.cost.actualUsd;
+    target.cost.estimatedUsd += toNumber(row.cost.estimatedUsd);
     target.cost.missingPriceTokens += row.cost.missingPriceTokens;
+    target.cost.estimatedPriceTokens += toNumber(row.cost.estimatedPriceTokens);
   }
-  return [...grouped.values()].sort((a, b) => rowGroupKey(a).localeCompare(rowGroupKey(b)));
+  return applyAveragePricing([...grouped.values()].sort((a, b) => rowGroupKey(a).localeCompare(rowGroupKey(b))));
 }
 
 function rowsFromAccounts(accounts = {}, { date, hour = null, source, keyRef }) {
@@ -424,7 +564,7 @@ export function buildHourlyRowsFromPotluck(store = {}, range = {}) {
 function auditEventToRows(event, options = {}) {
   const date = event.beijingDate || String(event.timestamp || '').slice(0, 10);
   const hour = event.beijingHour || '00';
-  const provider = event.request?.toProvider || event.request?.fromProvider || 'unknown';
+  const provider = resolveAuditProvider(event, options.providerByEmail);
   const accountRecord = {
     provider,
     providerUuid: event.account?.providerUuidHash || event.account?.providerUuid || event.account?.accountEmail || null,
@@ -480,7 +620,7 @@ export function aggregateAuditEvents(events = [], range = {}) {
       seen.add(dedupeKey);
     }
 
-    const rows = auditEventToRows(event, { keyLookup: range.keyLookup });
+    const rows = auditEventToRows(event, { keyLookup: range.keyLookup, providerByEmail: range.providerByEmail });
     dailyRows.push(...rows.daily);
     hourlyRows.push(...rows.hourly);
   }
@@ -505,13 +645,16 @@ export function summarizeAggregationResult(result = {}) {
 }
 
 export function summarizeLedgerRows(rows = []) {
-  const summary = { requestCount: 0, totalTokens: 0, actualUsd: 0, missingPriceTokens: 0, rowCount: rows.length };
+  const summary = { requestCount: 0, totalTokens: 0, usd: 0, actualUsd: 0, estimatedUsd: 0, missingPriceTokens: 0, estimatedPriceTokens: 0, rowCount: rows.length };
   for (const row of rows) {
     const usage = normalizeUsage(row.usage || {});
     summary.requestCount += usage.requestCount;
     summary.totalTokens += usage.totalTokens;
+    summary.usd += toNumber(row.cost?.usd ?? (toNumber(row.cost?.actualUsd) + toNumber(row.cost?.estimatedUsd)));
     summary.actualUsd += toNumber(row.cost?.actualUsd);
+    summary.estimatedUsd += toNumber(row.cost?.estimatedUsd);
     summary.missingPriceTokens += toNumber(row.cost?.missingPriceTokens);
+    summary.estimatedPriceTokens += toNumber(row.cost?.estimatedPriceTokens);
   }
   return summary;
 }
@@ -550,6 +693,7 @@ function compareSummaries(pair, left, right, thresholdRatio) {
 export function reconcileDay({
   date,
   ledgerSummary = null,
+  hourlySummary = null,
   auditSummary = null,
   potluckSummary = null,
   thresholdRatio = 0.005,
@@ -574,6 +718,33 @@ export function reconcileDay({
   const allAvailable = Object.values(sources).every(source => source.available);
   const anyExceeded = comparisons.some(comparison => comparison.exceeded);
   const status = anyExceeded ? 'deviation' : (allAvailable ? 'ok' : 'partial');
+  const hourlyCoverage = ledgerSummary === null || hourlySummary === null
+    ? { status: 'unavailable', syntheticAllocation: false }
+    : {
+        status: (
+          toNumber(ledgerSummary.requestCount) === toNumber(hourlySummary.requestCount) &&
+          toNumber(ledgerSummary.totalTokens) === toNumber(hourlySummary.totalTokens)
+        ) ? 'complete' : 'partial',
+        requestCount: {
+          daily: toNumber(ledgerSummary.requestCount),
+          hourly: toNumber(hourlySummary.requestCount),
+          delta: Math.abs(toNumber(ledgerSummary.requestCount) - toNumber(hourlySummary.requestCount)),
+          unattributed: Math.max(0, toNumber(ledgerSummary.requestCount) - toNumber(hourlySummary.requestCount)),
+          coverageRatio: toNumber(ledgerSummary.requestCount) > 0
+            ? Math.min(1, toNumber(hourlySummary.requestCount) / toNumber(ledgerSummary.requestCount))
+            : 1,
+        },
+        totalTokens: {
+          daily: toNumber(ledgerSummary.totalTokens),
+          hourly: toNumber(hourlySummary.totalTokens),
+          delta: Math.abs(toNumber(ledgerSummary.totalTokens) - toNumber(hourlySummary.totalTokens)),
+          unattributed: Math.max(0, toNumber(ledgerSummary.totalTokens) - toNumber(hourlySummary.totalTokens)),
+          coverageRatio: toNumber(ledgerSummary.totalTokens) > 0
+            ? Math.min(1, toNumber(hourlySummary.totalTokens) / toNumber(ledgerSummary.totalTokens))
+            : 1,
+        },
+        syntheticAllocation: false,
+      };
 
   return {
     schemaVersion: 1,
@@ -583,6 +754,7 @@ export function reconcileDay({
     thresholdRatio,
     pricingVersion: PRICING_VERSION,
     sources,
+    hourlyCoverage,
     comparisons,
   };
 }
@@ -1066,25 +1238,29 @@ function addRepairRowsToGroup(grouped, rows) {
       grouped.set(key, {
         ...row,
         usage: emptyUsage(),
-        cost: { actualUsd: 0, missingPriceTokens: 0, pricingModel: row.cost?.pricingModel },
+        cost: { usd: 0, actualUsd: 0, estimatedUsd: 0, missingPriceTokens: 0, estimatedPriceTokens: 0, pricingModel: row.cost?.pricingModel },
         providerUuids: [...row.providerUuids],
       });
     }
     const target = grouped.get(key);
     addUsage(target.usage, row.usage);
     target.providerUuids = [...new Set([...target.providerUuids, ...row.providerUuids])];
+    target.cost.usd += toNumber(row.cost.usd);
     target.cost.actualUsd += row.cost.actualUsd;
+    target.cost.estimatedUsd += toNumber(row.cost.estimatedUsd);
     target.cost.missingPriceTokens += row.cost.missingPriceTokens;
+    target.cost.estimatedPriceTokens += toNumber(row.cost.estimatedPriceTokens);
   }
 }
 
 function finishRepairRows(grouped) {
-  return [...grouped.values()].sort((left, right) => rowGroupKey(left).localeCompare(rowGroupKey(right)));
+  return applyAveragePricing([...grouped.values()].sort((left, right) => rowGroupKey(left).localeCompare(rowGroupKey(right))));
 }
 
 function createRepairCandidateAccumulator(potluckStore) {
   const byHash = buildRepairKeyLookup(potluckStore);
   const ledgerKeyLookup = buildKeyLookup(potluckStore);
+  const providerByEmail = buildUniqueEmailProviderMap(potluckStore);
   const potluckDaysByKey = {};
   const modelDays = {};
   const modelProviderDays = {};
@@ -1094,6 +1270,10 @@ function createRepairCandidateAccumulator(potluckStore) {
   const hourlyRows = new Map();
 
   function add(event) {
+    const resolvedProvider = resolveAuditProvider(event, providerByEmail);
+    if (resolvedProvider !== 'unknown' && (event.request?.toProvider || event.request?.fromProvider || 'unknown') === 'unknown') {
+      event.request = { ...(event.request || {}), toProvider: resolvedProvider };
+    }
     const date = event.beijingDate;
     const modelDay = ensureRepairDay(modelDays, date);
     addRepairEventToDay(modelDay, event);
@@ -1282,7 +1462,7 @@ async function buildRepairBaseline({
   };
 }
 
-export async function createRepairBundle({ base, from, to, outDir, now = new Date() }) {
+export async function createRepairBundle({ base, from, to, outDir, now = new Date(), allowCurrentDate = false }) {
   if (!base || !from || !outDir) throw new Error('base, from, and outDir are required');
   if (fs.existsSync(outDir)) throw new Error('out-dir already exists');
   const end = to || from;
@@ -1343,7 +1523,7 @@ export async function createRepairBundle({ base, from, to, outDir, now = new Dat
       ledgerHourlyTotals: hasNonDecreasingCandidate(candidateHourlyLedger, currentHourlyLedger),
       ledgerHourlyDimensions: ledgerRowsNonDecreasing(candidateHourlyLedgerRows, currentHourlyLedgerRows || []),
     };
-    const eligible = date < today &&
+    const eligible = (date < today || (allowCurrentDate && date === today)) &&
       missingSourceDates.length === 0 &&
       corruptSourceDates.length === 0 &&
       unknownPotluckKeys === 0 &&
@@ -1384,6 +1564,7 @@ export async function createRepairBundle({ base, from, to, outDir, now = new Dat
     from,
     to: end,
     eligibleDates,
+    currentDateOverride: allowCurrentDate === true,
     sourceEventDigest: scan.sourceEventDigest,
     sourceFiles: scan.sourceFiles.map(file => ({ utcDate: file.utcDate, sha256: file.sha256, size: file.size })),
     baselineDigest: sha256Text(stableJson(baseline)),
@@ -1397,6 +1578,7 @@ export async function createRepairBundle({ base, from, to, outDir, now = new Dat
     schemaVersion: 1,
     generatedAt: now.toISOString(),
     range: { from, to: end, excludedActiveDate: today },
+    currentDateOverride: allowCurrentDate === true,
     scan: {
       sourceFiles: scan.sourceFiles.map(file => ({
         path: path.relative(base, file.path).replaceAll('\\', '/'),
@@ -1444,6 +1626,7 @@ export async function createRepairBundle({ base, from, to, outDir, now = new Dat
     generatedAt: now.toISOString(),
     reportSha256,
     eligibleDates,
+    currentDateOverride: allowCurrentDate === true,
     artifacts,
   };
   const manifestPath = path.join(outDir, 'manifest.json');
@@ -1491,6 +1674,10 @@ function usageDelta(next = {}, previous = {}) {
   const safeNext = next || {};
   const safePrevious = previous || {};
   return Object.fromEntries(REPAIR_USAGE_FIELDS.map(field => [field, toNumber(safeNext[field]) - toNumber(safePrevious[field])]));
+}
+
+function isTextPricingModel(model) {
+  return !/(?:image|audio|tts|transcrib|whisper)/.test(String(model || '').trim().toLowerCase());
 }
 
 function applyUsageDelta(target = {}, delta = {}) {
@@ -1889,7 +2076,8 @@ async function commandRepairReport(args) {
   if (!outDir) throw new Error('--out-dir is required');
   const now = args.now ? new Date(args.now) : new Date();
   if (!Number.isFinite(now.getTime())) throw new Error('--now must be an ISO timestamp');
-  const result = await createRepairBundle({ base, from, to, outDir, now });
+  const allowCurrentDate = args['allow-current-date'] === 'true';
+  const result = await createRepairBundle({ base, from, to, outDir, now, allowCurrentDate });
   console.log(JSON.stringify({
     outDir: result.outDir,
     manifestSha256: result.manifestSha256,
@@ -2013,9 +2201,11 @@ async function commandReconcile(args) {
 
   let store = null;
   let keyLookup = null;
+  let providerByEmail = new Map();
   try {
     store = await readJson(path.join(base, 'api-potluck-keys.json'));
     keyLookup = buildKeyLookup(store);
+    providerByEmail = buildUniqueEmailProviderMap(store);
   } catch {
     store = null;
   }
@@ -2024,18 +2214,20 @@ async function commandReconcile(args) {
   for (const date of dateKeys(from, to)) {
     const ledgerRows = await readLedgerDailyRows(ledgerRoot, date);
     const ledgerSummary = ledgerRows === null ? null : summarizeLedgerRows(ledgerRows);
+    const hourlyRows = await readLedgerHourlyRows(ledgerRoot, date);
+    const hourlySummary = hourlyRows === null ? null : summarizeLedgerRows(hourlyRows);
 
     const auditFile = path.join(auditDir, `audit-${date}.jsonl`);
     let auditSummary = null;
     if (fs.existsSync(auditFile)) {
       const events = await readJsonlFiles([auditFile]);
-      const aggregated = aggregateAuditEvents(events, { from: date, to: date, keyLookup });
+      const aggregated = aggregateAuditEvents(events, { from: date, to: date, keyLookup, providerByEmail });
       auditSummary = summarizeLedgerRows(aggregated.dailyRows);
     }
 
     const potluckSummary = store === null ? null : summarizePotluckDay(store, date);
 
-    const result = reconcileDay({ date, ledgerSummary, auditSummary, potluckSummary, thresholdRatio });
+    const result = reconcileDay({ date, ledgerSummary, hourlySummary, auditSummary, potluckSummary, thresholdRatio });
     results.push(result);
 
     await fsp.mkdir(outDir, { recursive: true, mode: 0o700 });

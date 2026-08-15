@@ -237,11 +237,12 @@ describe('API Potluck admin range and key detail UI source', () => {
         const renderDistributionBlock = source.slice(renderDistributionStart, renderDistributionEnd);
         expect(renderDistributionBlock).toContain('const tokens = usageTokens(item)');
         expect(renderDistributionBlock).toContain('const costHtml = item?.cost ? ` · ${formatDisplayCost(item.cost)}` :');
-        expect(renderDistributionBlock).toContain('const missingCostHtml = Number(item?.cost?.missingPriceTokens || 0) > 0');
+        expect(renderDistributionBlock).toContain('const estimatedCostHtml = Number(item?.cost?.estimatedPriceTokens || 0) > 0');
+        expect(renderDistributionBlock).toContain('均价估算');
         expect(renderDistributionBlock).toContain('${formatNumber(count)} 次 / ${formatTokenCompact(tokens)} Tokens (${percent}%)');
         expect(renderDistributionBlock).toContain('sum.tokens += usageTokens(item[1])');
         expect(renderDistributionBlock).toContain('${formatNumber(otherCount)} 次 / ${formatTokenCompact(otherTokens)} Tokens (${otherPercent}%)');
-        expect(renderDistributionBlock).toContain('${costHtml}${missingCostHtml}');
+        expect(renderDistributionBlock).toContain('${costHtml}${estimatedCostHtml}${missingCostHtml}');
     });
 
     test('admin key list defaults to sorting by current range tokens', () => {

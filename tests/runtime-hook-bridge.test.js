@@ -1,15 +1,55 @@
 import { RuntimeHookBridge } from '../src/runtime/runtime-hook-bridge.js';
 
 describe('RuntimeHookBridge', () => {
-    test('uses a bounded queue and exposes dropped event count', async () => {
+    test('uses durable backpressure instead of dropping when the ipc retry queue is full', async () => {
         const messages = [];
-        const bridge = new RuntimeHookBridge({ send: message => messages.push(message), maxPending: 1 });
+        const durableTransport = {
+            publish: jest.fn().mockResolvedValue({ persisted: true, streamId: '1-0' }),
+            acknowledge: jest.fn().mockResolvedValue(undefined),
+            snapshot: () => ({ spooled: 0, spoolBytes: 0 })
+        };
+        const bridge = new RuntimeHookBridge({ send: message => messages.push(message), durableTransport, maxPending: 1 });
         await bridge.handle('onRequestCompleted', { requestId: 'one' });
         await bridge.handle('onRequestCompleted', { requestId: 'two' });
-        expect(bridge.snapshot()).toMatchObject({ pending: 1, dropped: 1 });
+        expect(bridge.snapshot()).toMatchObject({ pending: 1, dropped: 0, backpressured: 1, spooled: 0 });
+        expect(durableTransport.publish).toHaveBeenCalledTimes(2);
+        expect(messages[0].streamId).toBe('1-0');
         bridge.retryUnacked();
-        expect(messages).toHaveLength(2);
-        expect(messages[1].eventId).toBe(messages[0].eventId);
+        expect(messages).toHaveLength(3);
+        expect(messages[2].eventId).toBe(messages[0].eventId);
+    });
+
+    test('persists only a key hash in durable runtime events', async () => {
+        const published = [];
+        const bridge = new RuntimeHookBridge({
+            send: jest.fn(),
+            durableTransport: { publish: event => published.push(event), snapshot: () => ({}) }
+        });
+        await bridge.handle('onContentGenerated', {
+            requestId: 'secret-key-event',
+            potluckApiKey: 'maki_raw_secret_value',
+            model: 'gpt-5.4-mini'
+        });
+        const serialized = JSON.stringify(published);
+        expect(serialized).not.toContain('maki_raw_secret_value');
+        expect(published[0].args[0].potluckKeyHash).toMatch(/^sha256:/);
+        expect(published[0].args[0]).not.toHaveProperty('potluckApiKey');
+    });
+
+    test('drain retries pending ipc events and flushes durable spool', async () => {
+        const transport = {
+            publish: jest.fn().mockResolvedValue({ streamId: '3-0' }),
+            flushSpool: jest.fn().mockResolvedValue(1),
+            snapshot: () => ({ spooled: 0 })
+        };
+        const sent = [];
+        const bridge = new RuntimeHookBridge({ send: event => sent.push(event), durableTransport: transport });
+        await bridge.handle('onRequestCompleted', { requestId: 'drain-1' });
+        const drain = bridge.drain({ timeoutMs: 100, pollIntervalMs: 1 });
+        await Promise.resolve();
+        await bridge.ack(sent[0].eventId);
+        await expect(drain).resolves.toMatchObject({ drained: true, pending: 0 });
+        expect(transport.flushSpool).toHaveBeenCalled();
     });
     test('aggregates stream usage and emits compact persistence hooks without payload data', async () => {
         const messages = [];
@@ -28,12 +68,11 @@ describe('RuntimeHookBridge', () => {
             potluckApiKey: 'sk-potluck-test', originalRequestBody: { prompt: 'must not leave worker' }
         });
 
-        expect(messages).toHaveLength(2);
-        expect(messages[0]).toMatchObject({ type: 'runtime_hook', hookName: 'onUnaryResponse' });
-        expect(messages[0].args[0].nativeResponse.usage).toMatchObject({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
-        expect(messages[1]).toMatchObject({ type: 'runtime_hook', hookName: 'onContentGenerated' });
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toMatchObject({ type: 'runtime_hook', hookName: 'onContentGenerated' });
+        expect(messages[0].args[0]._runtimeUsage).toMatchObject({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
         expect(JSON.stringify(messages)).not.toMatch(/secret prompt|secret response|originalRequestBody|b64_json/);
-        expect(messages[1].args[0].potluckApiKey).toBe('sk-potluck-test');
+        expect(messages[0].args[0].potluckApiKey).toBe('sk-potluck-test');
     });
 
     test('preserves Responses cached and reasoning token details across the worker bridge', async () => {
@@ -78,14 +117,14 @@ describe('RuntimeHookBridge', () => {
             }
         });
 
-        expect(messages[0].args[0].nativeResponse.usage).toMatchObject({
+        expect(messages[0].args[0]._runtimeUsage).toMatchObject({
             prompt_tokens: 3007,
             completion_tokens: 16,
             total_tokens: 3023,
             cached_tokens: 2688,
             reasoning_tokens: 8
         });
-        expect(messages[1].args[0]._codexRouting).toEqual({
+        expect(messages[0].args[0]._codexRouting).toEqual({
             routingMode: 'auto',
             requestedPrimaryGroupId: 'group-a',
             selectedGroupId: 'group-b',
@@ -117,7 +156,7 @@ describe('RuntimeHookBridge', () => {
         const serialized = JSON.stringify(messages);
         expect(serialized.length).toBeLessThan(4096);
         expect(serialized).not.toContain('AAAAAA');
-        expect(messages[0].args[0].clientResponse.data[0].url).toBe('image://result');
+        expect(messages[0].args[0]._runtimeHasImage).toBe(true);
     });
 
     test('does not send empty provider metadata on request completion', async () => {
@@ -165,14 +204,14 @@ describe('RuntimeHookBridge', () => {
         const serialized = JSON.stringify(messages);
         expect(serialized).not.toContain('private original prompt');
         expect(serialized).not.toContain('private upstream prompt');
-        expect(messages[1].args[0].cache).toMatchObject({
+        expect(messages[0].args[0].cache).toMatchObject({
             keySource: 'shared_template',
             coordinationStatus: 'shared',
             templateFingerprint: 'sha256:template',
             workerId: 'execution-2'
         });
-        expect(messages[1].args[0].cache.finalPromptCacheKeyHash).toMatch(/^sha256:/);
-        expect(messages[1].args[0].cache.originalPrefixHashes.length).toBeGreaterThan(0);
-        expect(messages[1].args[0].cache.upstreamPrefixHashes.length).toBeGreaterThan(0);
+        expect(messages[0].args[0].cache.finalPromptCacheKeyHash).toMatch(/^sha256:/);
+        expect(messages[0].args[0].cache.originalPrefixHashes.length).toBeGreaterThan(0);
+        expect(messages[0].args[0].cache.upstreamPrefixHashes.length).toBeGreaterThan(0);
     });
 });

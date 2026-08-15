@@ -111,3 +111,18 @@ test('reconcileDay treats zero-vs-zero as agreement and zero-vs-nonzero as devia
   });
   assert.equal(zeroBad.status, 'deviation');
 });
+
+test('reconcileDay reports hourly detail coverage without inventing missing distribution', () => {
+  const result = reconcileDay({
+    date: '2026-08-15',
+    ledgerSummary: { requestCount: 266335, totalTokens: 3710988992 },
+    hourlySummary: { requestCount: 264607, totalTokens: 3711004906 },
+    auditSummary: { requestCount: 266335, totalTokens: 3710988992 },
+    potluckSummary: { requestCount: 266335, totalTokens: 3710988992 },
+  });
+
+  assert.equal(result.hourlyCoverage.status, 'partial');
+  assert.equal(result.hourlyCoverage.requestCount.unattributed, 1728);
+  assert.equal(result.hourlyCoverage.totalTokens.delta, 15914);
+  assert.equal(result.hourlyCoverage.syntheticAllocation, false);
+});

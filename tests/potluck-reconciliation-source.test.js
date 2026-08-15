@@ -44,6 +44,8 @@ describe('API Potluck reconciliation surface', () => {
         expect(source).toContain('function formatStatsUpdatedAt(isoString)');
         expect(source).toContain('async function loadReconciliationStatus()');
         expect(source).toContain('apiRequest(`${API_BASE}/reconciliation`)');
+        expect(source).toContain("result.hourlyCoverage?.status === 'partial'");
+        expect(source).toContain('小时明细覆盖');
         expect(source).toContain('loadReconciliationStatus();');
         expect(source).not.toContain('id="reconcileStatusBar"');
         expect(source).not.toContain('每日对账正常');

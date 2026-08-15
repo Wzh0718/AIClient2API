@@ -25,7 +25,8 @@ import {
     resetAllTokenStats,
     KEY_PREFIX,
     setConfigGetter,
-    flushPendingChanges
+    flushPendingChanges,
+    resolveKeyIdByHash
 } from './key-manager.js';
 
 import {
@@ -48,6 +49,7 @@ function getTrackedRequestIds(hookContext = {}) {
 }
 
 function getPendingUsageForHookContext(hookContext = {}) {
+    if (hookContext._runtimeUsage) return extractUsage(hookContext._runtimeUsage);
     for (const requestId of getTrackedRequestIds(hookContext)) {
         const usage = pendingUsage.get(requestId);
         if (usage) {
@@ -202,13 +204,14 @@ const apiPotluckPlugin = {
         async onContentGenerated(hookContext) {
             const trackedRequestIds = getTrackedRequestIds(hookContext);
 
-            if (hookContext.potluckApiKey) {
+            const potluckApiKey = hookContext.potluckApiKey || resolveKeyIdByHash(hookContext.potluckKeyHash);
+            if (potluckApiKey) {
                 try {
                     const usage = getPendingUsageForHookContext(hookContext);
 
                     // 传入提供商和模型信息，以及请求 ID 用于防重
                     await incrementUsage(
-                        hookContext.potluckApiKey, 
+                        potluckApiKey,
                         hookContext.toProvider, 
                         hookContext.model,
                         usage,
@@ -253,7 +256,8 @@ const apiPotluckPlugin = {
         resetAllTokenStats,
         KEY_PREFIX,
         extractPotluckKey,
-        isPotluckRequest
+        isPotluckRequest,
+        resolveKeyIdByHash
     }
 };
 
@@ -277,5 +281,6 @@ export {
     resetAllTokenStats,
     KEY_PREFIX,
     extractPotluckKey,
-    isPotluckRequest
+    isPotluckRequest,
+    resolveKeyIdByHash
 };

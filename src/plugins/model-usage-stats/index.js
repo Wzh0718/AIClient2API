@@ -89,6 +89,19 @@ const modelUsageStatsPlugin = {
         },
 
         async onContentGenerated(config) {
+            if (config._runtimeUsage) {
+                recordUnaryUsage({
+                    requestId: config._monitorRequestId,
+                    model: config.model,
+                    provider: config.toProvider,
+                    providerUuid: config.providerUuid,
+                    providerName: config.providerName,
+                    accountIdentity: config.accountIdentity,
+                    accountEmail: config.accountEmail,
+                    fromProvider: config.fromProvider,
+                    nativeResponse: { usage: config._runtimeUsage }
+                });
+            }
             await finalizeRequest({
                 requestId: config._monitorRequestId,
                 model: config.model,

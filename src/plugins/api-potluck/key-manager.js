@@ -558,9 +558,12 @@ function cloneUsageBucket(bucket = {}) {
 
 function createCostBucket(sourceCost = {}) {
     return {
+        usd: 0,
         actualUsd: 0,
+        estimatedUsd: 0,
         convertedUsd: 0,
         missingPriceTokens: 0,
+        estimatedPriceTokens: 0,
         conversionModel: sourceCost.conversionModel || DEFAULT_CONVERSION_MODEL,
         pricingVersion: sourceCost.pricingVersion || '',
         byModel: {}
@@ -571,9 +574,12 @@ function cloneCostBucket(cost = {}) {
     return {
         ...createCostBucket(cost),
         ...cost,
+        usd: toNumber(cost.usd ?? (toNumber(cost.actualUsd) + toNumber(cost.estimatedUsd))),
         actualUsd: toNumber(cost.actualUsd),
+        estimatedUsd: toNumber(cost.estimatedUsd),
         convertedUsd: toNumber(cost.convertedUsd),
         missingPriceTokens: toNumber(cost.missingPriceTokens),
+        estimatedPriceTokens: toNumber(cost.estimatedPriceTokens),
         byModel: { ...(cost.byModel || {}) }
     };
 }
@@ -587,9 +593,12 @@ function cloneCompactCostBucket(cost = {}) {
 function addCost(targetUsage, sourceCost = null) {
     if (!sourceCost) return;
     if (!targetUsage.cost) targetUsage.cost = createCostBucket(sourceCost);
+    targetUsage.cost.usd += toNumber(sourceCost.usd ?? (toNumber(sourceCost.actualUsd) + toNumber(sourceCost.estimatedUsd)));
     targetUsage.cost.actualUsd += toNumber(sourceCost.actualUsd);
+    targetUsage.cost.estimatedUsd += toNumber(sourceCost.estimatedUsd);
     targetUsage.cost.convertedUsd += toNumber(sourceCost.convertedUsd);
     targetUsage.cost.missingPriceTokens += toNumber(sourceCost.missingPriceTokens);
+    targetUsage.cost.estimatedPriceTokens += toNumber(sourceCost.estimatedPriceTokens);
     targetUsage.cost.conversionModel = sourceCost.conversionModel || targetUsage.cost.conversionModel;
     targetUsage.cost.pricingVersion = sourceCost.pricingVersion || targetUsage.cost.pricingVersion;
     for (const [model, estimate] of Object.entries(sourceCost.byModel || {})) {
@@ -597,6 +606,9 @@ function addCost(targetUsage, sourceCost = null) {
         targetUsage.cost.byModel[model] = {
             ...estimate,
             usd: toNumber(current.usd) + toNumber(estimate.usd),
+            actualUsd: toNumber(current.actualUsd) + toNumber(estimate.actualUsd),
+            estimatedUsd: toNumber(current.estimatedUsd) + toNumber(estimate.estimatedUsd),
+            estimatedPriceTokens: toNumber(current.estimatedPriceTokens) + toNumber(estimate.estimatedPriceTokens),
             missingPriceTokens: toNumber(current.missingPriceTokens) + toNumber(estimate.missingPriceTokens)
         };
     }
@@ -2246,6 +2258,13 @@ export async function applyDailyLimitToAllKeys(newLimit) {
 export function getAllKeyIds() {
     ensureLoaded();
     return Object.keys(keyStore.keys);
+}
+
+export function resolveKeyIdByHash(keyHash) {
+    ensureLoaded();
+    if (!keyHash) return null;
+    const matches = Object.keys(keyStore.keys || {}).filter(keyId => hashSecret(keyId) === keyHash);
+    return matches.length === 1 ? matches[0] : null;
 }
 
 /**

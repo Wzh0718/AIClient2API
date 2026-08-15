@@ -162,7 +162,13 @@ export function buildRequestAuditEvent(context = {}) {
             clientIpSource: context.clientIpSource || null
         },
         potluckKey: {
-            ...maskPotluckKey(context.potluckApiKey),
+            ...(context.potluckApiKey
+                ? maskPotluckKey(context.potluckApiKey)
+                : {
+                    present: Boolean(context.potluckKeyHash),
+                    hash: context.potluckKeyHash || null,
+                    prefix: null
+                }),
             name: context.potluckKeyData?.name || null
         },
         account: {

@@ -16,10 +16,11 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
     const result = {
         requests: { total: 0, success: 0, failed: 0, byWorker: {}, byKind: {} },
         output: { bytes: 0, backpressureMs: 0 },
+        hooks: { pending: 0, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 0, consumerLag: 0, oldestPendingAgeMs: 0, available: true, unavailableWorkers: [], byWorker: {} },
         inFlight: 0,
         process: { rss: 0, heapUsed: 0, maxEventLoopUtilization: 0, eventLoopDelay: { p95: 0, p99: 0, max: 0 } }
     };
-    for (const snapshot of workerSnapshots.values()) {
+    for (const [workerId, snapshot] of workerSnapshots.entries()) {
         result.requests.total += Number(snapshot?.requests?.total || 0);
         result.requests.success += Number(snapshot?.requests?.success || 0);
         result.requests.failed += Number(snapshot?.requests?.failed || 0);
@@ -28,6 +29,17 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         result.output.bytes += Number(snapshot?.output?.bytes || 0);
         result.output.backpressureMs += Number(snapshot?.output?.backpressureMs || 0);
         result.inFlight += Number(snapshot?.inFlight || 0);
+        if (snapshot?.hooks) {
+            result.hooks.byWorker[workerId] = snapshot.hooks;
+            if (snapshot.hooks.available === false) {
+                result.hooks.available = false;
+                result.hooks.unavailableWorkers.push(workerId);
+            }
+            for (const field of ['pending', 'spooled', 'spoolBytes', 'dropped', 'backpressured', 'consumerLag']) {
+                result.hooks[field] += Number(snapshot.hooks[field] || 0);
+            }
+            result.hooks.oldestPendingAgeMs = Math.max(result.hooks.oldestPendingAgeMs, Number(snapshot.hooks.oldestPendingAgeMs || 0));
+        }
         result.process.rss += Number(snapshot?.process?.rss || 0);
         result.process.heapUsed += Number(snapshot?.process?.heapUsed || 0);
         result.process.maxEventLoopUtilization = Math.max(result.process.maxEventLoopUtilization, Number(snapshot?.process?.eventLoopUtilization || 0));
@@ -36,6 +48,22 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         result.process.eventLoopDelay.max = Math.max(result.process.eventLoopDelay.max, Number(snapshot?.process?.eventLoopDelay?.max || 0));
     }
     return result;
+}
+
+export async function shutdownWorkerStages({
+    closeProxy,
+    stopRole,
+    getBacklog,
+    wait = delay => new Promise(resolve => setTimeout(resolve, delay)),
+    drainTimeoutMs = 30000
+} = {}) {
+    await closeProxy();
+    await stopRole('execution');
+    const deadline = Date.now() + drainTimeoutMs;
+    while (Number(getBacklog?.() || 0) > 0 && Date.now() < deadline) await wait(50);
+    const remainingBacklog = Number(getBacklog?.() || 0);
+    await stopRole('control');
+    return { drained: remainingBacklog === 0, remainingBacklog };
 }
 
 export function createProviderConfigAckTracker() {
@@ -187,23 +215,32 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
         spawnWorker('execution', index, port);
     }
 
-    const proxy = http.createServer(createRuntimeProxyHandler({
-        controlTarget: { host: '127.0.0.1', port: controlPort },
-        executionTargets,
-        onProxyError: (error, detail) => logger.error?.(`[Runtime Proxy] ${detail.role} ${detail.target.port}: ${error.message}`),
-        getRuntimeStatus: () => ({
-            status: ready.size === topology.executionWorkers + 1 ? 'healthy' : 'starting',
+    const buildRuntimeStatus = () => {
+        const metrics = aggregateWorkerMetrics(workerMetrics);
+        const topologyReady = ready.size === topology.executionWorkers + 1;
+        return {
+            status: !topologyReady
+                ? 'starting'
+                : (metrics.hooks.available === false ? 'degraded' : 'healthy'),
             epoch,
             controlWorkers: [...workers.values()].filter(worker => worker.role === 'control').length,
             executionWorkers: [...workers.values()].filter(worker => worker.role === 'execution').length,
             readyWorkers: ready.size,
             coordination: 'redis',
             leaseRecovery: 'ready',
-            persistenceBacklog: 0,
+            persistenceBacklog: metrics.hooks.pending + metrics.hooks.spooled + metrics.hooks.consumerLag,
             providerConfig: providerConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
             rawCapture: rawCaptureConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
-            metrics: aggregateWorkerMetrics(workerMetrics)
-        })
+            runtimeHooks: metrics.hooks,
+            metrics
+        };
+    };
+
+    const proxy = http.createServer(createRuntimeProxyHandler({
+        controlTarget: { host: '127.0.0.1', port: controlPort },
+        executionTargets,
+        onProxyError: (error, detail) => logger.error?.(`[Runtime Proxy] ${detail.role} ${detail.target.port}: ${error.message}`),
+        getRuntimeStatus: buildRuntimeStatus
     }));
     proxy.requestTimeout = 0;
     proxy.headersTimeout = 60000;
@@ -215,17 +252,24 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
     const shutdown = async exitCode => {
         if (shuttingDown) return;
         shuttingDown = true;
-        await new Promise(resolve => proxy.close(resolve));
-        const exits = [];
-        for (const worker of workers.values()) {
-            exits.push(new Promise(resolve => {
+        const stopRole = async role => {
+            const exits = [...workers.values()].filter(worker => worker.role === role).map(worker => new Promise(resolve => {
                 const timeout = setTimeout(() => { worker.child.kill('SIGKILL'); resolve(); }, 30000);
                 worker.child.once('exit', () => { clearTimeout(timeout); resolve(); });
-                if (worker.child.connected) worker.child.send({ type: 'shutdown' });
+                if (worker.child.connected) worker.child.send({ type: 'shutdown', phase: role === 'execution' ? 'drain' : 'persist' });
                 else worker.child.kill('SIGTERM');
             }));
-        }
-        await Promise.allSettled(exits);
+            await Promise.allSettled(exits);
+        };
+        const result = await shutdownWorkerStages({
+            closeProxy: () => new Promise(resolve => proxy.close(resolve)),
+            stopRole,
+            getBacklog: () => {
+                const hooks = aggregateWorkerMetrics(workerMetrics).hooks;
+                return hooks.pending + hooks.spooled + hooks.consumerLag;
+            }
+        });
+        if (!result.drained) logger.error?.(`[Runtime] Hook drain timed out with backlog=${result.remainingBacklog}`);
         process.exit(exitCode);
     };
     process.on('SIGTERM', () => shutdown(0));
@@ -236,15 +280,7 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
         workers,
         ready,
         topology,
-        getStatus: () => ({
-            status: ready.size === topology.executionWorkers + 1 ? 'healthy' : 'starting',
-            epoch,
-            controlWorkers: [...workers.values()].filter(worker => worker.role === 'control').length,
-            executionWorkers: [...workers.values()].filter(worker => worker.role === 'execution').length,
-            readyWorkers: ready.size,
-            providerConfig: providerConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
-            rawCapture: rawCaptureConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id))
-        }),
+        getStatus: buildRuntimeStatus,
         shutdown
     };
 }
