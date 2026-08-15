@@ -425,17 +425,28 @@ function getAccountUsageKey(providerType, uuid) {
 function updateAccountUsageSummaryCache(summary) {
     if (!summary?.accounts) return;
     const next = new Map();
+    const providerUuidOwners = new Map();
     const addIndex = (key, account) => {
         if (key && !next.has(key)) next.set(key, account);
     };
+    const recordProviderUuidOwner = (account, uuid) => {
+        const key = getAccountUsageKey(account.provider, uuid);
+        if (!key) return;
+        const owners = providerUuidOwners.get(key) || new Set();
+        owners.add(account.accountKey);
+        providerUuidOwners.set(key, owners);
+    };
+    summary.accounts.forEach(account => {
+        recordProviderUuidOwner(account, account.providerUuid);
+        recordProviderUuidOwner(account, account.accountIdentity);
+        (account.providerUuids || []).forEach(uuid => recordProviderUuidOwner(account, uuid));
+    });
     summary.accounts.forEach(account => {
         addIndex(account.accountKey, account);
-        addIndex(getAccountUsageKey(account.provider, account.providerUuid), account);
-        if (account.accountIdentity) {
-            addIndex(getAccountUsageKey(account.provider, account.accountIdentity), account);
-        }
-        (account.providerUuids || []).forEach(uuid => {
-            addIndex(getAccountUsageKey(account.provider, uuid), account);
+        [account.providerUuid, account.accountIdentity, ...(account.providerUuids || [])].forEach(uuid => {
+            const key = getAccountUsageKey(account.provider, uuid);
+            const owners = key ? providerUuidOwners.get(key) : null;
+            if (owners?.size === 1) addIndex(key, account);
         });
     });
     accountUsageSummaryByKey = next;

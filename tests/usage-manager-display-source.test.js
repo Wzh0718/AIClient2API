@@ -59,12 +59,13 @@ describe('usage manager display source regressions', () => {
         expect(css).toContain('.telemetry-update-outlier');
     });
 
-    test('account usage summaries are indexed by identity and provider UUIDs', () => {
+    test('account usage summaries index only provider UUIDs with one unambiguous owner', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
 
         expect(source).toContain('addIndex(account.accountKey, account)');
-        expect(source).toContain('addIndex(getAccountUsageKey(account.provider, account.accountIdentity), account)');
-        expect(source).toContain('(account.providerUuids || []).forEach(uuid =>');
+        expect(source).toContain('[account.providerUuid, account.accountIdentity, ...(account.providerUuids || [])]');
+        expect(source).toContain('const providerUuidOwners = new Map()');
+        expect(source).toContain('if (owners?.size === 1)');
         expect(source).toContain('instance.codexAccountKey');
         expect(source).not.toContain('account-usage-identity');
     });

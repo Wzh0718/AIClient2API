@@ -46,6 +46,22 @@ export function extractInboundCodexFingerprintContext(req, requestBody = {}) {
     };
 }
 
+export function resolveFinalUsageAccountContext(finalRouteResult = null, fallback = {}) {
+    const finalProviderUuid = finalRouteResult?.selectedProviderUuid || fallback.providerUuid || null;
+    const fallbackMatchesFinalProvider = !finalRouteResult?.selectedProviderUuid
+        || !fallback.providerUuid
+        || finalRouteResult.selectedProviderUuid === fallback.providerUuid;
+    return {
+        providerUuid: finalProviderUuid,
+        providerName: finalRouteResult?.providerName
+            || (fallbackMatchesFinalProvider ? fallback.providerName : null),
+        accountIdentity: finalRouteResult?.accountIdentity
+            || (fallbackMatchesFinalProvider ? fallback.accountIdentity : null),
+        accountEmail: finalRouteResult?.accountEmail
+            || (fallbackMatchesFinalProvider ? fallback.accountEmail : null)
+    };
+}
+
 // ==================== 时间与时区 ====================
 
 /**
@@ -2377,6 +2393,12 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     const finalRouteResult = CONFIG._codexRouteResult || null;
     const finalUsageModel = getUsageTrackingModel(model, processedRequestBody, toProvider);
     const finalUsageModelForAudit = finalRouteResult?.actualModel || finalUsageModel;
+    const finalUsageAccount = resolveFinalUsageAccountContext(finalRouteResult, {
+        providerUuid: actualUuid,
+        providerName: actualCustomName,
+        accountIdentity: actualAccountIdentity,
+        accountEmail: actualAccountEmail
+    });
 
     // 执行插件钩子：内容生成后
     try {
@@ -2387,10 +2409,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             processedRequestBody,
             fromProvider,
             toProvider,
-            providerUuid: finalRouteResult?.selectedProviderUuid || actualUuid,
-            providerName: actualCustomName,
-            accountIdentity: actualAccountIdentity,
-            accountEmail: actualAccountEmail,
+            ...finalUsageAccount,
             model: finalUsageModelForAudit,
             isStream
         });

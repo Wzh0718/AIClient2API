@@ -533,7 +533,6 @@ async function handleImageGenerationRequest(req, res, currentConfig, providerPoo
     let promptConstraintApplied = false;
     let capacityTicket = retryContext?.capacityTicket || null;
     const ownsCapacityTicket = !capacityTicket;
-    let capacityHandedOff = false;
 
     try {
         if (retryContext?.parsedBody) {
@@ -812,7 +811,6 @@ async function handleImageGenerationRequest(req, res, currentConfig, providerPoo
             await new Promise(resolve => setTimeout(resolve, randomDelay));
 
             try {
-                capacityHandedOff = true;
                 return await handleImageGenerationRequest(req, res, CONFIG, providerPoolManager, {
                     ...retryContext,
                     CONFIG,
@@ -832,7 +830,7 @@ async function handleImageGenerationRequest(req, res, currentConfig, providerPoo
 
         writeImageRequestError(res, resolveFinalImageRequestError(error, retryContext, slotUuid));
     } finally {
-        if (ownsCapacityTicket && capacityTicket && !capacityHandedOff) runtimeImageCapacity.release(capacityTicket);
+        if (ownsCapacityTicket && capacityTicket) runtimeImageCapacity.release(capacityTicket);
         // 确保并发槽在请求结束后归还（与 handleStreamRequest/handleUnaryRequest 保持一致）
         if (providerPoolManager && slotProviderType && slotUuid) {
             providerPoolManager.releaseSlot(slotProviderType, slotUuid);
@@ -983,7 +981,6 @@ async function handleImageEditsRequest(req, res, currentConfig, providerPoolMana
     let model = null;
     let capacityTicket = retryContext?.capacityTicket || null;
     const ownsCapacityTicket = !capacityTicket;
-    let capacityHandedOff = false;
 
     try {
         form = retryContext?.parsedForm ?? await parseMultipartForm(req);
@@ -1248,7 +1245,6 @@ async function handleImageEditsRequest(req, res, currentConfig, providerPoolMana
             logger.info(`[Image Edits Retry] Switching credential without changing provider health. Waiting ${randomDelay}ms before retry ${currentRetry + 1}/${maxRetries}...`);
             await new Promise(resolve => setTimeout(resolve, randomDelay));
 
-            capacityHandedOff = true;
             return await handleImageEditsRequest(req, res, CONFIG, providerPoolManager, {
                 ...retryContext,
                 CONFIG,
@@ -1265,7 +1261,7 @@ async function handleImageEditsRequest(req, res, currentConfig, providerPoolMana
 
         writeImageRequestError(res, resolveFinalImageRequestError(error, retryContext, slotUuid));
     } finally {
-        if (ownsCapacityTicket && capacityTicket && !capacityHandedOff) runtimeImageCapacity.release(capacityTicket);
+        if (ownsCapacityTicket && capacityTicket) runtimeImageCapacity.release(capacityTicket);
         if (providerPoolManager && slotProviderType && slotUuid) {
             providerPoolManager.releaseSlot(slotProviderType, slotUuid);
         }

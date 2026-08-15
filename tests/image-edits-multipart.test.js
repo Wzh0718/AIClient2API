@@ -32,6 +32,7 @@ jest.mock('../src/utils/logger.js', () => ({
 
 import logger from '../src/utils/logger.js';
 import { runtimeMetrics } from '../src/runtime/runtime-metrics.js';
+import { runtimeImageCapacity } from '../src/runtime/runtime-image-capacity.js';
 
 function makeMultipartRequest(parts) {
     const boundary = '----aiclient2api-test-boundary';
@@ -369,6 +370,7 @@ describe('/v1/images/edits multipart handling', () => {
     });
 
     test('retries one fast overload per failed edit task without repeating successful parallel tasks', async () => {
+        const capacityBefore = runtimeImageCapacity.snapshot();
         const randomSpy = jest.spyOn(Math, 'random').mockReturnValue(0);
         mockGenerateContent
             .mockRejectedValueOnce(makeOverloadError())
@@ -399,6 +401,10 @@ describe('/v1/images/edits multipart handling', () => {
             expect(mockGenerateContent).toHaveBeenCalledTimes(3);
             expect(mockGenerateContent.mock.calls.map(([, body]) => body._imageQuality)).toEqual(['high', 'high', 'high']);
             expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[Image Edits] internal overload retry 1/1'));
+            expect(runtimeImageCapacity.snapshot()).toMatchObject({
+                activeBytes: capacityBefore.activeBytes,
+                queued: capacityBefore.queued
+            });
         } finally {
             randomSpy.mockRestore();
         }
@@ -468,6 +474,7 @@ describe('/v1/images/edits multipart handling', () => {
     });
 
     test('cools only the Antigravity image model and reroutes an edit to another account', async () => {
+        const capacityBefore = runtimeImageCapacity.snapshot();
         const quotaError = new Error('Antigravity quota exhausted');
         quotaError.imageProviderRetryable = true;
         quotaError.response = {
@@ -511,6 +518,10 @@ describe('/v1/images/edits multipart handling', () => {
             excludeProviderUuids: ['ag-a']
         }));
         expect(secondGenerate).toHaveBeenCalledTimes(1);
+        expect(runtimeImageCapacity.snapshot()).toMatchObject({
+            activeBytes: capacityBefore.activeBytes,
+            queued: capacityBefore.queued
+        });
     });
 
     test('preserves the original Antigravity model 429 when retry selection has no alternative account', async () => {
@@ -913,6 +924,7 @@ describe('/v1/images/generations request handling', () => {
     });
 
     test('retries one fast overload and returns the recovered generation result', async () => {
+        const capacityBefore = runtimeImageCapacity.snapshot();
         const randomSpy = jest.spyOn(Math, 'random').mockReturnValue(0);
         mockGenerateContent
             .mockRejectedValueOnce(makeOverloadError())
@@ -942,6 +954,10 @@ describe('/v1/images/generations request handling', () => {
             expect(JSON.parse(res.body).data[0].b64_json).toBe('recovered-image');
             expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[Image Generation] internal overload retry 1/1'));
             expect(logger.warn.mock.calls.map(([message]) => message).join('\n')).not.toContain('Image Generation Audit');
+            expect(runtimeImageCapacity.snapshot()).toMatchObject({
+                activeBytes: capacityBefore.activeBytes,
+                queued: capacityBefore.queued
+            });
         } finally {
             randomSpy.mockRestore();
         }
@@ -982,6 +998,7 @@ describe('/v1/images/generations request handling', () => {
         ['an ECONNRESET socket hang up', makeSocketHangUpError()],
         ['a socket hang up without an error code', makeSocketHangUpError({ withCode: false })]
     ])('reroutes %s for image generation without marking the first account unhealthy', async (_label, transientError) => {
+        const capacityBefore = runtimeImageCapacity.snapshot();
         const firstGenerate = jest.fn().mockRejectedValueOnce(transientError);
         const secondGenerate = jest.fn().mockResolvedValueOnce(makeImageResponse('retried-generation'));
         getApiServiceWithFallback
@@ -1030,6 +1047,10 @@ describe('/v1/images/generations request handling', () => {
         );
         expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
         expect(providerPoolManager.markProviderUnhealthyWithRecoveryTime).not.toHaveBeenCalled();
+        expect(runtimeImageCapacity.snapshot()).toMatchObject({
+            activeBytes: capacityBefore.activeBytes,
+            queued: capacityBefore.queued
+        });
     });
 
     test('returns 502 after socket hang up retries are exhausted for image generation', async () => {

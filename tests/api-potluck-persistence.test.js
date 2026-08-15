@@ -106,6 +106,49 @@ afterEach(() => {
 });
 
 describe('api potluck persistence', () => {
+    test('resets stale daily counters before a control-worker usage hook records the new day', async () => {
+        const plugin = await loadPotluckPlugin();
+        await plugin.init({
+            API_POTLUCK_PERSIST_INTERVAL: 60_000,
+            API_POTLUCK_MAX_DIRTY_AGE: 60_000
+        });
+        const key = await plugin.exports.createKey('Cross-day Control Worker', 1000);
+
+        jest.setSystemTime(new Date('2026-07-22T15:59:59.000Z'));
+        await plugin.exports.incrementUsage(key.id, 'openai-codex-oauth', 'gpt-5.5', {
+            requestCount: 3,
+            promptTokens: 300,
+            completionTokens: 30,
+            totalTokens: 330
+        }, 'req-before-midnight');
+
+        jest.setSystemTime(new Date('2026-07-22T16:00:01.000Z'));
+        const recorded = await plugin.exports.incrementUsage(key.id, 'openai-codex-oauth', 'gpt-5.5', {
+            requestCount: 1,
+            promptTokens: 100,
+            completionTokens: 10,
+            totalTokens: 110
+        }, 'req-after-midnight');
+
+        expect(recorded).toMatchObject({
+            lastResetDate: '2026-07-23',
+            todayUsage: 1,
+            todayPromptTokens: 100,
+            todayCompletionTokens: 10,
+            todayTotalTokens: 110
+        });
+        expect(recorded.usageHistory['2026-07-22'].summary.totalTokens).toBe(330);
+        expect(recorded.usageHistory['2026-07-23'].summary.totalTokens).toBe(110);
+
+        const stats = await plugin.exports.getStats();
+        expect(stats).toMatchObject({
+            todayTotalUsage: 1,
+            todayPromptTokens: 100,
+            todayCompletionTokens: 10,
+            todayTotalTokens: 110
+        });
+    });
+
     test('reports recorded, delta update, and deduplicated outcomes for one request snapshot', async () => {
         const plugin = await loadPotluckPlugin();
         const key = await plugin.exports.createKey('Usage Outcome', 1000);

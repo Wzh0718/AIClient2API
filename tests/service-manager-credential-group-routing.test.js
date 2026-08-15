@@ -333,7 +333,20 @@ describe('Service Manager Codex credential-group routing', () => {
             ],
             keyAssignments: [{ keyId: 'key-1', routingMode: 'auto', primaryGroupId: 'group-a' }]
         });
-        const config = createConfig();
+        const config = createConfig({
+            providers: [
+                provider('codex-a', {
+                    customName: 'Codex A',
+                    codexAccountKey: 'account-a',
+                    codexEmail: 'a@example.com'
+                }),
+                provider('codex-b', {
+                    customName: 'Codex B',
+                    codexAccountKey: 'account-b',
+                    codexEmail: 'b@example.com'
+                })
+            ]
+        });
         await initialize(config);
 
         const first = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
@@ -349,7 +362,10 @@ describe('Service Manager Codex credential-group routing', () => {
             selectedProviderUuid: 'codex-b',
             actualProviderGroupId: 'group-b',
             providerSwitchCount: 1,
-            consistencyStatus: 'consistent'
+            consistencyStatus: 'consistent',
+            providerName: 'Codex B',
+            accountIdentity: 'account-b',
+            accountEmail: 'b@example.com'
         });
         expect(config._codexRouting).toMatchObject({
             selectedGroupId: 'group-b',

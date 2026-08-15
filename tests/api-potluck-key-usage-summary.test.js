@@ -775,6 +775,44 @@ describe('api potluck key usage summary', () => {
         expect(matchingAccounts[0].month).toMatchObject({ requestCount: 6, totalTokens: 6000 });
     });
 
+    test('does not expose one provider UUID as an alias for conflicting Codex emails', async () => {
+        const { createKey, incrementUsage, getAccountUsageSummary } = await loadKeyManager();
+        const key = await createKey('Conflicting UUID Client', 1000);
+
+        await incrementUsage(key.id, 'openai-codex-oauth', 'gpt-5.5', {
+            requestCount: 1,
+            totalTokens: 100
+        }, 'req-conflict-a', {
+            providerUuid: 'shared-provider-uuid',
+            providerName: 'Account A',
+            accountIdentity: 'account-a',
+            accountEmail: 'a@example.com'
+        });
+        await incrementUsage(key.id, 'openai-codex-oauth', 'gpt-5.5', {
+            requestCount: 2,
+            totalTokens: 200
+        }, 'req-conflict-b', {
+            providerUuid: 'shared-provider-uuid',
+            providerName: 'Account B',
+            accountIdentity: 'account-b',
+            accountEmail: 'b@example.com'
+        });
+
+        const summary = await getAccountUsageSummary();
+        const accounts = summary.accounts.filter(account =>
+            account.accountEmail === 'a@example.com' || account.accountEmail === 'b@example.com'
+        );
+
+        expect(accounts).toHaveLength(2);
+        expect(accounts.map(account => account.accountEmail).sort()).toEqual([
+            'a@example.com',
+            'b@example.com'
+        ]);
+        expect(accounts.every(account => !account.providerUuids.includes('shared-provider-uuid'))).toBe(true);
+        expect(accounts.find(account => account.accountEmail === 'a@example.com').today.totalTokens).toBe(100);
+        expect(accounts.find(account => account.accountEmail === 'b@example.com').today.totalTokens).toBe(200);
+    });
+
     test('listKeys exposes sanitized related account names for audit key selectors', async () => {
         const { createKey, incrementUsage, listKeys } = await loadKeyManager();
 

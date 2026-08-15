@@ -19,7 +19,7 @@ jest.mock('../src/services/service-manager.js', () => ({
     getApiServiceWithFallback: mockGetApiServiceWithFallback
 }));
 
-import { handleUnaryRequest } from '../src/utils/common.js';
+import { handleUnaryRequest, resolveFinalUsageAccountContext } from '../src/utils/common.js';
 import logger from '../src/utils/logger.js';
 
 class FakeResponse extends EventEmitter {
@@ -63,6 +63,39 @@ function createCapacityError() {
 }
 
 describe('Codex transient credential retry', () => {
+    test('uses one final credential snapshot for usage metadata after switching providers', () => {
+        expect(resolveFinalUsageAccountContext({
+            selectedProviderUuid: 'codex-b',
+            providerName: 'Codex B',
+            accountIdentity: 'account-b',
+            accountEmail: 'b@example.com'
+        }, {
+            providerUuid: 'codex-a',
+            providerName: 'Codex A',
+            accountIdentity: 'account-a',
+            accountEmail: 'a@example.com'
+        })).toEqual({
+            providerUuid: 'codex-b',
+            providerName: 'Codex B',
+            accountIdentity: 'account-b',
+            accountEmail: 'b@example.com'
+        });
+
+        expect(resolveFinalUsageAccountContext({
+            selectedProviderUuid: 'codex-b'
+        }, {
+            providerUuid: 'codex-a',
+            providerName: 'Codex A',
+            accountIdentity: 'account-a',
+            accountEmail: 'a@example.com'
+        })).toEqual({
+            providerUuid: 'codex-b',
+            providerName: null,
+            accountIdentity: null,
+            accountEmail: null
+        });
+    });
+
     test('re-enters standard service selection without delay and allows eligible credential reuse', async () => {
         const firstError = createCapacityError();
         const firstService = { generateContent: jest.fn().mockRejectedValue(firstError) };

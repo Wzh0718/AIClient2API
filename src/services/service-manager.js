@@ -1322,6 +1322,8 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         };
         finalizeCodexRouteResult(config, {
             selectedProviderUuid: result.uuid,
+            actualProviderType: result.actualProviderType,
+            serviceConfig: result.serviceConfig,
             actualModel: result.actualModel,
             modelFallbackFrom: result.modelFallbackFrom,
             modelFallbackTo: result.modelFallbackTo,
@@ -1526,6 +1528,8 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         : {};
     finalizeCodexRouteResult(config, {
         selectedProviderUuid: selectedUuid,
+        actualProviderType,
+        serviceConfig,
         actualModel,
         ...fallbackMetadata
     });
@@ -1543,6 +1547,8 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
 
 function finalizeCodexRouteResult(config, {
     selectedProviderUuid = null,
+    actualProviderType = null,
+    serviceConfig = null,
     actualModel = null,
     modelFallbackFrom = null,
     modelFallbackTo = null,
@@ -1553,6 +1559,7 @@ function finalizeCodexRouteResult(config, {
     const routingMode = diagnostics.routingMode || previous.routingMode || null;
     const finalProviderUuid = selectedProviderUuid || diagnostics.selectedProviderUuid || previous.selectedProviderUuid || null;
     const previousProviderUuid = previous.selectedProviderUuid || null;
+    const preservePreviousIdentity = !previousProviderUuid || previousProviderUuid === finalProviderUuid;
     const selectedGroupId = routingMode === 'pool'
         ? null
         : diagnostics.selectedGroupId || previous.selectedGroupId || null;
@@ -1565,6 +1572,12 @@ function finalizeCodexRouteResult(config, {
         routingMode,
         selectedGroupId,
         selectedProviderUuid: finalProviderUuid,
+        actualProviderType: actualProviderType || (preservePreviousIdentity ? previous.actualProviderType : null),
+        providerName: serviceConfig?.customName || (preservePreviousIdentity ? previous.providerName : null),
+        accountIdentity: serviceConfig?.codexAccountKey
+            || serviceConfig?.codexAccountId
+            || (preservePreviousIdentity ? previous.accountIdentity : null),
+        accountEmail: serviceConfig?.codexEmail || (preservePreviousIdentity ? previous.accountEmail : null),
         actualProviderGroupId,
         providerSwitchCount,
         actualModel: actualModel || previous.actualModel || null,

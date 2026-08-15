@@ -639,11 +639,13 @@ function getSummaryCanonicalAccountKey(accountKey, account = {}) {
     ) || accountKey;
 }
 
-function getAccountSummaryAliases(accountKey, account = {}) {
+function getAccountSummaryAliases(accountKey, account = {}, options = {}) {
     const provider = getAccountProvider(accountKey, account);
     const aliases = new Set([`account-key:${accountKey}`]);
     const addProviderAlias = (value) => {
-        if (value) aliases.add(`provider:${provider}:${value}`);
+        if (!value) return;
+        const alias = `provider:${provider}:${value}`;
+        if (!options.ambiguousProviderAliases?.has(alias)) aliases.add(alias);
     };
 
     addProviderAlias(getIdentityFromAccountKey(accountKey));
@@ -659,6 +661,46 @@ function getAccountSummaryAliases(accountKey, account = {}) {
     }
 
     return [...aliases];
+}
+
+function collectRawProviderUuidAliases(accountKey, account = {}) {
+    const provider = getAccountProvider(accountKey, account);
+    const canonical = getCanonicalAccountUsageIdentity(
+        provider,
+        account.providerUuid || getIdentityFromAccountKey(accountKey),
+        account.accountIdentity || null,
+        account.accountEmail || null,
+        account.providerName || null
+    );
+    const values = new Set(account.providerUuids || []);
+    const keyIdentity = getIdentityFromAccountKey(accountKey);
+    for (const value of [account.providerUuid, keyIdentity]) {
+        if (value && value !== canonical?.identity) values.add(value);
+    }
+    const providers = new Set([provider, canonical?.provider].filter(Boolean));
+    return [...providers].flatMap(aliasProvider => (
+        [...values].map(value => `provider:${aliasProvider}:${value}`)
+    ));
+}
+
+function findAmbiguousProviderAliases(usageHistory = {}, starts = {}) {
+    const ownersByAlias = new Map();
+    for (const [dateKey, day] of Object.entries(usageHistory || {})) {
+        if (dateKey !== starts.today && dateKey < starts.week && dateKey < starts.month) continue;
+        for (const [accountKey, account] of Object.entries(day.accounts || {})) {
+            const owner = getSummaryCanonicalAccountKey(accountKey, account);
+            for (const alias of collectRawProviderUuidAliases(accountKey, account)) {
+                const owners = ownersByAlias.get(alias) || new Set();
+                owners.add(owner);
+                ownersByAlias.set(alias, owners);
+            }
+        }
+    }
+    return new Set(
+        [...ownersByAlias.entries()]
+            .filter(([, owners]) => owners.size > 1)
+            .map(([alias]) => alias)
+    );
 }
 
 function createAccountSummaryEntry(accountKey, account = {}) {
@@ -1806,6 +1848,9 @@ export async function incrementUsage(apiKey, pName = 'unknown', mName = 'unknown
     ensureLoaded();
     const keyData = keyStore.keys[apiKey];
     if (!keyData) return { usageRecordingStatus: 'missing-key', persistencePending: false };
+    const previousResetDate = keyData.lastResetDate;
+    checkAndResetDailyCount(keyData);
+    const dailyCountReset = previousResetDate !== keyData.lastResetDate;
 
     let usageToApply = usage;
     let shouldRecordRate = true;
@@ -1828,6 +1873,7 @@ export async function incrementUsage(apiKey, pName = 'unknown', mName = 'unknown
     }
 
     if (!hasBillableUsage(usageToApply)) {
+        if (dailyCountReset) markDirty();
         return {
             ...keyData,
             usedBonus: false,
@@ -1959,17 +2005,18 @@ export async function getStats(options = {}) {
     let totalPromptTokens = 0, totalCompletionTokens = 0, totalReasoningTokens = 0, totalTokens = 0, totalCachedTokens = 0;
     const aggregatedHistory = {};
     const aggregateModels = {};
+    const today = getTodayDateString();
 
     for (const key of keys) {
-        checkAndResetDailyCount(key);
+        const hasCurrentDailyCounters = key.lastResetDate === today;
         if (key.enabled) enabledKeys++;
-        todayTotalUsage += key.todayUsage;
+        todayTotalUsage += hasCurrentDailyCounters ? toNumber(key.todayUsage) : 0;
         totalUsage += key.totalUsage;
-        todayPromptTokens += key.todayPromptTokens || 0;
-        todayCompletionTokens += key.todayCompletionTokens || 0;
-        todayReasoningTokens += key.todayReasoningTokens || 0;
-        todayTotalTokens += key.todayTotalTokens || 0;
-        todayCachedTokens += key.todayCachedTokens || 0;
+        todayPromptTokens += hasCurrentDailyCounters ? toNumber(key.todayPromptTokens) : 0;
+        todayCompletionTokens += hasCurrentDailyCounters ? toNumber(key.todayCompletionTokens) : 0;
+        todayReasoningTokens += hasCurrentDailyCounters ? toNumber(key.todayReasoningTokens) : 0;
+        todayTotalTokens += hasCurrentDailyCounters ? toNumber(key.todayTotalTokens) : 0;
+        todayCachedTokens += hasCurrentDailyCounters ? toNumber(key.todayCachedTokens) : 0;
         totalPromptTokens += key.totalPromptTokens || 0;
         totalCompletionTokens += key.totalCompletionTokens || 0;
         totalReasoningTokens += key.totalReasoningTokens || 0;
@@ -2076,6 +2123,10 @@ export async function getAccountUsageSummary(now = new Date()) {
     const source = usePotluckHistory || !modelUsageHistory ? 'potluck/model-usage-stats' : 'model-usage-stats/daily';
     const accounts = new Map();
     const aliasIndex = new Map();
+    const ambiguousProviderAliases = findAmbiguousProviderAliases(usageHistory, starts);
+    if (ambiguousProviderAliases.size > 0) {
+        logger.warn(`[API Potluck] Ignored ${ambiguousProviderAliases.size} ambiguous provider UUID alias(es) while building account usage summary`);
+    }
 
     for (const [dateKey, day] of Object.entries(usageHistory)) {
         const inToday = dateKey === starts.today;
@@ -2084,7 +2135,7 @@ export async function getAccountUsageSummary(now = new Date()) {
         if (!inToday && !inWeek && !inMonth) continue;
 
         for (const [accountKey, account] of Object.entries(day.accounts || {})) {
-            const aliases = getAccountSummaryAliases(accountKey, account);
+            const aliases = getAccountSummaryAliases(accountKey, account, { ambiguousProviderAliases });
             let targetKey = aliases.map(alias => aliasIndex.get(alias)).find(Boolean);
             const preferredKey = getSummaryCanonicalAccountKey(accountKey, account);
 
@@ -2115,7 +2166,7 @@ export async function getAccountUsageSummary(now = new Date()) {
             if (inWeek) addAccountSummaryRange(current, 'week', account);
             if (inMonth) addAccountSummaryRange(current, 'month', account);
 
-            for (const alias of getAccountSummaryAliases(current.accountKey, current)) {
+            for (const alias of getAccountSummaryAliases(current.accountKey, current, { ambiguousProviderAliases })) {
                 aliasIndex.set(alias, targetKey);
             }
             for (const alias of aliases) {
@@ -2132,6 +2183,9 @@ export async function getAccountUsageSummary(now = new Date()) {
             const month = cloneUsageBucket(account.month);
             return {
                 ...account,
+                providerUuids: (account.providerUuids || []).filter(uuid => (
+                    !ambiguousProviderAliases.has(`provider:${account.provider}:${uuid}`)
+                )),
                 lastUsedAt: latestTimestamp(
                     latestTimestamp(today.lastUsedAt, week.lastUsedAt),
                     latestTimestamp(month.lastUsedAt, getIndexedAccountLastUsedAt(account, modelUsageLastUsedIndex))
