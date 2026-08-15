@@ -3,6 +3,7 @@ import { promises as fsp } from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 import { promisify } from 'util';
+import { createHash } from 'crypto';
 
 const gzip = promisify(zlib.gzip);
 
@@ -72,12 +73,38 @@ function consumeEstimatedBytes(budget, bytes) {
     return true;
 }
 
-function cloneBoundedValue(value, budget, depth = 0, seen = new WeakSet()) {
+function isSecretField(fieldName) {
+    const normalized = String(fieldName || '').trim().toLowerCase().replace(/-/g, '_');
+    if (!normalized) return false;
+    if (['authorization', 'proxy_authorization', 'header', 'headers', 'cookie', 'set_cookie', 'password', 'secret', 'private_key'].includes(normalized)) return true;
+    return normalized === 'api_key' || normalized.endsWith('_api_key') ||
+        normalized === 'token' || normalized.endsWith('_token') ||
+        normalized.endsWith('_secret');
+}
+
+function redactBinaryString(value) {
+    const text = String(value);
+    const looksLikeBase64 = text.length >= 16 * 1024 && text.length % 4 === 0 &&
+        /^[A-Za-z0-9+/]+={0,2}$/.test(text) &&
+        /[a-z]/.test(text) && /[A-Z]/.test(text) && /[0-9]/.test(text) &&
+        new Set(text.slice(0, 4096)).size >= 24;
+    const isBinary = /^data:(?:image|audio|video|application)\//i.test(text) ||
+        looksLikeBase64;
+    if (!isBinary) return null;
+    const hash = createHash('sha256').update(text).digest('hex').slice(0, 16);
+    return `[binary-redacted bytes=${Buffer.byteLength(text, 'utf8')} sha256=${hash}]`;
+}
+
+function cloneBoundedValue(value, budget, depth = 0, seen = new WeakSet(), fieldName = '') {
     if (budget.exhausted || budget.remainingNodes <= 0) return null;
     budget.remainingNodes -= 1;
     if (value === null || value === undefined) return value ?? null;
+    if (isSecretField(fieldName)) {
+        consumeEstimatedBytes(budget, 10);
+        return '[REDACTED]';
+    }
     if (typeof value === 'string') {
-        const text = truncateUtf8(value, budget.remainingBytes);
+        const text = redactBinaryString(value) || truncateUtf8(value, budget.remainingBytes);
         consumeEstimatedBytes(budget, Buffer.byteLength(text, 'utf8'));
         return text;
     }
@@ -124,7 +151,7 @@ function cloneBoundedValue(value, budget, depth = 0, seen = new WeakSet()) {
             if (!consumeEstimatedBytes(budget, keyBytes)) break;
             budget.remainingPropertyReads -= 1;
             propertyReads += 1;
-            result[key] = cloneBoundedValue(value[key], budget, depth + 1, seen);
+            result[key] = cloneBoundedValue(value[key], budget, depth + 1, seen, key);
         }
     }
     return result;
@@ -142,7 +169,8 @@ export function buildBoundedRawCaptureEvent(event = {}, context = {}, maxBytes =
         processedRequestBody: null
     };
     const baseBytes = Buffer.byteLength(JSON.stringify(base), 'utf8');
-    const traversalBudget = createTraversalBudget(Math.max(0, totalBudget - baseBytes - 64));
+    const serializationReserve = Math.min(4096, Math.max(64, Math.floor(totalBudget / 16)));
+    const traversalBudget = createTraversalBudget(Math.max(0, totalBudget - baseBytes - serializationReserve));
     const result = {
         ...base,
         request: cloneBoundedValue(event.request, traversalBudget),
@@ -158,6 +186,7 @@ export function buildBoundedRawCaptureEvent(event = {}, context = {}, maxBytes =
 
 export function shouldCaptureRawRequest(options = {}, event = {}) {
     if (options.enabled !== true && options.enabled !== 'true') return false;
+    if (options.expiresAt && Date.now() >= new Date(options.expiresAt).getTime()) return false;
     const keyHashes = normalizeKeyHashes(options.keyHashes);
     if (keyHashes.length === 0) return false;
     return keyHashes.includes(event?.potluckKey?.hash);
@@ -167,16 +196,25 @@ export class RequestAuditRawCaptureStore {
     constructor({
         dir = path.join(process.cwd(), 'configs', 'request-audit-raw'),
         ttlMinutes = 60,
-        maxBytes = 1024 * 1024
+        maxBytes = 1024 * 1024,
+        expiresAt = null,
+        maxFiles = 100,
+        maxTotalBytes = 100 * 1024 * 1024
     } = {}) {
         this.dir = path.resolve(dir);
         this.ttlMinutes = Number(ttlMinutes) || 60;
         this.maxBytes = Number(maxBytes) || 1024 * 1024;
+        this.expiresAt = expiresAt || null;
+        this.maxFiles = Math.max(1, Number(maxFiles) || 100);
+        this.maxTotalBytes = Math.max(1024, Number(maxTotalBytes) || 100 * 1024 * 1024);
     }
 
-    updateOptions({ ttlMinutes, maxBytes } = {}) {
+    updateOptions({ ttlMinutes, maxBytes, expiresAt, maxFiles, maxTotalBytes } = {}) {
         if (Number(ttlMinutes) > 0) this.ttlMinutes = Number(ttlMinutes);
         if (Number(maxBytes) > 0) this.maxBytes = Number(maxBytes);
+        if (expiresAt !== undefined) this.expiresAt = expiresAt || null;
+        if (Number(maxFiles) > 0) this.maxFiles = Number(maxFiles);
+        if (Number(maxTotalBytes) > 0) this.maxTotalBytes = Number(maxTotalBytes);
     }
 
     getFilePath(event = {}) {
@@ -187,33 +225,75 @@ export class RequestAuditRawCaptureStore {
         return filePath;
     }
 
-    async capture(event = {}) {
-        const filePath = this.getFilePath(event);
-        await fsp.mkdir(path.dirname(filePath), { recursive: true });
-        const payload = {
-            schemaVersion: 1,
-            requestId: event.requestId || null,
-            timestamp: event.timestamp || new Date().toISOString(),
-            potluckKeyHash: event.potluckKey?.hash || null,
-            request: event.request || null,
-            originalRequestBody: event.originalRequestBody || null,
-            processedRequestBody: event.processedRequestBody || null
-        };
-        let serialized = JSON.stringify(payload);
-        let truncated = false;
-        if (Buffer.byteLength(serialized, 'utf8') > this.maxBytes) {
-            serialized = serialized.slice(0, this.maxBytes);
-            truncated = true;
+    async withCapacityLock(callback) {
+        await fsp.mkdir(this.dir, { recursive: true });
+        const lockPath = path.join(this.dir, '.capture-capacity.lock');
+        const deadline = Date.now() + 5000;
+        let handle = null;
+        while (!handle) {
+            try {
+                handle = await fsp.open(lockPath, 'wx', 0o600);
+                await handle.writeFile(`${process.pid} ${Date.now()}\n`, 'utf8');
+            } catch (error) {
+                if (error.code !== 'EEXIST' || Date.now() >= deadline) throw error;
+                const stat = await fsp.stat(lockPath).catch(() => null);
+                if (stat && Date.now() - stat.mtimeMs > 30_000) {
+                    await fsp.unlink(lockPath).catch(() => {});
+                    continue;
+                }
+                await new Promise(resolve => setTimeout(resolve, 10));
+            }
         }
-        const wrapped = JSON.stringify({
-            truncated,
-            payload: serialized
+        try {
+            return await callback();
+        } finally {
+            await handle.close().catch(() => {});
+            await fsp.unlink(lockPath).catch(() => {});
+        }
+    }
+
+    async capture(event = {}, { now = new Date() } = {}) {
+        if (this.expiresAt && toDate(now).getTime() >= toDate(this.expiresAt).getTime()) {
+            return { captured: false, stopReason: 'expired' };
+        }
+        return this.withCapacityLock(async () => {
+            const stats = await this.getStats();
+            if (stats.fileCount >= this.maxFiles) return { captured: false, stopReason: 'max_files' };
+            if (stats.totalBytes >= this.maxTotalBytes) return { captured: false, stopReason: 'max_total_bytes' };
+            const filePath = this.getFilePath(event);
+            await fsp.mkdir(path.dirname(filePath), { recursive: true });
+            const boundedEvent = buildBoundedRawCaptureEvent(event, {
+                originalRequestBody: event.originalRequestBody,
+                processedRequestBody: event.processedRequestBody
+            }, this.maxBytes);
+            const payload = {
+                schemaVersion: boundedEvent.schemaVersion || 1,
+                requestId: boundedEvent.requestId || null,
+                timestamp: boundedEvent.timestamp || new Date().toISOString(),
+                potluckKeyHash: boundedEvent.potluckKey?.hash || null,
+                request: boundedEvent.request || null,
+                originalRequestBody: boundedEvent.originalRequestBody || null,
+                processedRequestBody: boundedEvent.processedRequestBody || null
+            };
+            let serialized = JSON.stringify(payload);
+            let truncated = false;
+            if (Buffer.byteLength(serialized, 'utf8') > this.maxBytes) {
+                serialized = serialized.slice(0, this.maxBytes);
+                truncated = true;
+            }
+            const wrapped = JSON.stringify({ truncated, payload: serialized });
+            const compressed = await gzip(wrapped);
+            if (stats.totalBytes + compressed.length > this.maxTotalBytes) {
+                return { captured: false, stopReason: 'max_total_bytes' };
+            }
+            await fsp.writeFile(filePath, compressed, { mode: 0o600 });
+            const eventDate = toDate(event.timestamp);
+            await fsp.utimes(filePath, eventDate, eventDate).catch(() => {});
+            const stopReason = stats.fileCount + 1 >= this.maxFiles
+                ? 'max_files'
+                : stats.totalBytes + compressed.length >= this.maxTotalBytes ? 'max_total_bytes' : null;
+            return { captured: true, path: filePath, truncated, stopReason };
         });
-        const compressed = await gzip(wrapped);
-        await fsp.writeFile(filePath, compressed, { mode: 0o600 });
-        const eventDate = toDate(event.timestamp);
-        await fsp.utimes(filePath, eventDate, eventDate).catch(() => {});
-        return { captured: true, path: filePath, truncated };
     }
 
     async cleanup(now = new Date()) {
@@ -239,8 +319,13 @@ export class RequestAuditRawCaptureStore {
     }
 
     async countFiles() {
-        if (!fs.existsSync(this.dir)) return 0;
+        return (await this.getStats()).fileCount;
+    }
+
+    async getStats() {
+        if (!fs.existsSync(this.dir)) return { fileCount: 0, totalBytes: 0 };
         let count = 0;
+        let totalBytes = 0;
         const walk = async dir => {
             const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => []);
             for (const entry of entries) {
@@ -249,10 +334,12 @@ export class RequestAuditRawCaptureStore {
                     await walk(fullPath);
                 } else if (entry.isFile() && entry.name.endsWith('.json.gz')) {
                     count += 1;
+                    const stat = await fsp.stat(fullPath).catch(() => null);
+                    totalBytes += stat?.size || 0;
                 }
             }
         };
         await walk(this.dir);
-        return count;
+        return { fileCount: count, totalBytes };
     }
 }

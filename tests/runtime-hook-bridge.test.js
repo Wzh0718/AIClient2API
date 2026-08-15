@@ -138,4 +138,41 @@ describe('RuntimeHookBridge', () => {
             completed: true
         });
     });
+
+    test('bridges only cache fingerprints for prepared upstream requests, never raw prompts', async () => {
+        const messages = [];
+        const bridge = new RuntimeHookBridge({ send: message => messages.push(message) });
+
+        await bridge.handle('onUpstreamRequestPrepared', {
+            requestId: 'prepared-1',
+            model: 'gpt-5.4-mini',
+            providerUuid: 'provider-a',
+            workerId: 'execution-2',
+            clientPromptCacheKey: null,
+            finalPromptCacheKey: 'final-cache-key',
+            cacheKeySource: 'shared_template',
+            cacheCoordinationStatus: 'shared',
+            templateFingerprint: 'sha256:template',
+            originalRequestBody: { input: 'private original prompt' },
+            upstreamRequestBody: { input: 'private upstream prompt', prompt_cache_key: 'final-cache-key' }
+        });
+        await bridge.handle('onContentGenerated', {
+            _monitorRequestId: 'prepared-1',
+            model: 'gpt-5.4-mini',
+            providerUuid: 'provider-a'
+        });
+
+        const serialized = JSON.stringify(messages);
+        expect(serialized).not.toContain('private original prompt');
+        expect(serialized).not.toContain('private upstream prompt');
+        expect(messages[1].args[0].cache).toMatchObject({
+            keySource: 'shared_template',
+            coordinationStatus: 'shared',
+            templateFingerprint: 'sha256:template',
+            workerId: 'execution-2'
+        });
+        expect(messages[1].args[0].cache.finalPromptCacheKeyHash).toMatch(/^sha256:/);
+        expect(messages[1].args[0].cache.originalPrefixHashes.length).toBeGreaterThan(0);
+        expect(messages[1].args[0].cache.upstreamPrefixHashes.length).toBeGreaterThan(0);
+    });
 });

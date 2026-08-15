@@ -130,6 +130,7 @@ import 'dotenv/config'; // Import dotenv and configure it
 import '../converters/register-converters.js'; // 注册所有转换器
 import { isRetryableNetworkError } from '../utils/common.js';
 import { runtimeMetrics } from '../runtime/runtime-metrics.js';
+import { applyRawCaptureRuntimeConfig } from '../plugins/request-audit/index.js';
 
 // 检测是否作为子进程运行
 const IS_WORKER_PROCESS = process.env.IS_WORKER_PROCESS === 'true';
@@ -290,6 +291,9 @@ async function startServer() {
     await discoverPlugins();
     if (startupShutdownGate.shouldAbort('plugin initialization')) return null;
     const pluginManager = getPluginManager();
+    if (!IS_EXECUTION_WORKER && IS_WORKER_PROCESS && process.send) {
+        CONFIG._requestAuditRawCaptureEventSink = event => sendToMaster(event);
+    }
     await pluginManager.initAll(CONFIG);
     if (startupShutdownGate.shouldAbort('plugin status logging')) return null;
     
@@ -589,6 +593,15 @@ const shutdownHandlers = registerWorkerShutdownHandlers({
         }
         if (message.type === 'provider_config_sync_status' && RUNTIME_WORKER_ROLE === 'control') {
             globalThis.providerConfigSyncStatus = message;
+            return true;
+        }
+        if (message.type === 'request_audit_raw_capture_sync' && IS_EXECUTION_WORKER) {
+            const result = applyRawCaptureRuntimeConfig(message);
+            sendToMaster({ type: 'request_audit_raw_capture_sync_ack', revision: result.revision });
+            return true;
+        }
+        if (message.type === 'request_audit_raw_capture_sync_status' && RUNTIME_WORKER_ROLE === 'control') {
+            globalThis.rawCaptureConfigSyncStatus = message;
             return true;
         }
         if (message.type === 'runtime_hook' && RUNTIME_WORKER_ROLE === 'control') {

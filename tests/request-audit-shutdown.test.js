@@ -599,7 +599,7 @@ describe('request audit shutdown drain', () => {
       _requestAuditRawCaptureStore: rawCaptureStore
     });
 
-    const largeInput = 'x'.repeat(1024 * 1024);
+    const largeInput = 'large diagnostic prompt '.repeat(50_000);
     const firstContext = requestContext('byte-budget-active', largeInput);
     firstContext.potluckApiKey = 'potluck-original';
     await plugin.hooks.onContentGenerated(firstContext);

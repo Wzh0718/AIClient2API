@@ -877,22 +877,22 @@
               </div>
               <div class="raw-capture-grid">
                 <label>采集 Key
-                  <select id="rawCaptureKeySelect">
+                  <select id="rawCaptureKeySelect" multiple size="4">
                     <option value="">加载 key 列表中...</option>
                   </select>
-                  <input id="rawCaptureKeyInput" autocomplete="off" spellcheck="false" placeholder="或手动输入完整采集 key，例如 maki_...">
-                  <span id="rawCaptureManualHelp" class="field-help">key 列表不可用时，可手动输入完整 key 或 sha256:xxxxxxxxxxxxxxxx；页面只提交 hash。</span>
+                  <input id="rawCaptureKeyInput" autocomplete="off" spellcheck="false" placeholder="或手动输入最多 2 个 key，用逗号分隔">
+                  <span id="rawCaptureManualHelp" class="field-help">可同时选择或输入最多 2 个 Key；页面只提交 hash。</span>
                 </label>
-                <label>保留分钟
-                  <input id="rawCaptureTtl" type="number" min="1" max="1440" step="1" value="30" inputmode="numeric">
+                <label>采集时长（分钟）
+                  <input id="rawCaptureTtl" type="number" min="1" max="60" step="1" value="15" inputmode="numeric">
                 </label>
                 <label>单请求上限 MB
                   <input id="rawCaptureMaxMb" type="number" min="1" max="10" step="1" value="2" inputmode="numeric">
                 </label>
                 <button id="saveRawCapture" type="button">保存采集设置</button>
               </div>
-              <p id="rawCaptureInfo" class="muted mini">默认关闭。开启后会保存原始 prompt 和转换后的请求体；建议只开 10-30 分钟，分析完立即关闭。</p>
-              <p class="danger-note">风险提示：会保存原始 prompt。文件默认写入 configs/request-audit-raw，并由 TTL 定时清理；不要长期打开。</p>
+              <p id="rawCaptureInfo" class="muted mini">默认关闭。默认 15 分钟，最长 60 分钟；最多 100 个文件或 100 MB，达到任一限制自动关闭。</p>
+              <p class="danger-note">风险提示：会保存原始 prompt 的脱敏文本。文件权限为 0600，不在管理页面展示原文；图片、文件和大段 base64 仅保存类型、长度和哈希。</p>
             </section>
 
             <aside class="capture-guide" aria-label="原始采集使用说明">
@@ -938,6 +938,11 @@
       reasoning: 'reasoning tokens，来自上游 usage'
     };
     const DIAGNOSTIC_LABELS = {
+      client_prefix_limited: '客户端公共前缀有限',
+      client_structure_variance: '客户端请求结构变化',
+      gateway_key_fragmentation: '网关缓存键分叉',
+      gateway_provider_fragmentation: '网关 Provider 分叉',
+      upstream_cache_uncertain: '上游缓存状态不确定',
       prefix_changed: '前缀变化',
       tools_changed: '工具定义变化',
       instructions_changed: '系统指令变化',
@@ -1063,7 +1068,7 @@
 
     function renderRawCaptureKeySelect(keys = [], selectedHashes = []) {
       const select = document.getElementById('rawCaptureKeySelect');
-      const current = selectedHashes[0] || select.value;
+      const current = new Set(selectedHashes.length ? selectedHashes : [...select.selectedOptions].map(option => option.value));
       select.innerHTML = '';
 
       const disabled = document.createElement('option');
@@ -1080,9 +1085,7 @@
         select.appendChild(option);
       }
 
-      if (current) {
-        select.value = [...select.options].some(option => option.value === current) ? current : '';
-      }
+      for (const option of select.options) option.selected = current.has(option.value);
     }
 
     function renderRawCaptureStatus(status = {}) {
@@ -1090,20 +1093,26 @@
       const pill = document.getElementById('rawCaptureStatus');
       const info = document.getElementById('rawCaptureInfo');
       const keyHashes = status.keyHashes || [];
-      document.getElementById('rawCaptureTtl').value = status.ttlMinutes || 30;
+      document.getElementById('rawCaptureTtl').value = status.ttlMinutes || 15;
       document.getElementById('rawCaptureMaxMb').value = Math.max(1, Math.round(Number(status.maxBytes || 2097152) / 1024 / 1024));
       renderRawCaptureKeySelect(potluckKeys, status.enabled ? keyHashes : []);
-      pill.className = `pill ${status.enabled ? 'bad' : 'good'}`;
-      pill.textContent = status.enabled ? '采集中' : '已关闭';
+      const pendingWorkers = Number(status.workerSync?.pendingWorkerCount || 0);
+      pill.className = `pill ${status.enabled ? (pendingWorkers ? 'warn' : 'bad') : 'good'}`;
+      pill.textContent = status.enabled ? (pendingWorkers ? '同步中' : '采集中') : '已关闭';
       info.textContent = status.enabled
-        ? `正在采集 ${keyHashes.join(', ')}；TTL ${status.ttlMinutes} 分钟；当前文件 ${fmt(status.fileCount)} 个；目录 ${status.dir || 'configs/request-audit-raw'}。`
-        : `已关闭。当前历史文件 ${fmt(status.fileCount)} 个；过期文件会按 TTL 定时清理。`;
+        ? `正在采集 ${keyHashes.join(', ')}；到期 ${shortTime(status.expiresAt)}；文件 ${fmt(status.fileCount)}/${fmt(status.maxFiles)}；容量 ${(Number(status.totalBytes || 0) / 1024 / 1024).toFixed(1)}/${(Number(status.maxTotalBytes || 0) / 1024 / 1024).toFixed(0)} MB；Worker 待同步 ${pendingWorkers}。`
+        : `已关闭。历史文件 ${fmt(status.fileCount)} 个；停止原因 ${status.stopReason || '手动关闭'}。`;
     }
 
     async function resolveRawCaptureKeyHash() {
-      const selectedKeyHash = document.getElementById('rawCaptureKeySelect').value.trim();
-      const manualKey = document.getElementById('rawCaptureKeyInput').value.trim();
-      return selectedKeyHash || await hashPotluckKeyLocally(manualKey);
+      const selected = [...document.getElementById('rawCaptureKeySelect').selectedOptions]
+        .map(option => option.value.trim()).filter(Boolean);
+      const manual = document.getElementById('rawCaptureKeyInput').value
+        .split(/[\s,，]+/).map(value => value.trim()).filter(Boolean);
+      const manualHashes = await Promise.all(manual.map(hashPotluckKeyLocally));
+      const hashes = [...new Set([...selected, ...manualHashes].filter(Boolean))];
+      if (hashes.length > 2) throw new Error('最多只能同时采集 2 个 Key。');
+      return hashes;
     }
 
     async function loadRawCaptureStatus() {
@@ -1119,24 +1128,26 @@
 
     async function saveRawCaptureSettings() {
       const button = document.getElementById('saveRawCapture');
-      const ttlMinutes = Math.min(Math.max(Number(document.getElementById('rawCaptureTtl').value) || 30, 1), 1440);
+      const ttlMinutes = Math.min(Math.max(Number(document.getElementById('rawCaptureTtl').value) || 15, 1), 60);
       const maxMb = Math.min(Math.max(Number(document.getElementById('rawCaptureMaxMb').value) || 2, 1), 10);
       button.disabled = true;
       try {
-        const keyHash = await resolveRawCaptureKeyHash();
+        const keyHashes = await resolveRawCaptureKeyHash();
         const result = await fetchJson('/api/request-audit/raw-capture', {
           auth: true,
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            enabled: Boolean(keyHash),
-            keyHashes: keyHash ? [keyHash] : [],
-            ttlMinutes,
-            maxBytes: maxMb * 1024 * 1024
+            enabled: keyHashes.length > 0,
+            keyHashes,
+            durationMinutes: ttlMinutes,
+            maxBytes: maxMb * 1024 * 1024,
+            maxFiles: 100,
+            maxTotalBytes: 100 * 1024 * 1024
           })
         });
         renderRawCaptureStatus(result.data || {});
-        setStatus(keyHash ? '已开启原始请求采集。请短时排查，完成后在这里关闭。' : '已关闭原始请求采集。');
+        setStatus(keyHashes.length ? '已开启短时原始请求采集。系统会在到期或达到容量上限时自动关闭。' : '已关闭原始请求采集。');
       } catch (error) {
         setStatus(`保存原始请求采集设置失败：${error.message}`, true);
       } finally {

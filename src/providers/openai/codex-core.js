@@ -11,7 +11,12 @@ import {configureTLSSidecar, isTLSSidecarEnabledForProvider} from '../../utils/p
 import {MODEL_PROVIDER, formatExpiryLog, normalizeProviderErrorMessage} from '../../utils/common.js';
 import {getProxyConfigForProvider} from '../../utils/proxy-utils.js';
 import {getProviderModels} from '../provider-models.js';
-import {getProvidedPromptCacheKey, resolveCodexSessionId} from './codex-session-utils.js';
+import {
+    buildCodexTemplateFingerprint,
+    getProvidedPromptCacheKey,
+    resolveCodexSessionId,
+    resolveCodexSessionScope
+} from './codex-session-utils.js';
 import {
     CODEX_FINGERPRINT_CONTEXT_KEY,
     applyCodexFingerprintClientMetadata,
@@ -827,23 +832,46 @@ export class CodexApiService {
             logger.info(`[Codex] Detected -fast model: ${normalizedModel} -> ${upstreamModel}, service_tier: ${cleanedBody.service_tier || defaultServiceTier}`);
         }
 
-        // 生成会话缓存键
-        // 弱化 model 依赖，以提升同会话跨模型的缓存命中率
-        // 仅当 sessionId 为 'default' 时加上 model 前缀，提供基础隔离
-        let cacheKey = sessionId;
-        if (sessionId === 'default') {
-            cacheKey = `${model}-default`;
-        }
-
         const providedPromptCacheKey = getProvidedPromptCacheKey(requestBody);
-        let cache = providedPromptCacheKey ? {id: providedPromptCacheKey} : this.conversationCache.get(cacheKey);
+        const explicitSessionScope = resolveCodexSessionScope(requestBody);
+        const providerScope = String(this.config.uuid || this.uuid || this.config.MODEL_PROVIDER || 'unknown-provider');
+        const templateFingerprint = explicitSessionScope ? null : buildCodexTemplateFingerprint({
+            potluckApiKey: this.config.potluckApiKey || '',
+            model: effectiveUpstreamModel,
+            upstreamBody: cleanedBody
+        });
+        const sharedScope = explicitSessionScope
+            ? `${providerScope}:session:${crypto.createHash('sha256').update(explicitSessionScope).digest('hex')}`
+            : `${providerScope}:template:${templateFingerprint}`;
+        let cacheKeySource = providedPromptCacheKey
+            ? 'client_explicit'
+            : explicitSessionScope ? 'shared_session' : 'shared_template';
+        let cacheCoordinationStatus = providedPromptCacheKey ? 'shared' : 'degraded';
+        let cache = providedPromptCacheKey ? { id: providedPromptCacheKey } : null;
 
-        if (!providedPromptCacheKey && (!cache || cache.expire < Date.now())) {
-            cache = {
-                id: crypto.randomUUID(),
-                expire: Date.now() + 3600000 // 1 小时
-            };
-            this.conversationCache.set(cacheKey, cache);
+        if (!providedPromptCacheKey) {
+            try {
+                const coordination = getProviderPoolManager()?.coordination;
+                if (coordination?.resolvePromptCacheKey) {
+                    cache = {
+                        id: await coordination.resolvePromptCacheKey(sharedScope, { ttlMs: 3600000 }),
+                        expire: Date.now() + 3600000
+                    };
+                    cacheCoordinationStatus = 'shared';
+                }
+            } catch (error) {
+                logger.warn(`[Codex] Shared prompt cache coordination unavailable; using local fallback: ${error.message}`);
+            }
+
+            if (!cache?.id) {
+                cacheKeySource = 'local_fallback';
+                const localCacheKey = `${providerScope}:${explicitSessionScope ? `session:${sessionId}` : `template:${templateFingerprint}`}`;
+                cache = this.conversationCache.get(localCacheKey);
+                if (!cache || cache.expire < Date.now()) {
+                    cache = { id: crypto.randomUUID(), expire: Date.now() + 3600000 };
+                    this.conversationCache.set(localCacheKey, cache);
+                }
+            }
         }
 
         // 注意：requestBody 已经去除了 metadata
@@ -885,6 +913,20 @@ export class CodexApiService {
                         requestId: this.config._monitorRequestId,
                         internalRequest: result,
                         converterName: 'prepareRequestBody'
+                    });
+                    await pluginManager.executeHook('onUpstreamRequestPrepared', {
+                        requestId: this.config._monitorRequestId,
+                        potluckApiKey: this.config.potluckApiKey || null,
+                        providerUuid: this.config.uuid || null,
+                        workerId: process.env.RUNTIME_WORKER_ID || null,
+                        model: effectiveUpstreamModel,
+                        clientPromptCacheKey: providedPromptCacheKey || null,
+                        finalPromptCacheKey: result.prompt_cache_key,
+                        cacheKeySource,
+                        cacheCoordinationStatus,
+                        templateFingerprint,
+                        originalRequestBody: requestBody,
+                        upstreamRequestBody: result
                     });
                 }
             } catch (e) {

@@ -1,4 +1,11 @@
 import { extractUsage, mergeUsage, toWireUsage } from '../utils/usage-normalizer.js';
+import { createHash } from 'crypto';
+import { buildRequestFingerprint } from '../plugins/request-audit/fingerprint.js';
+
+function hashSecret(value, length = 32) {
+    if (!value) return null;
+    return `sha256:${createHash('sha256').update(String(value)).digest('hex').slice(0, length)}`;
+}
 
 function containsImage(value, seen = new Set()) {
     if (!value || typeof value !== 'object' || seen.has(value)) return false;
@@ -103,6 +110,30 @@ export class RuntimeHookBridge {
 
     async handle(hookName, context = {}) {
         const requestId = context.requestId || context._monitorRequestId;
+        if (hookName === 'onUpstreamRequestPrepared') {
+            if (!requestId) return;
+            const current = this.pending.get(requestId) || { metadata: {}, usage: {}, hasImage: false };
+            const originalFingerprint = buildRequestFingerprint({ originalRequestBody: context.originalRequestBody });
+            const upstreamFingerprint = buildRequestFingerprint({ processedRequestBody: context.upstreamRequestBody });
+            current.metadata = {
+                ...current.metadata,
+                cache: {
+                    clientPromptCacheKeyHash: hashSecret(context.clientPromptCacheKey),
+                    finalPromptCacheKeyHash: hashSecret(context.finalPromptCacheKey),
+                    keySource: context.cacheKeySource || null,
+                    coordinationStatus: context.cacheCoordinationStatus || null,
+                    templateFingerprint: context.templateFingerprint || null,
+                    originalPrefixHashes: originalFingerprint.prefixHashes,
+                    upstreamPrefixHashes: upstreamFingerprint.prefixHashes,
+                    instructionsHash: upstreamFingerprint.instructionsHash,
+                    toolsHash: upstreamFingerprint.toolsHash,
+                    metadataHash: upstreamFingerprint.metadataHash,
+                    workerId: context.workerId || process.env.RUNTIME_WORKER_ID || null
+                }
+            };
+            this.pending.set(requestId, current);
+            return;
+        }
         if (hookName === 'onStreamChunk') {
             if (!requestId) return;
             const current = this.pending.get(requestId) || { metadata: compactMetadata(context), usage: {}, hasImage: false };
@@ -115,7 +146,12 @@ export class RuntimeHookBridge {
         if (hookName === 'onUnaryResponse') {
             if (!requestId) return;
             const usage = extractUsage(context.nativeResponse, context.clientResponse);
-            this.pending.set(requestId, { metadata: compactMetadata(context), usage, hasImage: containsImage(context.nativeResponse) || containsImage(context.clientResponse) });
+            const current = this.pending.get(requestId) || { metadata: {}, usage: {}, hasImage: false };
+            this.pending.set(requestId, {
+                metadata: { ...current.metadata, ...compactMetadata(context) },
+                usage: mergeUsage(current.usage, usage),
+                hasImage: current.hasImage || containsImage(context.nativeResponse) || containsImage(context.clientResponse)
+            });
             return;
         }
 

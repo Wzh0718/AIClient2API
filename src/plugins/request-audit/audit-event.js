@@ -137,7 +137,7 @@ export function buildRequestAuditEvent(context = {}) {
         : 'unverifiable';
 
     return {
-        schemaVersion: 3,
+        schemaVersion: 4,
         timestamp,
         beijingDate: beijing.date,
         beijingHour: beijing.hour,
@@ -189,6 +189,23 @@ export function buildRequestAuditEvent(context = {}) {
             assignmentMissing: context._codexRouting?.assignmentMissing === true,
             affinitySource: context._codexRouting?.affinitySource || null,
             hotShardApplied: context._codexRouting?.hotShardApplied === true
+        },
+        cache: {
+            clientPromptCacheKeyHash: context.cache?.clientPromptCacheKeyHash || null,
+            finalPromptCacheKeyHash: context.cache?.finalPromptCacheKeyHash || null,
+            keySource: ['client_explicit', 'shared_session', 'shared_template', 'local_fallback'].includes(context.cache?.keySource)
+                ? context.cache.keySource
+                : null,
+            coordinationStatus: ['shared', 'degraded'].includes(context.cache?.coordinationStatus)
+                ? context.cache.coordinationStatus
+                : null,
+            templateFingerprint: context.cache?.templateFingerprint || null,
+            originalPrefixHashes: Array.isArray(context.cache?.originalPrefixHashes) ? context.cache.originalPrefixHashes : [],
+            upstreamPrefixHashes: Array.isArray(context.cache?.upstreamPrefixHashes) ? context.cache.upstreamPrefixHashes : [],
+            instructionsHash: context.cache?.instructionsHash || null,
+            toolsHash: context.cache?.toolsHash || null,
+            metadataHash: context.cache?.metadataHash || null,
+            workerId: context.cache?.workerId || null
         },
         status: {
             ...derivedStatus,

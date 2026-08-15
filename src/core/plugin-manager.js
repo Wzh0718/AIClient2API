@@ -584,11 +584,15 @@ class PluginManager {
      * @param  {...any} args - 钩子参数
      */
     async executeHook(hookName, ...args) {
-        if (this.runtimeHookBridge && ['onUnaryResponse', 'onStreamChunk', 'onContentGenerated', 'onRequestCompleted'].includes(hookName)) {
+        const bridgedHooks = ['onUnaryResponse', 'onStreamChunk', 'onContentGenerated', 'onRequestCompleted', 'onUpstreamRequestPrepared'];
+        if (this.runtimeHookBridge && bridgedHooks.includes(hookName)) {
             await this.runtimeHookBridge.handle(hookName, args[0]);
         }
         for (const plugin of this.getEnabledPlugins()) {
-            if (this.runtimeHookBridge && ['api-potluck', 'request-audit', 'model-usage-stats'].includes(plugin.name)) continue;
+            if (this.runtimeHookBridge && ['api-potluck', 'request-audit', 'model-usage-stats'].includes(plugin.name)) {
+                const allowExecutionLocalRawCapture = plugin.name === 'request-audit' && hookName === 'onUpstreamRequestPrepared';
+                if (!allowExecutionLocalRawCapture) continue;
+            }
             if (!plugin.hooks || typeof plugin.hooks[hookName] !== 'function') continue;
             
             try {

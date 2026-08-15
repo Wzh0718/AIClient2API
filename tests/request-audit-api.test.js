@@ -125,8 +125,10 @@ describe('request audit api aggregation', () => {
     const payload = await callRoute('/api/request-audit/raw-capture', config, 'POST', {
       enabled: true,
       keyHashes: ['sha256:abcdef1234567890'],
-      ttlMinutes: 45,
-      maxBytes: 2097152
+      durationMinutes: 15,
+      maxBytes: 2097152,
+      maxFiles: 100,
+      maxTotalBytes: 100 * 1024 * 1024
     });
 
     expect(payload.success).toBe(true);
@@ -135,9 +137,32 @@ describe('request audit api aggregation', () => {
     expect(controller.updateOptions).toHaveBeenCalledWith({
       enabled: true,
       keyHashes: ['sha256:abcdef1234567890'],
-      ttlMinutes: 45,
-      maxBytes: 2097152
-    });
+      ttlMinutes: 15,
+      durationMinutes: 15,
+      expiresAt: expect.any(String),
+      maxBytes: 2097152,
+      maxFiles: 100,
+      maxTotalBytes: 100 * 1024 * 1024
+    }, { publish: true });
+  });
+
+  test('raw capture update limits scope to two keys and sixty minutes', async () => {
+    setRawCaptureController({ getStatus: jest.fn(), updateOptions: jest.fn() });
+    const payload = await callRoute('/api/request-audit/raw-capture', {
+      _requestAuditSkipConfigPersist: true,
+      _requestAuditSkipAuth: true
+    }, 'POST', {
+      enabled: true,
+      keyHashes: [
+        'sha256:aaaaaaaaaaaaaaaa',
+        'sha256:bbbbbbbbbbbbbbbb',
+        'sha256:cccccccccccccccc'
+      ],
+      durationMinutes: 120
+    }, 400);
+
+    expect(payload.success).toBe(false);
+    expect(payload.error.message).toContain('two');
   });
 
   test('raw capture update rejects invalid key hash', async () => {

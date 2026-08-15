@@ -188,6 +188,21 @@ redis.call('PEXPIRE', hot_key, ttl_ms)
 return cjson.encode({ count = redis.call('ZCARD', hot_key), ttlMs = ttl_ms })
 `;
 
+const RESOLVE_PROMPT_CACHE_KEY_SCRIPT = `
+local cache_key = KEYS[1] .. ':prompt-cache:' .. ARGV[1]
+local proposed_value = ARGV[2]
+local ttl_ms = tonumber(ARGV[3])
+local existing = redis.call('GET', cache_key)
+if existing then
+  redis.call('PEXPIRE', cache_key, ttl_ms)
+  return existing
+end
+redis.call('SET', cache_key, proposed_value, 'PX', ttl_ms, 'NX')
+local resolved = redis.call('GET', cache_key)
+if resolved then redis.call('PEXPIRE', cache_key, ttl_ms) end
+return resolved
+`;
+
 function normalizeCandidate(candidate, priority) {
     const providerType = String(candidate.providerType || '');
     const uuid = String(candidate.uuid || '');
@@ -287,6 +302,19 @@ export class RedisLeaseCoordinator {
         ]);
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         return { count: Number(parsed?.count || 0), ttlMs };
+    }
+
+    async resolvePromptCacheKey(scope, { ttlMs = 60 * 60 * 1000 } = {}) {
+        const normalizedScope = String(scope || '').trim();
+        if (!normalizedScope) throw new TypeError('Prompt cache scope is required');
+        const safeTtlMs = Math.max(60_000, Number(ttlMs) || 60 * 60 * 1000);
+        const result = await this._eval('resolve-prompt-cache-key', RESOLVE_PROMPT_CACHE_KEY_SCRIPT, [
+            hashAffinityKey(normalizedScope),
+            randomUUID(),
+            String(safeTtlMs)
+        ]);
+        if (!result) throw new CoordinationUnavailableError('Redis prompt cache key resolution returned no value');
+        return String(result);
     }
 
     async release(leaseId) {

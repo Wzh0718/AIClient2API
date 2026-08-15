@@ -1,7 +1,7 @@
 import logger from '../../utils/logger.js';
-import { buildRequestAuditEvent, normalizeUsage } from './audit-event.js';
+import { buildRequestAuditEvent, hashSecret, maskPotluckKey, normalizeUsage } from './audit-event.js';
 import { extractUsage as extractNormalizedUsage, mergeUsage as mergeNormalizedUsage } from '../../utils/usage-normalizer.js';
-import { getAnalysisStore, getAuditStore, handleRequestAuditRoutes, setAnalysisStore, setAuditStore, setRawCaptureController } from './api-routes.js';
+import { getAnalysisStore, getAuditStore, handleRequestAuditRoutes, persistRawCaptureConfig, setAnalysisStore, setAuditStore, setRawCaptureController } from './api-routes.js';
 import { createRequestAuditAnalyzerRunner } from './analyzer-runner.js';
 import { buildBoundedRawCaptureEvent, RequestAuditRawCaptureStore, shouldCaptureRawRequest } from './raw-capture-store.js';
 
@@ -9,6 +9,7 @@ const pendingUsage = new Map();
 const pendingAuditContexts = new Map();
 const finalizedRequestIds = new Map();
 const auditQueue = [];
+const executionRawCaptureQueue = [];
 let auditQueueBytes = 0;
 let enabled = true;
 let store = null;
@@ -21,6 +22,11 @@ let analyzerRunner = null;
 let analyzerRunOnInitHandle = null;
 let rawCaptureStore = null;
 let rawCaptureOptions = { enabled: false, keyHashes: [] };
+let rawCaptureEventSink = null;
+let rawCaptureRevision = 0;
+let rawCaptureConfigTarget = null;
+let rawCaptureStopReason = null;
+let executionRawCaptureFlushPromise = null;
 let acceptingAuditContext = false;
 let destroyPromise = null;
 let auditLossCounts = new Map();
@@ -31,6 +37,7 @@ const MAX_AUDIT_QUEUE_EVENTS = 1000;
 const AUDIT_FLUSH_BATCH_SIZE = 5;
 const MAX_PENDING_USAGE_ENTRIES = 10000;
 const MAX_AUDIT_QUEUE_BYTES = 8 * 1024 * 1024;
+const MAX_EXECUTION_RAW_CAPTURE_QUEUE = 20;
 
 function recordAuditLoss(reason, count = 1) {
     const nextCount = (auditLossCounts.get(reason) || 0) + Math.max(1, Number(count) || 1);
@@ -160,7 +167,8 @@ function enqueueFinalAudit(context = {}) {
         timestamp: new Date().toISOString()
     });
     let rawCaptureEvent = null;
-    if (shouldCaptureRawRequest(rawCaptureOptions, event) && rawCaptureStore) {
+    const alreadyCapturedByExecutionWorker = Boolean(context.cache);
+    if (!alreadyCapturedByExecutionWorker && shouldCaptureRawRequest(rawCaptureOptions, event) && rawCaptureStore) {
         try {
             rawCaptureEvent = buildBoundedRawCaptureEvent(event, context, rawCaptureStore.maxBytes);
         } catch {
@@ -240,7 +248,8 @@ async function flushAuditQueue() {
             const { rawCaptureEvent } = work;
             if (rawCaptureEvent && rawCaptureStore) {
                 try {
-                    await rawCaptureStore.capture(rawCaptureEvent);
+                    const result = await rawCaptureStore.capture(rawCaptureEvent);
+                    if (result?.stopReason) await disableRawCapture(result.stopReason);
                 } catch (error) {
                     recordAuditLoss('raw capture failure');
                     logger.warn(`[Request Audit] Failed to capture raw request (${error?.code || error?.name || 'Error'})`);
@@ -249,6 +258,60 @@ async function flushAuditQueue() {
         }
         if (auditQueue.length > 0) await nextTick();
     }
+}
+
+async function disableRawCapture(reason) {
+    if (!rawCaptureOptions.enabled) return;
+    rawCaptureStopReason = reason || 'stopped';
+    const controller = createRawCaptureController();
+    controller.updateOptions({
+        enabled: false,
+        keyHashes: rawCaptureOptions.keyHashes,
+        ttlMinutes: rawCaptureStore?.ttlMinutes,
+        expiresAt: null,
+        maxBytes: rawCaptureStore?.maxBytes,
+        maxFiles: rawCaptureStore?.maxFiles,
+        maxTotalBytes: rawCaptureStore?.maxTotalBytes
+    }, { publish: Boolean(rawCaptureEventSink) });
+    if (rawCaptureConfigTarget && rawCaptureEventSink) {
+        await persistRawCaptureConfig(rawCaptureConfigTarget, {
+            enabled: false,
+            keyHashes: rawCaptureOptions.keyHashes,
+            ttlMinutes: rawCaptureStore?.ttlMinutes,
+            expiresAt: null,
+            maxBytes: rawCaptureStore?.maxBytes,
+            maxFiles: rawCaptureStore?.maxFiles,
+            maxTotalBytes: rawCaptureStore?.maxTotalBytes
+        }).catch(() => logger.warn('[Request Audit] Failed to persist automatic raw capture shutdown'));
+    }
+}
+
+function scheduleExecutionRawCapture() {
+    if (executionRawCaptureFlushPromise) return;
+    executionRawCaptureFlushPromise = new Promise(resolve => setImmediate(resolve))
+        .then(async () => {
+            while (executionRawCaptureQueue.length > 0) {
+                const work = executionRawCaptureQueue.shift();
+                if (!work || !rawCaptureStore) continue;
+                try {
+                    const snapshot = buildBoundedRawCaptureEvent(work.event, work.context, rawCaptureStore.maxBytes);
+                    const result = await rawCaptureStore.capture(snapshot);
+                    if (result?.stopReason) await disableRawCapture(result.stopReason);
+                } catch (error) {
+                    recordAuditLoss('raw capture failure');
+                    logger.warn(`[Request Audit] Failed to capture execution-local raw request (${error?.code || error?.name || 'Error'})`);
+                }
+            }
+        })
+        .finally(() => {
+            executionRawCaptureFlushPromise = null;
+            if (executionRawCaptureQueue.length > 0) scheduleExecutionRawCapture();
+        });
+}
+
+async function drainExecutionRawCaptureQueue() {
+    if (!executionRawCaptureFlushPromise && executionRawCaptureQueue.length > 0) scheduleExecutionRawCapture();
+    while (executionRawCaptureFlushPromise) await executionRawCaptureFlushPromise;
 }
 
 async function drainAuditQueue() {
@@ -293,33 +356,82 @@ function scheduleAuditCleanup() {
     lastCleanupAt = now;
     return runCleanupTasks([
         () => store.cleanup(),
-        () => rawCaptureStore?.cleanup?.()
+        async () => {
+            await rawCaptureStore?.cleanup?.();
+            await createRawCaptureController().getStatus();
+        }
     ]);
 }
 
 function createRawCaptureController() {
     return {
         async getStatus() {
+            const stats = await rawCaptureStore?.getStats?.() || {
+                fileCount: await rawCaptureStore?.countFiles?.() || 0,
+                totalBytes: 0
+            };
+            const expired = Boolean(rawCaptureOptions.expiresAt && Date.now() >= new Date(rawCaptureOptions.expiresAt).getTime());
+            const capacityReached = stats.fileCount >= (rawCaptureStore?.maxFiles || 100) ||
+                stats.totalBytes >= (rawCaptureStore?.maxTotalBytes || 100 * 1024 * 1024);
+            if (rawCaptureOptions.enabled && (expired || capacityReached)) {
+                await disableRawCapture(expired ? 'expired' : 'capacity');
+            }
             return {
-                enabled: rawCaptureOptions.enabled === true || rawCaptureOptions.enabled === 'true',
+                enabled: (rawCaptureOptions.enabled === true || rawCaptureOptions.enabled === 'true') && !expired && !capacityReached,
+                configuredEnabled: rawCaptureOptions.enabled === true || rawCaptureOptions.enabled === 'true',
                 keyHashes: Array.isArray(rawCaptureOptions.keyHashes) ? rawCaptureOptions.keyHashes : [],
                 ttlMinutes: rawCaptureStore?.ttlMinutes || 60,
+                expiresAt: rawCaptureOptions.expiresAt || rawCaptureStore?.expiresAt || null,
                 maxBytes: rawCaptureStore?.maxBytes || 1024 * 1024,
+                maxFiles: rawCaptureStore?.maxFiles || 100,
+                maxTotalBytes: rawCaptureStore?.maxTotalBytes || 100 * 1024 * 1024,
                 dir: rawCaptureStore?.dir || null,
-                fileCount: await rawCaptureStore?.countFiles?.() || 0
+                fileCount: stats.fileCount,
+                totalBytes: stats.totalBytes,
+                stopReason: rawCaptureStopReason || (expired ? 'expired' : capacityReached ? 'capacity' : null),
+                revision: rawCaptureRevision,
+                workerSync: globalThis.rawCaptureConfigSyncStatus || null
             };
         },
-        updateOptions(options = {}) {
+        updateOptions(options = {}, { publish = false } = {}) {
+            rawCaptureRevision = Math.max(rawCaptureRevision + 1, Number(options.revision) || 0);
             rawCaptureOptions = {
                 enabled: options.enabled === true || options.enabled === 'true',
-                keyHashes: Array.isArray(options.keyHashes) ? options.keyHashes : []
+                keyHashes: Array.isArray(options.keyHashes) ? options.keyHashes : [],
+                expiresAt: options.expiresAt || null
             };
+            if (rawCaptureOptions.enabled) rawCaptureStopReason = null;
             rawCaptureStore?.updateOptions?.({
                 ttlMinutes: options.ttlMinutes,
-                maxBytes: options.maxBytes
+                maxBytes: options.maxBytes,
+                expiresAt: options.expiresAt,
+                maxFiles: options.maxFiles,
+                maxTotalBytes: options.maxTotalBytes
             });
+            if (publish && rawCaptureEventSink) {
+                rawCaptureEventSink({
+                    type: 'request_audit_raw_capture_sync',
+                    revision: rawCaptureRevision,
+                    options: {
+                        enabled: rawCaptureOptions.enabled,
+                        keyHashes: rawCaptureOptions.keyHashes,
+                        ttlMinutes: rawCaptureStore?.ttlMinutes,
+                        expiresAt: rawCaptureOptions.expiresAt,
+                        maxBytes: rawCaptureStore?.maxBytes,
+                        maxFiles: rawCaptureStore?.maxFiles,
+                        maxTotalBytes: rawCaptureStore?.maxTotalBytes
+                    }
+                });
+            }
         }
     };
+}
+
+export function applyRawCaptureRuntimeConfig(event = {}) {
+    if (event.type !== 'request_audit_raw_capture_sync') return { applied: false, revision: rawCaptureRevision };
+    if (Number(event.revision) <= rawCaptureRevision) return { applied: false, revision: rawCaptureRevision };
+    createRawCaptureController().updateOptions({ ...(event.options || {}), revision: event.revision });
+    return { applied: true, revision: rawCaptureRevision };
 }
 
 function startCleanupTimer() {
@@ -330,7 +442,10 @@ function startCleanupTimer() {
 
 function cleanupRawCaptureOnInit() {
     return runCleanupTasks([
-        () => rawCaptureStore?.cleanup?.()
+        async () => {
+            await rawCaptureStore?.cleanup?.();
+            await createRawCaptureController().getStatus();
+        }
     ]);
 }
 
@@ -364,12 +479,18 @@ const requestAuditPlugin = {
         rawCaptureStore = config._requestAuditRawCaptureStore || new RequestAuditRawCaptureStore({
             dir: config.REQUEST_AUDIT_RAW_CAPTURE_DIR,
             ttlMinutes: config.REQUEST_AUDIT_RAW_CAPTURE_TTL_MINUTES || 60,
-            maxBytes: config.REQUEST_AUDIT_RAW_CAPTURE_MAX_BYTES || 1024 * 1024
+            maxBytes: config.REQUEST_AUDIT_RAW_CAPTURE_MAX_BYTES || 1024 * 1024,
+            expiresAt: config.REQUEST_AUDIT_RAW_CAPTURE_EXPIRES_AT || null,
+            maxFiles: config.REQUEST_AUDIT_RAW_CAPTURE_MAX_FILES || 100,
+            maxTotalBytes: config.REQUEST_AUDIT_RAW_CAPTURE_MAX_TOTAL_BYTES || 100 * 1024 * 1024
         });
         rawCaptureOptions = {
             enabled: config.REQUEST_AUDIT_RAW_CAPTURE_ENABLED === true || config.REQUEST_AUDIT_RAW_CAPTURE_ENABLED === 'true',
-            keyHashes: config.REQUEST_AUDIT_RAW_CAPTURE_KEY_HASHES || []
+            keyHashes: config.REQUEST_AUDIT_RAW_CAPTURE_KEY_HASHES || [],
+            expiresAt: config.REQUEST_AUDIT_RAW_CAPTURE_EXPIRES_AT || null
         };
+        rawCaptureEventSink = config._requestAuditRawCaptureEventSink || null;
+        rawCaptureConfigTarget = config;
         setRawCaptureController(createRawCaptureController());
         lastCleanupAt = 0;
         startCleanupTimer();
@@ -422,12 +543,17 @@ const requestAuditPlugin = {
         const cleanupDrain = cleanupPromise || Promise.resolve();
 
         destroyPromise = (async () => {
-            const [analyzerResult] = await Promise.all([analyzerDrain, cleanupDrain, drainAuditQueue()]);
+            const [analyzerResult] = await Promise.all([analyzerDrain, cleanupDrain, drainAuditQueue(), drainExecutionRawCaptureQueue()]);
             if (analyzerResult?.failureCount > 0) {
                 recordAuditLoss('analyzer failure', analyzerResult.failureCount);
             }
             rawCaptureStore = null;
             rawCaptureOptions = { enabled: false, keyHashes: [] };
+            rawCaptureEventSink = null;
+            rawCaptureConfigTarget = null;
+            rawCaptureStopReason = null;
+            executionRawCaptureQueue.length = 0;
+            executionRawCaptureFlushPromise = null;
             store = null;
 
             const shutdownError = buildShutdownError();
@@ -439,6 +565,38 @@ const requestAuditPlugin = {
     },
 
     hooks: {
+        async onUpstreamRequestPrepared(context = {}) {
+            if (!enabled || !acceptingAuditContext || !rawCaptureStore) return;
+            const event = {
+                schemaVersion: 1,
+                requestId: getRequestId(context),
+                timestamp: new Date().toISOString(),
+                potluckKey: maskPotluckKey(context.potluckApiKey),
+                request: {
+                    model: context.model || null,
+                    providerUuidHash: hashSecret(context.providerUuid),
+                    workerId: context.workerId || process.env.RUNTIME_WORKER_ID || null,
+                    finalPromptCacheKeyHash: hashSecret(context.finalPromptCacheKey, 32),
+                    keySource: context.cacheKeySource || null,
+                    coordinationStatus: context.cacheCoordinationStatus || null,
+                    templateFingerprint: context.templateFingerprint || null
+                }
+            };
+            if (!event.requestId || !shouldCaptureRawRequest(rawCaptureOptions, event)) return;
+            if (executionRawCaptureQueue.length >= MAX_EXECUTION_RAW_CAPTURE_QUEUE) {
+                recordAuditLoss('execution raw capture queue overflow');
+                return;
+            }
+            executionRawCaptureQueue.push({
+                event,
+                context: {
+                    originalRequestBody: context.originalRequestBody,
+                    processedRequestBody: context.upstreamRequestBody
+                }
+            });
+            scheduleExecutionRawCapture();
+        },
+
         async onUnaryResponse({ requestId, nativeResponse, clientResponse }) {
             if (!enabled || !acceptingAuditContext || !requestId) return;
             setPendingUsage(requestId, extractUsage(nativeResponse, clientResponse));

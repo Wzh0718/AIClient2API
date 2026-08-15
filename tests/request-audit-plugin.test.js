@@ -1,4 +1,4 @@
-import plugin from '../src/plugins/request-audit/index.js';
+import plugin, { applyRawCaptureRuntimeConfig } from '../src/plugins/request-audit/index.js';
 
 async function waitFor(expectation, timeoutMs = 1000) {
   const start = Date.now();
@@ -207,6 +207,107 @@ describe('request audit plugin', () => {
     await waitFor(() => expect(auditStore.append).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(rawCaptureStore.capture).toHaveBeenCalledTimes(1));
     expect(rawCaptureStore.capture.mock.calls[0][0].originalRequestBody.input).toBe('raw capture scope test');
+  });
+
+  test('captures the exact prepared upstream request through the execution-local hook', async () => {
+    const auditStore = { append: jest.fn(), cleanup: jest.fn() };
+    const rawCaptureStore = { capture: jest.fn(async () => ({ captured: true })), cleanup: jest.fn() };
+    await plugin.init({
+      REQUEST_AUDIT_ENABLED: true,
+      REQUEST_AUDIT_RAW_CAPTURE_ENABLED: true,
+      REQUEST_AUDIT_RAW_CAPTURE_KEY_HASHES: ['sha256:1f223db5f9b186a5'],
+      _requestAuditStore: auditStore,
+      _requestAuditRawCaptureStore: rawCaptureStore
+    });
+
+    await plugin.hooks.onUpstreamRequestPrepared({
+      requestId: 'req-prepared',
+      potluckApiKey: 'maki_secret_key',
+      model: 'gpt-5.4-mini',
+      providerUuid: 'provider-a',
+      originalRequestBody: { input: 'original prompt' },
+      upstreamRequestBody: { input: 'prepared prompt', prompt_cache_key: 'cache-key' }
+    });
+
+    await waitFor(() => expect(rawCaptureStore.capture).toHaveBeenCalledTimes(1));
+    expect(rawCaptureStore.capture.mock.calls[0][0]).toMatchObject({
+      requestId: 'req-prepared',
+      originalRequestBody: { input: 'original prompt' },
+      processedRequestBody: { input: 'prepared prompt', prompt_cache_key: 'cache-key' }
+    });
+
+    await plugin.hooks.onUnaryResponse({
+      requestId: 'req-prepared', nativeResponse: { usage: { prompt_tokens: 10, total_tokens: 10 } }
+    });
+    await plugin.hooks.onContentGenerated({
+      _monitorRequestId: 'req-prepared',
+      potluckApiKey: 'maki_secret_key',
+      model: 'gpt-5.4-mini',
+      cache: { keySource: 'shared_template' }
+    });
+    await waitFor(() => expect(auditStore.append).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(rawCaptureStore.capture).toHaveBeenCalledTimes(1));
+  });
+
+  test('applies a newer raw capture revision on an execution worker', async () => {
+    const auditStore = { append: jest.fn(), cleanup: jest.fn() };
+    const rawCaptureStore = { capture: jest.fn(async () => ({ captured: true })), cleanup: jest.fn(), updateOptions: jest.fn() };
+    await plugin.init({
+      REQUEST_AUDIT_ENABLED: true,
+      REQUEST_AUDIT_RAW_CAPTURE_ENABLED: false,
+      _requestAuditStore: auditStore,
+      _requestAuditRawCaptureStore: rawCaptureStore
+    });
+
+    expect(applyRawCaptureRuntimeConfig({
+      type: 'request_audit_raw_capture_sync',
+      revision: 7,
+      options: {
+        enabled: true,
+        keyHashes: ['sha256:1f223db5f9b186a5'],
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        maxFiles: 100,
+        maxTotalBytes: 100 * 1024 * 1024
+      }
+    })).toEqual({ applied: true, revision: 7 });
+
+    await plugin.hooks.onUpstreamRequestPrepared({
+      requestId: 'req-synced', potluckApiKey: 'maki_secret_key',
+      originalRequestBody: { input: 'original' }, upstreamRequestBody: { input: 'prepared' }
+    });
+    await waitFor(() => expect(rawCaptureStore.capture).toHaveBeenCalledTimes(1));
+  });
+
+  test('automatically disables and broadcasts raw capture after a capacity stop', async () => {
+    const sink = jest.fn();
+    const rawCaptureStore = {
+      capture: jest.fn(async () => ({ captured: false, stopReason: 'max_files' })),
+      cleanup: jest.fn(),
+      updateOptions: jest.fn(),
+      maxBytes: 2 * 1024 * 1024,
+      maxFiles: 100,
+      maxTotalBytes: 100 * 1024 * 1024,
+      ttlMinutes: 15
+    };
+    await plugin.init({
+      REQUEST_AUDIT_ENABLED: true,
+      REQUEST_AUDIT_RAW_CAPTURE_ENABLED: true,
+      REQUEST_AUDIT_RAW_CAPTURE_KEY_HASHES: ['sha256:1f223db5f9b186a5'],
+      _requestAuditSkipConfigPersist: true,
+      _requestAuditStore: { append: jest.fn(), cleanup: jest.fn() },
+      _requestAuditRawCaptureStore: rawCaptureStore,
+      _requestAuditRawCaptureEventSink: sink
+    });
+
+    await plugin.hooks.onUpstreamRequestPrepared({
+      requestId: 'req-capacity', potluckApiKey: 'maki_secret_key',
+      originalRequestBody: { input: 'original' }, upstreamRequestBody: { input: 'prepared' }
+    });
+
+    await waitFor(() => expect(sink).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'request_audit_raw_capture_sync',
+      options: expect.objectContaining({ enabled: false })
+    })));
   });
 
   test('init cleans expired raw capture files without forcing audit cleanup', async () => {

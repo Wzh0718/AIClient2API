@@ -11,12 +11,19 @@ class InMemoryRedisExecutor {
         this.readyWorkers = new Set();
         this.affinity = new Map();
         this.hotRequests = new Map();
+        this.promptCacheKeys = new Map();
         this.scriptCalls = [];
     }
 
     async evalScript(name, _script, keys, args) {
         if (!this.available) throw new Error('redis unavailable');
         this.scriptCalls.push({ name, keys, args });
+        if (name === 'resolve-prompt-cache-key') {
+            const [scopeHash, proposedValue] = args;
+            const key = `${keys[0]}:prompt-cache:${scopeHash}`;
+            if (!this.promptCacheKeys.has(key)) this.promptCacheKeys.set(key, proposedValue);
+            return this.promptCacheKeys.get(key);
+        }
         if (name === 'record-hot-request') {
             const [affinityHash, observationHash, nowMs, windowMs, ttlMs] = args;
             const key = `${keys[0]}:hot:${affinityHash}`;
@@ -102,6 +109,30 @@ class InMemoryRedisExecutor {
 }
 
 describe('RedisLeaseCoordinator', () => {
+    test('shares prompt cache keys across workers without exposing the raw scope', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const first = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+        const second = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w2' });
+
+        const firstKey = await first.resolvePromptCacheKey('provider-a:session:private-session');
+        const secondKey = await second.resolvePromptCacheKey('provider-a:session:private-session');
+        const otherProviderKey = await second.resolvePromptCacheKey('provider-b:session:private-session');
+
+        expect(secondKey).toBe(firstKey);
+        expect(otherProviderKey).not.toBe(firstKey);
+        const calls = redis.scriptCalls.filter(call => call.name === 'resolve-prompt-cache-key');
+        expect(JSON.stringify(calls)).not.toContain('private-session');
+    });
+
+    test('reports coordination failure while resolving prompt cache keys', async () => {
+        const redis = new InMemoryRedisExecutor();
+        redis.available = false;
+        const coordinator = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+
+        await expect(coordinator.resolvePromptCacheKey('provider-a:session:one'))
+            .rejects.toBeInstanceOf(CoordinationUnavailableError);
+    });
+
     test('enforces explicit limits globally while keeping zero as unlimited', async () => {
         const redis = new InMemoryRedisExecutor();
         const first = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });

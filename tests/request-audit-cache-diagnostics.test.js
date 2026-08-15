@@ -3,86 +3,75 @@ import { buildDiagnostics, diagnoseCacheMiss } from '../src/plugins/request-audi
 function event(overrides = {}) {
   return {
     requestId: overrides.requestId || 'req-current',
-    timestamp: overrides.timestamp || '2026-06-24T06:00:00.000Z',
+    timestamp: overrides.timestamp || '2026-08-14T06:00:00.000Z',
     potluckKey: { hash: overrides.keyHash || 'sha256:key' },
-    request: {
-      model: overrides.model || 'gpt-5.5',
-      toProvider: overrides.toProvider || 'openai-codex-oauth'
-    },
-    account: {
-      providerUuidHash: overrides.accountUuid || 'account-a',
-      providerNameDisplay: overrides.accountName || 'account-a'
-    },
+    request: { model: overrides.model || 'gpt-5.5' },
+    account: { providerUuidHash: overrides.accountUuid || 'provider-a' },
     usage: {
       promptTokens: overrides.promptTokens ?? 10000,
-      cachedTokens: overrides.cachedTokens ?? 100
+      cachedTokens: overrides.cachedTokens ?? 1000
     },
-    fingerprint: {
-      payloadHash: overrides.payloadHash || 'sha256:payload-current',
-      toolsHash: overrides.toolsHash || 'sha256:tools-a',
+    cache: {
+      finalPromptCacheKeyHash: overrides.finalKey || 'sha256:cache-a',
+      templateFingerprint: overrides.template || 'sha256:template-a',
       instructionsHash: overrides.instructionsHash || 'sha256:inst-a',
-      prefixHashes: overrides.prefixHashes || [{ chars: 4096, hash: 'sha256:prefix-a' }],
-      sections: {
-        attachments: { count: overrides.attachmentCount || 0 },
-        conversation: { charLength: overrides.conversationChars || 20000 }
-      }
+      toolsHash: overrides.toolsHash || 'sha256:tools-a',
+      upstreamPrefixHashes: overrides.prefixHashes || [{ chars: 32768, hash: 'sha256:prefix-a' }],
+      theoreticalCacheRatio: overrides.theoreticalCacheRatio
     }
   };
 }
 
-describe('request audit cache diagnostics', () => {
-  test('detects changed prefix for same key model and account', () => {
-    const current = event({ prefixHashes: [{ chars: 4096, hash: 'sha256:prefix-b' }] });
-    const previous = event({ requestId: 'req-prev', payloadHash: 'sha256:payload-prev', prefixHashes: [{ chars: 4096, hash: 'sha256:prefix-a' }] });
+describe('request audit cache diagnostics v4', () => {
+  test('classifies client-limited prefixes when actual is near the theoretical ceiling', () => {
+    const diagnosis = diagnoseCacheMiss(event({ cachedTokens: 2500, theoreticalCacheRatio: 0.32 }), []);
+    expect(diagnosis.primaryReason).toBe('client_prefix_limited');
+    expect(diagnosis.cacheGap).toBeCloseTo(0.07);
+  });
 
+  test('classifies changing instructions, tools, or early structure', () => {
+    const current = event({ instructionsHash: 'sha256:inst-b' });
+    const previous = event({ requestId: 'previous' });
     const diagnosis = diagnoseCacheMiss(current, [previous]);
-
-    expect(diagnosis.primaryReason).toBe('prefix_changed');
-    expect(diagnosis.comparableRequestId).toBe('req-prev');
-    expect(diagnosis.reasons.map(reason => reason.code)).toContain('prefix_changed');
+    expect(diagnosis.primaryReason).toBe('client_structure_variance');
   });
 
-  test('detects changed tools for same key model and account', () => {
-    const current = event({ toolsHash: 'sha256:tools-b' });
-    const previous = event({ requestId: 'req-prev', toolsHash: 'sha256:tools-a' });
-
+  test('classifies multiple final keys for one provider and template', () => {
+    const current = event({ finalKey: 'sha256:cache-b' });
+    const previous = event({ requestId: 'previous', finalKey: 'sha256:cache-a' });
     const diagnosis = diagnoseCacheMiss(current, [previous]);
-
-    expect(diagnosis.primaryReason).toBe('tools_changed');
+    expect(diagnosis.primaryReason).toBe('gateway_key_fragmentation');
   });
 
-  test('detects account and model changes across comparable key requests', () => {
-    const accountDiagnosis = diagnoseCacheMiss(event({ accountUuid: 'account-b' }), [
-      event({ requestId: 'req-prev', accountUuid: 'account-a' })
-    ]);
-    const modelDiagnosis = diagnoseCacheMiss(event({ model: 'gpt-5.4-mini' }), [
-      event({ requestId: 'req-prev', model: 'gpt-5.5' })
-    ]);
-
-    expect(accountDiagnosis.reasons.map(reason => reason.code)).toContain('account_changed');
-    expect(modelDiagnosis.reasons.map(reason => reason.code)).toContain('model_changed');
+  test('classifies provider fragmentation when a stable template has a large cache gap', () => {
+    const current = event({ accountUuid: 'provider-b', theoreticalCacheRatio: 0.8, cachedTokens: 1000 });
+    const previous = event({ requestId: 'previous', accountUuid: 'provider-a', theoreticalCacheRatio: 0.8 });
+    const diagnosis = diagnoseCacheMiss(current, [previous]);
+    expect(diagnosis.primaryReason).toBe('gateway_provider_fragmentation');
   });
 
-  test('detects short prompt or low cacheable input', () => {
-    const diagnosis = diagnoseCacheMiss(event({ promptTokens: 900, cachedTokens: 0 }), []);
-
-    expect(diagnosis.primaryReason).toBe('short_prompt_or_low_cacheable_input');
-    expect(diagnosis.confidence).toBeGreaterThan(0);
+  test('classifies stable provider, key, and prefix with a large unexplained gap', () => {
+    const current = event({ theoreticalCacheRatio: 0.8, cachedTokens: 1000 });
+    const previous = event({ requestId: 'previous', theoreticalCacheRatio: 0.8 });
+    const diagnosis = diagnoseCacheMiss(current, [previous]);
+    expect(diagnosis.primaryReason).toBe('upstream_cache_uncertain');
   });
 
-  test('uses unknown ttl reason when no comparable evidence exists', () => {
-    const diagnosis = diagnoseCacheMiss(event(), []);
-
-    expect(diagnosis.primaryReason).toBe('unknown_or_upstream_cache_ttl');
-    expect(diagnosis.reasons.map(reason => reason.code)).toContain('unknown_or_upstream_cache_ttl');
+  test('keeps schema v3 fingerprint evidence readable', () => {
+    const legacy = event({ requestId: 'legacy' });
+    delete legacy.cache;
+    legacy.fingerprint = {
+      instructionsHash: 'sha256:inst-a',
+      toolsHash: 'sha256:tools-a',
+      prefixHashes: [{ chars: 4096, hash: 'sha256:prefix-a' }]
+    };
+    const diagnosis = diagnoseCacheMiss(legacy, []);
+    expect(diagnosis.primaryReason).toBe('client_prefix_limited');
   });
 
-  test('builds diagnostics for low cache events only', () => {
+  test('builds diagnostics for low-cache events only', () => {
     const low = event({ requestId: 'low', cachedTokens: 100 });
     const high = event({ requestId: 'high', cachedTokens: 8000 });
-    const diagnostics = buildDiagnostics([high, low]);
-
-    expect(diagnostics.map(item => item.requestId)).toContain('low');
-    expect(diagnostics.map(item => item.requestId)).not.toContain('high');
+    expect(buildDiagnostics([high, low]).map(item => item.requestId)).toEqual(['low']);
   });
 });

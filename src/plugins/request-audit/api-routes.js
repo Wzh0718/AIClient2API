@@ -138,6 +138,11 @@ function normalizeKeyHashes(value) {
 
 function normalizeRawCaptureUpdate(body = {}) {
     const keyHashes = normalizeKeyHashes(body.keyHashes);
+    if (keyHashes.length > 2) {
+        const error = new Error('Raw capture supports at most two scoped key hashes.');
+        error.statusCode = 400;
+        throw error;
+    }
     for (const keyHash of keyHashes) {
         if (!/^sha256:[a-f0-9]{16}$/i.test(keyHash)) {
             const error = new Error('Invalid raw capture key hash. Expected sha256:xxxxxxxxxxxxxxxx key hash.');
@@ -145,21 +150,32 @@ function normalizeRawCaptureUpdate(body = {}) {
             throw error;
         }
     }
-    const ttlMinutes = Math.min(Math.max(Number(body.ttlMinutes) || 30, 1), 24 * 60);
+    const durationMinutes = Math.min(Math.max(Number(body.durationMinutes ?? body.ttlMinutes) || 15, 1), 60);
     const maxBytes = Math.min(Math.max(Number(body.maxBytes) || 2 * 1024 * 1024, 1024), 10 * 1024 * 1024);
+    const maxFiles = Math.min(Math.max(Number(body.maxFiles) || 100, 1), 100);
+    const maxTotalBytes = Math.min(Math.max(Number(body.maxTotalBytes) || 100 * 1024 * 1024, 1024 * 1024), 100 * 1024 * 1024);
     return {
         enabled: body.enabled === true || body.enabled === 'true',
         keyHashes: keyHashes.map(keyHash => `sha256:${keyHash.slice(7).toLowerCase()}`),
-        ttlMinutes,
-        maxBytes
+        ttlMinutes: durationMinutes,
+        durationMinutes,
+        expiresAt: body.enabled === true || body.enabled === 'true'
+            ? new Date(Date.now() + durationMinutes * 60 * 1000).toISOString()
+            : null,
+        maxBytes,
+        maxFiles,
+        maxTotalBytes
     };
 }
 
-async function persistRawCaptureConfig(config = {}, options = {}) {
+export async function persistRawCaptureConfig(config = {}, options = {}) {
     config.REQUEST_AUDIT_RAW_CAPTURE_ENABLED = options.enabled;
     config.REQUEST_AUDIT_RAW_CAPTURE_KEY_HASHES = options.keyHashes;
     config.REQUEST_AUDIT_RAW_CAPTURE_TTL_MINUTES = options.ttlMinutes;
+    config.REQUEST_AUDIT_RAW_CAPTURE_EXPIRES_AT = options.expiresAt;
     config.REQUEST_AUDIT_RAW_CAPTURE_MAX_BYTES = options.maxBytes;
+    config.REQUEST_AUDIT_RAW_CAPTURE_MAX_FILES = options.maxFiles;
+    config.REQUEST_AUDIT_RAW_CAPTURE_MAX_TOTAL_BYTES = options.maxTotalBytes;
 
     if (config._requestAuditSkipConfigPersist) return;
 
@@ -173,7 +189,10 @@ async function persistRawCaptureConfig(config = {}, options = {}) {
             REQUEST_AUDIT_RAW_CAPTURE_ENABLED: options.enabled,
             REQUEST_AUDIT_RAW_CAPTURE_KEY_HASHES: options.keyHashes,
             REQUEST_AUDIT_RAW_CAPTURE_TTL_MINUTES: options.ttlMinutes,
-            REQUEST_AUDIT_RAW_CAPTURE_MAX_BYTES: options.maxBytes
+            REQUEST_AUDIT_RAW_CAPTURE_EXPIRES_AT: options.expiresAt,
+            REQUEST_AUDIT_RAW_CAPTURE_MAX_BYTES: options.maxBytes,
+            REQUEST_AUDIT_RAW_CAPTURE_MAX_FILES: options.maxFiles,
+            REQUEST_AUDIT_RAW_CAPTURE_MAX_TOTAL_BYTES: options.maxTotalBytes
         });
         await atomicWriteFile(configPath, JSON.stringify(fileConfig, null, 2), { encoding: 'utf8', mode: 0o600 });
     });
@@ -239,7 +258,7 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
                 const body = await getRequestBody(req, { maxBytes: 16 * 1024 });
                 const options = normalizeRawCaptureUpdate(body);
                 await persistRawCaptureConfig(config, options);
-                rawCaptureController.updateOptions(options);
+                rawCaptureController.updateOptions(options, { publish: true });
                 sendJson(res, 200, { success: true, data: await rawCaptureController.getStatus() });
             } catch (error) {
                 sendJson(res, error.statusCode || 500, { success: false, error: { message: error.message } });

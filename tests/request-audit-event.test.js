@@ -2,7 +2,7 @@ import { buildRequestAuditEvent } from '../src/plugins/request-audit/audit-event
 import { buildAuditSummary } from '../src/plugins/request-audit/api-routes.js';
 
 describe('request audit event', () => {
-  test('builds a self-contained v3 event with request network and response facts', () => {
+  test('builds a self-contained v4 event with request network and response facts', () => {
     const event = buildRequestAuditEvent({
       requestId: 'req-v2',
       method: 'POST',
@@ -22,7 +22,7 @@ describe('request audit event', () => {
     });
 
     expect(event).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       request: {
         method: 'POST',
         path: '/openai-codex-oauth/v1/chat/completions',
@@ -47,6 +47,34 @@ describe('request audit event', () => {
         errorClass: 'missing_image_generation_result'
       }
     });
+  });
+
+  test('records cache coordination evidence without raw identifiers', () => {
+    const event = buildRequestAuditEvent({
+      requestId: 'req-cache-v4',
+      model: 'gpt-5.5',
+      cache: {
+        clientPromptCacheKeyHash: 'sha256:client',
+        finalPromptCacheKeyHash: 'sha256:final',
+        keySource: 'shared_template',
+        coordinationStatus: 'shared',
+        templateFingerprint: 'sha256:template',
+        originalPrefixHashes: [{ chars: 4096, hash: 'sha256:original' }],
+        upstreamPrefixHashes: [{ chars: 4096, hash: 'sha256:upstream' }],
+        instructionsHash: 'sha256:instructions',
+        toolsHash: 'sha256:tools',
+        metadataHash: 'sha256:metadata',
+        workerId: 'execution-1'
+      }
+    });
+
+    expect(event.cache).toEqual(expect.objectContaining({
+      finalPromptCacheKeyHash: 'sha256:final',
+      keySource: 'shared_template',
+      coordinationStatus: 'shared',
+      templateFingerprint: 'sha256:template',
+      workerId: 'execution-1'
+    }));
   });
 
   test.each([

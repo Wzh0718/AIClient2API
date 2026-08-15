@@ -75,7 +75,9 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
     const workers = new Map();
     const workerMetrics = new Map();
     const providerConfigAcks = createProviderConfigAckTracker();
+    const rawCaptureConfigAcks = createProviderConfigAckTracker();
     const latestProviderConfigEvents = new Map();
+    let latestRawCaptureConfigEvent = null;
     const ready = new Set();
     let shuttingDown = false;
 
@@ -100,6 +102,10 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
                     const replayEvents = [...latestProviderConfigEvents.values()].sort((left, right) => left.revision - right.revision);
                     for (const event of replayEvents) {
                         if (child.connected) child.send({ ...event, targetWorkerId: id });
+                    }
+                    if (latestRawCaptureConfigEvent && child.connected) {
+                        rawCaptureConfigAcks.notePublished(latestRawCaptureConfigEvent.revision, [id]);
+                        child.send({ ...latestRawCaptureConfigEvent, targetWorkerId: id });
                     }
                 }
                 if (role === 'control') {
@@ -138,6 +144,22 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
                     ...providerConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id))
                 });
             }
+            if (message?.type === 'request_audit_raw_capture_sync' && role === 'control') {
+                latestRawCaptureConfigEvent = { ...message };
+                const executionIds = [...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id);
+                rawCaptureConfigAcks.notePublished(message.revision, executionIds);
+                for (const worker of workers.values()) {
+                    if (worker.role === 'execution' && worker.child.connected) worker.child.send(message);
+                }
+            }
+            if (message?.type === 'request_audit_raw_capture_sync_ack' && role === 'execution') {
+                rawCaptureConfigAcks.acknowledge(id, message.revision);
+                const control = workers.get('control-1');
+                if (control?.child.connected) control.child.send({
+                    type: 'request_audit_raw_capture_sync_status',
+                    ...rawCaptureConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id))
+                });
+            }
             if (message?.type === 'runtime_metrics' && message.snapshot) {
                 workerMetrics.set(id, message.snapshot);
             }
@@ -147,6 +169,7 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
             workers.delete(id);
             workerMetrics.delete(id);
             providerConfigAcks.remove(id);
+            rawCaptureConfigAcks.remove(id);
             if (!shuttingDown) {
                 logger.error?.(`[Runtime] ${id} exited code=${code} signal=${signal}; restarting`);
                 setTimeout(() => spawnWorker(role, index, port), 1000).unref?.();
@@ -178,6 +201,7 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
             leaseRecovery: 'ready',
             persistenceBacklog: 0,
             providerConfig: providerConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
+            rawCapture: rawCaptureConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
             metrics: aggregateWorkerMetrics(workerMetrics)
         })
     }));
@@ -218,7 +242,8 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
             controlWorkers: [...workers.values()].filter(worker => worker.role === 'control').length,
             executionWorkers: [...workers.values()].filter(worker => worker.role === 'execution').length,
             readyWorkers: ready.size,
-            providerConfig: providerConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id))
+            providerConfig: providerConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
+            rawCapture: rawCaptureConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id))
         }),
         shutdown
     };

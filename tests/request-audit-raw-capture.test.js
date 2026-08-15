@@ -51,6 +51,83 @@ describe('request audit raw capture', () => {
     expect(files.some(file => file.endsWith('new.json.gz'))).toBe(true);
   });
 
+  test('refuses captures after expiry or shared capacity limits are reached', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-raw-limits-'));
+    const store = new RequestAuditRawCaptureStore({
+      dir,
+      expiresAt: '2026-08-14T12:15:00.000Z',
+      maxFiles: 1,
+      maxTotalBytes: 1024 * 1024
+    });
+
+    const first = await store.capture({
+      requestId: 'first',
+      timestamp: '2026-08-14T12:00:00.000Z',
+      originalRequestBody: { input: 'first prompt' }
+    }, { now: new Date('2026-08-14T12:01:00.000Z') });
+    const capped = await store.capture({
+      requestId: 'second',
+      timestamp: '2026-08-14T12:02:00.000Z',
+      originalRequestBody: { input: 'second prompt' }
+    }, { now: new Date('2026-08-14T12:02:00.000Z') });
+    const expired = await store.capture({
+      requestId: 'third',
+      timestamp: '2026-08-14T12:16:00.000Z',
+      originalRequestBody: { input: 'third prompt' }
+    }, { now: new Date('2026-08-14T12:16:00.000Z') });
+
+    expect(first.captured).toBe(true);
+    expect(capped).toMatchObject({ captured: false, stopReason: 'max_files' });
+    expect(expired).toMatchObject({ captured: false, stopReason: 'expired' });
+  });
+
+  test('serializes concurrent writers so the shared file cap is not exceeded', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-raw-concurrent-'));
+    const firstStore = new RequestAuditRawCaptureStore({ dir, maxFiles: 1 });
+    const secondStore = new RequestAuditRawCaptureStore({ dir, maxFiles: 1 });
+
+    const results = await Promise.all([
+      firstStore.capture({ requestId: 'first', originalRequestBody: { input: 'first' } }),
+      secondStore.capture({ requestId: 'second', originalRequestBody: { input: 'second' } })
+    ]);
+
+    expect(results.filter(result => result.captured)).toHaveLength(1);
+    expect(listFiles(dir).filter(file => file.endsWith('.json.gz'))).toHaveLength(1);
+  });
+
+  test('preserves prompt text while redacting credentials and replacing binary payloads', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-raw-redaction-'));
+    const store = new RequestAuditRawCaptureStore({ dir, maxBytes: 1024 * 1024 });
+
+    const result = await store.capture({
+      requestId: 'redacted',
+      timestamp: '2026-08-14T12:00:00.000Z',
+      originalRequestBody: {
+        input: 'keep this diagnostic prompt',
+        authorization: 'Bearer private-token',
+        api_key: 'private-api-key',
+        x_api_key: 'private-x-api-key',
+        client_secret: 'private-client-secret',
+        id_token: 'private-id-token',
+        session_token: 'private-session-token',
+        headers: { 'x-custom-secret': 'private-header-value' },
+        image_url: `data:image/png;base64,${'A'.repeat(20000)}`
+      }
+    });
+
+    const raw = zlib.gunzipSync(fs.readFileSync(result.path)).toString('utf8');
+    expect(raw).toContain('keep this diagnostic prompt');
+    expect(raw).not.toContain('private-token');
+    expect(raw).not.toContain('private-api-key');
+    expect(raw).not.toContain('private-x-api-key');
+    expect(raw).not.toContain('private-client-secret');
+    expect(raw).not.toContain('private-id-token');
+    expect(raw).not.toContain('private-session-token');
+    expect(raw).not.toContain('private-header-value');
+    expect(raw).not.toContain('AAAAAA');
+    expect(raw).toContain('[binary-redacted');
+  });
+
   test('bounded snapshot stops reading object properties after its entry limit', () => {
     let propertyReads = 0;
     const originalRequestBody = {};
