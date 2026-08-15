@@ -207,6 +207,25 @@ describe('Potluck Codex credential group management API', () => {
         expect(serialized).not.toContain('token-store.json');
     });
 
+    test('returns the account email for an authenticated credential selector without exposing the UUID', async () => {
+        fs.writeFileSync(path.join(tempDir, 'configs', 'provider_pools.json'), JSON.stringify({
+            'openai-codex-oauth': [{
+                uuid: `${RAW_UUID_PREFIX}1`,
+                codexEmail: 'fixed.account@example.com'
+            }]
+        }));
+
+        const response = await callRoute('GET', '/api/potluck/credential-groups');
+        const serialized = JSON.stringify(response.body);
+
+        expect(response.statusCode).toBe(200);
+        expect(response.body.data.credentials).toContainEqual(expect.objectContaining({
+            providerType: 'openai-codex-oauth',
+            accountEmail: 'fixed.account@example.com'
+        }));
+        expect(serialized).not.toContain(RAW_UUID_PREFIX);
+    });
+
     test('creates a five-minute preview without writing the revision store', async () => {
         const response = await createPreview({ credentialCount: 3 });
 

@@ -113,8 +113,18 @@ function compactUsageHistoryForList(usageHistory = {}) {
 }
 
 function compactKeyForList(key) {
+    const fixedCredential = key?.fixedCredential?.uuid
+        ? {
+            providerType: key.fixedCredential.providerType || 'openai-codex-oauth',
+            credentialRef: getCredentialRef(
+                key.fixedCredential.providerType || 'openai-codex-oauth',
+                key.fixedCredential.uuid
+            )
+        }
+        : null;
     return {
         ...key,
+        fixedCredential,
         usageHistory: compactUsageHistoryForList(key.usageHistory || {})
     };
 }
@@ -332,11 +342,12 @@ function buildCredentialIndexes(credentials) {
     return { byUuid, refsByUuid };
 }
 
-function buildPublicCredential(credential) {
+function buildPublicCredential(credential, providerEmailIndex = new Map()) {
     const capacity = calculateCredentialCapacity(credential);
     return {
         credentialRef: getCredentialRef(credential.providerType, credential.uuid),
         providerType: credential.providerType,
+        accountEmail: providerEmailIndex.get(`${credential.providerType}:${credential.uuid}`) || '',
         customName: sanitizeProviderName(credential.customName),
         manualLock: credential.manualLock === true,
         isHealthy: credential.isHealthy !== false,
@@ -430,6 +441,7 @@ function buildPublicKeyAssignment(key, assignment, credentials, options = {}) {
 }
 
 function buildPublicCredentialGroupView(currentConfig, credentials, keys, now = new Date()) {
+    const providerEmailIndex = loadProviderEmailIndex();
     const assignmentByKeyId = new Map(
         (currentConfig?.keyAssignments || []).map(assignment => [String(assignment.keyId || ''), assignment])
     );
@@ -470,7 +482,7 @@ function buildPublicCredentialGroupView(currentConfig, credentials, keys, now = 
         timeZone: currentConfig?.timeZone || 'Asia/Shanghai',
         historyDays: Number(currentConfig?.historyDays || 7),
         groups,
-        credentials: (credentials || []).map(buildPublicCredential),
+        credentials: (credentials || []).map(credential => buildPublicCredential(credential, providerEmailIndex)),
         keys: publicKeys,
         policy: {
             fixed: 'strict-no-fallback',

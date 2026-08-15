@@ -115,4 +115,34 @@ describe('Codex credential-group UI source', () => {
         expect(potluckHtml).toContain('function updateRouting');
         expect(potluckHtml).toContain("/routing`");
     });
+
+    test('prefers account email labels and preselects the current fixed credential reference', () => {
+        expect(potluckHtml).toContain('credential.accountEmail || credential.customName || credential.credentialRef');
+        expect(potluckHtml).toContain('function openEditRouting(keyId)');
+        expect(potluckHtml).toContain('allKeys.find(key => key.id === keyId)');
+        expect(potluckHtml).toContain('currentKey?.fixedCredential?.credentialRef');
+        expect(potluckHtml).toContain('credentialSelect.value = currentFixedCredentialRef');
+        expect(potluckHtml).not.toMatch(/openEditRouting\('\$\{key\.id\}', '\$\{key\.routingMode/u);
+    });
+
+    test('shows deterministic routing-save progress and handles request failures without duplicate PUTs', () => {
+        expect(potluckHtml).toContain('id="saveRoutingButton"');
+        expect(potluckHtml).toContain("saveButton.setAttribute('aria-busy', String(saving))");
+        expect(potluckHtml).toContain("saving ? '保存中…' : '保存路由'");
+        expect(potluckHtml).toContain('if (routingSaveInFlight) return;');
+        expect(potluckHtml).toContain('routingSaveInFlight = true;');
+        expect(potluckHtml).toContain('finally {');
+        expect(potluckHtml).toContain('routingSaveInFlight = false;');
+        expect(potluckHtml).toContain("error?.code === 'REQUEST_TIMEOUT'");
+        expect(potluckHtml).toContain('保存结果未知，请刷新确认');
+    });
+
+    test('wraps management requests with timeout and non-JSON/network error handling', () => {
+        expect(potluckHtml).toContain('const API_REQUEST_TIMEOUT_MS = 30_000;');
+        expect(potluckHtml).toContain('new AbortController()');
+        expect(potluckHtml).toContain("code: 'REQUEST_TIMEOUT'");
+        expect(potluckHtml).toContain("code: 'INVALID_RESPONSE'");
+        expect(potluckHtml).toContain("code: 'NETWORK_ERROR'");
+        expect(potluckHtml).toContain('clearTimeout(timeoutId);');
+    });
 });

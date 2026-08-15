@@ -1544,8 +1544,8 @@
                     <label for="routingFixedCredential">固定凭据</label>
                     <select id="routingFixedCredential" class="sort-select" style="width:100%"></select>
                 </div>
-                <button class="btn btn-primary btn-block" onclick="updateRouting()">
-                    <i class="fas fa-save"></i> 保存路由
+                <button id="saveRoutingButton" type="button" class="btn btn-primary btn-block" onclick="updateRouting()" aria-busy="false">
+                    <i class="fas fa-save"></i> <span id="saveRoutingButtonLabel">保存路由</span>
                 </button>
             </div>
         </div>
@@ -1613,6 +1613,7 @@
     <script>
         let currentNewKey = '';
         let allKeys = [];
+        let routingSaveInFlight = false;
         let currentStats = null;
         let currentUsageRange = '7d';
         let currentCustomRange = { from: '', to: '' };
@@ -2122,14 +2123,46 @@
             }).join('')}</div>`;
         }
 
+        const API_REQUEST_TIMEOUT_MS = 30_000;
+
         async function apiRequest(url, options = {}) {
             const token = getToken();
             const headers = { 'Content-Type': 'application/json', ...options.headers };
             if (token) headers['Authorization'] = `Bearer ${token}`;
-            const response = await fetch(url, { ...options, headers });
-            const data = await response.json();
-            if (response.status === 401) { window.location.href = '/login.html'; return null; }
-            return data;
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
+            try {
+                const response = await fetch(url, {
+                    ...options,
+                    headers,
+                    signal: options.signal || controller.signal
+                });
+                const responseText = await response.text();
+                let data = {};
+                if (responseText) {
+                    try {
+                        data = JSON.parse(responseText);
+                    } catch {
+                        throw Object.assign(new Error('服务器返回了无法识别的响应'), { code: 'INVALID_RESPONSE' });
+                    }
+                }
+                if (response.status === 401) { window.location.href = '/login.html'; return null; }
+                if (!response.ok && !data?.error) {
+                    return {
+                        success: false,
+                        error: { code: 'HTTP_ERROR', message: `请求失败 (${response.status})` }
+                    };
+                }
+                return data;
+            } catch (error) {
+                if (error?.code === 'INVALID_RESPONSE') throw error;
+                if (error?.name === 'AbortError') {
+                    throw Object.assign(new Error('请求超时'), { code: 'REQUEST_TIMEOUT' });
+                }
+                throw Object.assign(new Error('网络请求失败'), { code: 'NETWORK_ERROR', cause: error });
+            } finally {
+                clearTimeout(timeoutId);
+            }
         }
 
         function formatStatsUpdatedAt(isoString) {
@@ -3088,7 +3121,7 @@
                         <button class="btn btn-secondary btn-sm" onclick="resetUsage('${key.id}')" title="重置今日用量"><i class="fas fa-redo"></i> <span class="btn-text">重置</span></button>
                         <button class="btn btn-secondary btn-sm" onclick="resetTokenStats('${key.id}')" title="重置 Token 统计"><i class="fas fa-eraser"></i> <span class="btn-text">Token</span></button>
                         <button class="btn btn-secondary btn-sm" onclick="openEditLimit('${key.id}', ${key.dailyLimit})" title="修改限额"><i class="fas fa-sliders-h"></i> <span class="btn-text">限额</span></button>
-                        <button class="btn btn-secondary btn-sm" onclick="openEditRouting('${key.id}', '${key.routingMode || 'pool'}', '${key.primaryGroupId || ''}')" title="修改凭据路由"><i class="fas fa-route"></i> <span class="btn-text">路由</span></button>
+                        <button class="btn btn-secondary btn-sm" onclick="openEditRouting('${key.id}')" title="修改凭据路由"><i class="fas fa-route"></i> <span class="btn-text">路由</span></button>
                         <button class="btn btn-secondary btn-sm" onclick="toggleKey('${key.id}')" title="${key.enabled ? '禁用' : '启用'}">${key.enabled ? '<i class="fas fa-toggle-on"></i>' : '<i class="fas fa-toggle-off"></i>'} <span class="btn-text">${key.enabled ? '禁用' : '启用'}</span></button>
                         <button class="btn btn-danger btn-sm" onclick="deleteKey('${key.id}')" title="删除"><i class="fas fa-trash"></i> <span class="btn-text">删除</span></button>
                     </div>
@@ -3365,21 +3398,45 @@
             document.getElementById('routingCredentialField').hidden = mode !== 'fixed';
         }
 
-        async function openEditRouting(keyId, currentMode = 'pool', currentGroupId = '') {
+        async function openEditRouting(keyId) {
+            const currentKey = allKeys.find(key => key.id === keyId);
+            const currentMode = currentKey?.routingMode || 'pool';
+            const currentGroupId = currentKey?.primaryGroupId || '';
+            const currentFixedCredentialRef = currentKey?.fixedCredential?.credentialRef || '';
             document.getElementById('editRoutingKeyId').value = keyId;
             document.getElementById('routingMode').value = currentMode === 'fixed' || currentMode === 'auto' ? currentMode : 'pool';
-            const result = await apiRequest(`${API_BASE}/credential-groups`);
-            const view = result?.data || {};
-            const groupSelect = document.getElementById('routingPrimaryGroup');
-            groupSelect.innerHTML = (view.groups || []).map(group => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name || group.id)}</option>`).join('');
-            if (currentGroupId) groupSelect.value = currentGroupId;
-            const credentialSelect = document.getElementById('routingFixedCredential');
-            credentialSelect.innerHTML = (view.credentials || []).map(credential => `<option value="${escapeHtml(credential.credentialRef)}">${escapeHtml(credential.customName || credential.credentialRef)}</option>`).join('');
-            updateRoutingFields();
-            openModal('editRoutingModal');
+            try {
+                const result = await apiRequest(`${API_BASE}/credential-groups`);
+                if (!result?.success) {
+                    showToast(result?.error?.message || '凭据列表加载失败', 'error');
+                    return;
+                }
+                const view = result.data || {};
+                const groupSelect = document.getElementById('routingPrimaryGroup');
+                groupSelect.innerHTML = (view.groups || []).map(group => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name || group.id)}</option>`).join('');
+                if (currentGroupId) groupSelect.value = currentGroupId;
+                const credentialSelect = document.getElementById('routingFixedCredential');
+                credentialSelect.innerHTML = (view.credentials || []).map(credential => `<option value="${escapeHtml(credential.credentialRef)}">${escapeHtml(credential.accountEmail || credential.customName || credential.credentialRef)}</option>`).join('');
+                if (currentFixedCredentialRef) credentialSelect.value = currentFixedCredentialRef;
+                updateRoutingFields();
+                openModal('editRoutingModal');
+            } catch (error) {
+                showToast(error?.message || '凭据列表加载失败', 'error');
+            }
+        }
+
+        function setRoutingSaveState(saving) {
+            const saveButton = document.getElementById('saveRoutingButton');
+            const saveLabel = document.getElementById('saveRoutingButtonLabel');
+            if (saveButton) {
+                saveButton.disabled = saving;
+                saveButton.setAttribute('aria-busy', String(saving));
+            }
+            if (saveLabel) saveLabel.textContent = saving ? '保存中…' : '保存路由';
         }
 
         async function updateRouting() {
+            if (routingSaveInFlight) return;
             const keyId = document.getElementById('editRoutingKeyId').value;
             const routingMode = document.getElementById('routingMode').value;
             const body = { routingMode, primaryGroupId: null, fixedCredential: null, manualLock: false };
@@ -3391,12 +3448,29 @@
                 if (!credentialRef) { showToast('请选择固定凭据', 'error'); return; }
                 body.fixedCredential = { providerType: 'openai-codex-oauth', credentialRef };
             }
-            const result = await apiRequest(`${API_BASE}/keys/${encodeURIComponent(keyId)}/routing`, {
-                method: 'PUT',
-                body: JSON.stringify(body)
-            });
-            if (result && result.success) { closeModal('editRoutingModal'); handleManagementMutationResult(result, '凭据路由已更新'); }
-            else { showToast(result?.error?.message || '操作失败', 'error'); }
+            routingSaveInFlight = true;
+            setRoutingSaveState(true);
+            try {
+                const result = await apiRequest(`${API_BASE}/keys/${encodeURIComponent(keyId)}/routing`, {
+                    method: 'PUT',
+                    body: JSON.stringify(body)
+                });
+                if (result && result.success) {
+                    closeModal('editRoutingModal');
+                    handleManagementMutationResult(result, '凭据路由已更新');
+                } else {
+                    showToast(result?.error?.message || '操作失败', 'error');
+                }
+            } catch (error) {
+                if (error?.code === 'REQUEST_TIMEOUT') {
+                    showToast('保存结果未知，请刷新确认', 'warning');
+                } else {
+                    showToast(error?.message || '保存失败，请稍后重试', 'error');
+                }
+            } finally {
+                routingSaveInFlight = false;
+                setRoutingSaveState(false);
+            }
         }
 
         async function toggleKey(keyId) {

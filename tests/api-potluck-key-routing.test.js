@@ -285,6 +285,40 @@ describe('API Potluck key credential routing', () => {
         });
     });
 
+    test('returns a public fixed credential reference in the Key list for editor preselection', async () => {
+        const { keyManager, apiRoutes } = await loadPotluckModules();
+        const token = writeAdminToken();
+        const created = await keyManager.createKey('Fixed Editor', 1000);
+        await keyManager.updateKeyRouting(created.id, {
+            routingMode: 'fixed',
+            fixedCredential: {
+                providerType: 'openai-codex-oauth',
+                uuid: 'cred-editor-selection'
+            },
+            manualLock: true
+        });
+
+        const response = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'GET',
+            '/api/potluck/keys',
+            undefined,
+            token
+        );
+        const serialized = JSON.stringify(response.body);
+
+        expect(response.statusCode).toBe(200);
+        expect(response.body.data.keys).toContainEqual(expect.objectContaining({
+            id: created.id,
+            routingMode: 'fixed',
+            fixedCredential: {
+                providerType: 'openai-codex-oauth',
+                credentialRef: expect.any(String)
+            }
+        }));
+        expect(serialized).not.toContain('cred-editor-selection');
+    });
+
     test('exposes a detached internal catalog with usage history for group planning', async () => {
         const { keyManager } = await loadPotluckModules();
         const created = await keyManager.createKey('Catalog Key', 1000);
