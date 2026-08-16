@@ -1283,6 +1283,12 @@ export class GeminiConverter extends BaseConverter {
         return callId ? `fc_${callId}` : `fc_${uuidv4().replace(/-/g, '')}`;
     }
 
+    _buildResponsesMessageItemId(responseId, index = 0) {
+        return responseId
+            ? `msg_${responseId}_${index}`
+            : `msg_${uuidv4().replace(/-/g, '')}`;
+    }
+
     _stringifyGeminiFunctionArgs(args) {
         return typeof args === 'string' ? args : JSON.stringify(args || {});
     }

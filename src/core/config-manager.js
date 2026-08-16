@@ -194,6 +194,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
             startupRun: true
         },
         providerFallbackChain: {}, // 跨类型 Fallback 链配置
+        temporaryKeyModelRoutes: [], // 临时按 Key 哈希、入口和模型进行跨 Provider 路由；默认关闭
         LOG_ENABLED: true,
         LOG_OUTPUT_MODE: "all",
         LOG_LEVEL: "info",

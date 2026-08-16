@@ -21,6 +21,10 @@ import {
 } from '../providers/openai/codex-fingerprint.js';
 import requestContext from './context.js';
 import { assertCodexRoutingIntegrity } from '../services/codex-routing-integrity.js';
+import {
+    preserveTemporaryRouteResponseModel,
+    resolveTemporaryKeyModelRoute
+} from './temporary-key-model-routing.js';
 
 const CODEX_FINGERPRINT_HEADER_NAMES = Object.freeze([
     'x-codex-turn-metadata',
@@ -60,6 +64,52 @@ export function resolveFinalUsageAccountContext(finalRouteResult = null, fallbac
         accountEmail: finalRouteResult?.accountEmail
             || (fallbackMatchesFinalProvider ? fallback.accountEmail : null)
     };
+}
+
+function getTemporaryRouteRetryConfig(retryContext) {
+    const route = retryContext?.temporaryRoute;
+    return route && typeof route === 'object' ? route : null;
+}
+
+function preserveTemporaryRouteModel(value, retryContext) {
+    const route = getTemporaryRouteRetryConfig(retryContext);
+    if (!route?.preserveResponseModel) return value;
+    return preserveTemporaryRouteResponseModel(value, route.requestedModel);
+}
+
+function recordTemporaryRouteResult(retryContext, {
+    actualProviderType,
+    actualModel,
+    providerUuid = null,
+    providerName = null
+}) {
+    const route = getTemporaryRouteRetryConfig(retryContext);
+    const config = retryContext?.CONFIG;
+    if (!route || !config) return;
+    config._temporaryKeyModelRouteResult = {
+        id: route.id,
+        keyHash: route.keyHash || null,
+        requestedModel: route.requestedModel,
+        targetProviderType: route.targetProviderType,
+        targetModel: route.targetModel,
+        actualProviderType,
+        actualModel,
+        providerUuid,
+        providerName,
+        fallbackUsed: retryContext?.temporaryRouteFallbackAttempted === true
+    };
+}
+
+async function tryTemporaryRouteFallback(retryContext) {
+    const route = getTemporaryRouteRetryConfig(retryContext);
+    if (
+        !route?.fallbackToOriginal
+        || retryContext?.temporaryRouteFallbackAttempted === true
+        || typeof retryContext?.temporaryRouteFallback !== 'function'
+    ) {
+        return null;
+    }
+    return retryContext.temporaryRouteFallback();
 }
 
 // ==================== 时间与时区 ====================
@@ -1375,6 +1425,12 @@ export async function handleStreamRequest(res, service, model, requestBody, from
     const currentRetry = retryContext?.currentRetry ?? 0;
     const CONFIG = retryContext?.CONFIG;
     const isRetry = currentRetry > 0;
+    recordTemporaryRouteResult(retryContext, {
+        actualProviderType: toProvider,
+        actualModel: model,
+        providerUuid: pooluuid,
+        providerName: customName
+    });
     
     // 使用共享的 clientDisconnected 状态（如果是重试，继承上层的状态）
     let clientDisconnected = retryContext?.clientDisconnected || { value: false };
@@ -1439,9 +1495,10 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             }
 
             // Convert the complete chunk object to the client's format (fromProvider), if necessary.
-            const chunkToSend = needsConversion
+            let chunkToSend = needsConversion
                 ? convertData(nativeChunk, 'streamChunk', toProvider, fromProvider, model, streamRequestId)
                 : nativeChunk;
+            chunkToSend = preserveTemporaryRouteModel(chunkToSend, retryContext);
 
             // 监控钩子：流式响应分块
             const hookRequestId = getPluginHookRequestId(CONFIG);
@@ -1567,6 +1624,12 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 uuid: pooluuid
             });
         }
+        recordTemporaryRouteResult(retryContext, {
+            actualProviderType: toProvider,
+            actualModel: model,
+            providerUuid: pooluuid,
+            providerName: customName
+        });
 
     }  catch (error) {
         logger.error('\n[Server] Error during stream processing:', error.stack);
@@ -1677,6 +1740,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 // 使用 acquireSlot: true 以占用新凭证的并发插槽
                 const result = await getApiServiceWithFallback(CONFIG, model, {
                     acquireSlot: true,
+                    ...(retryContext?.temporaryRoute ? { disableProviderFallback: true } : {}),
                     excludeProviderUuids: failedCredentialUuids,
                     deprioritizeProviderTypes: failedProviderTypes,
                     allowExcludedProviderFallback: isCodexTransient,
@@ -1756,6 +1820,39 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             }
         }
 
+        if (!anyDataSent) {
+            try {
+                const fallback = await tryTemporaryRouteFallback(retryContext);
+                if (fallback?.service) {
+                    logger.warn(`[Temporary Route] Falling back before stream start: ${toProvider}/${model} -> ${fallback.toProvider}/${fallback.model}`);
+                    return await handleStreamRequest(
+                        res,
+                        fallback.service,
+                        fallback.model,
+                        fallback.requestBody,
+                        fromProvider,
+                        fallback.toProvider,
+                        PROMPT_LOG_MODE,
+                        PROMPT_LOG_FILENAME,
+                        providerPoolManager,
+                        fallback.uuid,
+                        fallback.customName || null,
+                        {
+                            ...retryContext,
+                            temporaryRouteFallbackAttempted: true,
+                            currentRetry: currentRetry + 1,
+                            failedCredentialUuids: [],
+                            failedProviderTypes: []
+                        },
+                        fallback.accountIdentity || null,
+                        fallback.accountEmail || null
+                    );
+                }
+            } catch (fallbackError) {
+                logger.error('[Temporary Route] Original stream fallback failed:', fallbackError.message);
+            }
+        }
+
         // 使用新方法创建符合 fromProvider 格式的流式错误响应
         normalizeAntigravityCapacityExhaustion(error, toProvider, model);
         const errorPayload = createStreamErrorResponse(error, fromProvider);
@@ -1830,6 +1927,12 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
     const maxRetries = retryContext?.maxRetries ?? 5;
     const currentRetry = retryContext?.currentRetry ?? 0;
     const CONFIG = retryContext?.CONFIG;
+    recordTemporaryRouteResult(retryContext, {
+        actualProviderType: toProvider,
+        actualModel: model,
+        providerUuid: pooluuid,
+        providerName: customName
+    });
     
     try{
         // The service returns the response in its native format (toProvider).
@@ -1854,6 +1957,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             logger.info(`[Response Convert] Converting response from ${toProvider} to ${fromProvider}`);
             clientResponse = convertData(nativeResponse, 'response', toProvider, fromProvider, model);
         }
+        clientResponse = preserveTemporaryRouteModel(clientResponse, retryContext);
 
         // 监控钩子：非流式响应
         const hookRequestId = getPluginHookRequestId(CONFIG);
@@ -1888,6 +1992,12 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 uuid: pooluuid
             });
         }
+        recordTemporaryRouteResult(retryContext, {
+            actualProviderType: toProvider,
+            actualModel: model,
+            providerUuid: pooluuid,
+            providerName: customName
+        });
     } catch (error) {
         logger.error('\n[Server] Error during unary processing:', error.stack);
 
@@ -1972,6 +2082,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 // 使用 acquireSlot: true 以占用新凭证的并发插槽
                 const result = await getApiServiceWithFallback(CONFIG, model, {
                     acquireSlot: true,
+                    ...(retryContext?.temporaryRoute ? { disableProviderFallback: true } : {}),
                     excludeProviderUuids: failedCredentialUuids,
                     deprioritizeProviderTypes: failedProviderTypes,
                     allowExcludedProviderFallback: isCodexTransient,
@@ -2047,6 +2158,37 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 }
                 logger.error(`[Unary Retry] Failed to get alternative service:`, retryError.message);
             }
+        }
+
+        try {
+            const fallback = await tryTemporaryRouteFallback(retryContext);
+            if (fallback?.service) {
+                logger.warn(`[Temporary Route] Falling back before unary response: ${toProvider}/${model} -> ${fallback.toProvider}/${fallback.model}`);
+                return await handleUnaryRequest(
+                    res,
+                    fallback.service,
+                    fallback.model,
+                    fallback.requestBody,
+                    fromProvider,
+                    fallback.toProvider,
+                    PROMPT_LOG_MODE,
+                    PROMPT_LOG_FILENAME,
+                    providerPoolManager,
+                    fallback.uuid,
+                    fallback.customName || null,
+                    {
+                        ...retryContext,
+                        temporaryRouteFallbackAttempted: true,
+                        currentRetry: 0,
+                        failedCredentialUuids: [],
+                        failedProviderTypes: []
+                    },
+                    fallback.accountIdentity || null,
+                    fallback.accountEmail || null
+                );
+            }
+        } catch (fallbackError) {
+            logger.error('[Temporary Route] Original unary fallback failed:', fallbackError.message);
         }
 
         // 使用新方法创建符合 fromProvider 格式的错误响应
@@ -2239,6 +2381,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     const fromProvider = clientProviderMap[endpointType];
     // 使用实际的提供商类型（可能是 fallback 后的类型）
     let toProvider = CONFIG.actualProviderType || CONFIG.MODEL_PROVIDER;
+    const originalProviderType = toProvider;
     let actualUuid = pooluuid;
     
     if (!fromProvider) {
@@ -2251,6 +2394,68 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     if (!model) {
         throw new Error("Could not determine the model from the request.");
     }
+
+    const temporaryRoute = resolveTemporaryKeyModelRoute({
+        config: CONFIG,
+        apiKey: CONFIG.potluckApiKey,
+        requestPath,
+        model,
+        originalProviderType
+    });
+    if (temporaryRoute) {
+        CONFIG._temporaryKeyModelRoute = temporaryRoute;
+        CONFIG.MODEL_PROVIDER = temporaryRoute.targetProviderType;
+        delete CONFIG.actualProviderType;
+        toProvider = temporaryRoute.targetProviderType;
+        model = temporaryRoute.targetModel;
+        service = null;
+        logger.info(`[Temporary Route] Matched rule '${temporaryRoute.id}': ${originalProviderType}/${temporaryRoute.requestedModel} -> ${toProvider}/${model} (key: ${temporaryRoute.keyHash})`);
+    }
+
+    let temporaryRouteFallbackUsed = false;
+    const buildTemporaryOriginalFallback = temporaryRoute?.fallbackToOriginal
+        ? async () => {
+            CONFIG.MODEL_PROVIDER = temporaryRoute.originalProviderType;
+            delete CONFIG.actualProviderType;
+            const { getApiServiceWithFallback } = await import('../services/service-manager.js');
+            const result = await getApiServiceWithFallback(CONFIG, temporaryRoute.requestedModel, {
+                acquireSlot: Boolean(providerPoolManager && CONFIG.providerPools),
+                disableProviderFallback: true
+            });
+            let fallbackRequestBody = { ...originalRequestBody };
+            if (isCodexProvider(result.actualProviderType)) {
+                fallbackRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY] = inboundCodexFingerprintContext;
+            }
+            if (CONFIG._monitorRequestId) fallbackRequestBody._monitorRequestId = CONFIG._monitorRequestId;
+            if (CONFIG.requestBaseUrl) fallbackRequestBody._requestBaseUrl = CONFIG.requestBaseUrl;
+            if (getProtocolPrefix(fromProvider) !== getProtocolPrefix(result.actualProviderType)) {
+                const preConvertBody = fallbackRequestBody;
+                fallbackRequestBody = convertData(
+                    preConvertBody,
+                    'request',
+                    fromProvider,
+                    result.actualProviderType
+                );
+                Object.keys(preConvertBody).forEach(key => {
+                    if (key.startsWith('_') && fallbackRequestBody[key] === undefined) {
+                        fallbackRequestBody[key] = preConvertBody[key];
+                    }
+                });
+            }
+            fallbackRequestBody = await _applySystemPromptFromFile(CONFIG, fallbackRequestBody, result.actualProviderType);
+            await _manageSystemPrompt(fallbackRequestBody, result.actualProviderType);
+            return {
+                service: result.service,
+                model: result.actualModel || temporaryRoute.requestedModel,
+                requestBody: fallbackRequestBody,
+                toProvider: result.actualProviderType,
+                uuid: result.uuid,
+                customName: result.serviceConfig?.customName || null,
+                accountIdentity: result.serviceConfig?.codexAccountKey || result.serviceConfig?.codexAccountId || null,
+                accountEmail: result.serviceConfig?.codexEmail || null
+            };
+        }
+        : null;
     
     // 2.1. 处理自定义模型映射和别名
     const customModelConfig = getCustomModelConfig(model, CONFIG.MODEL_PROVIDER);
@@ -2292,10 +2497,33 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             model,
             body: originalRequestBody
         });
-        const result = await getApiServiceWithFallback(CONFIG, model, {
-            acquireSlot: shouldSelectByPool,
-            ...(routingStrategy ? { routingStrategy } : {})
-        });
+        let result;
+        try {
+            result = await getApiServiceWithFallback(CONFIG, model, {
+                acquireSlot: shouldSelectByPool,
+                ...(temporaryRoute ? { disableProviderFallback: true } : {}),
+                ...(routingStrategy ? { routingStrategy } : {})
+            });
+        } catch (selectionError) {
+            if (!buildTemporaryOriginalFallback) throw selectionError;
+            logger.warn(`[Temporary Route] Target selection failed; using original route: ${selectionError.message}`);
+            const fallback = await buildTemporaryOriginalFallback();
+            temporaryRouteFallbackUsed = true;
+            result = {
+                service: fallback.service,
+                actualModel: fallback.model,
+                actualProviderType: fallback.toProvider,
+                uuid: fallback.uuid,
+                serviceConfig: {
+                    customName: fallback.customName,
+                    codexAccountKey: fallback.accountIdentity,
+                    codexEmail: fallback.accountEmail
+                },
+                isFallback: true
+            };
+            model = fallback.model;
+            toProvider = fallback.toProvider;
+        }
 
         service = result.service;
         toProvider = result.actualProviderType;
@@ -2378,7 +2606,16 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     // - 凭证切换重试：凭证被标记不健康后切换到其他凭证
     // 当没有不同的健康凭证可用时，重试会自动停止
     const credentialSwitchMaxRetries = CONFIG.CREDENTIAL_SWITCH_MAX_RETRIES || 5;
-    const retryContext = { CONFIG, currentRetry: 0, maxRetries: credentialSwitchMaxRetries };
+    const retryContext = {
+        CONFIG,
+        currentRetry: 0,
+        maxRetries: credentialSwitchMaxRetries,
+        ...(temporaryRoute ? {
+            temporaryRoute,
+            temporaryRouteFallback: buildTemporaryOriginalFallback,
+            temporaryRouteFallbackAttempted: temporaryRouteFallbackUsed
+        } : {})
+    };
     
     if (isStream) {
         await handleStreamRequest(res, service, model, processedRequestBody, fromProvider, toProvider, CONFIG.PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, actualUuid, actualCustomName, retryContext, actualAccountIdentity, actualAccountEmail);
@@ -2390,9 +2627,17 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     if (processedRequestBody.model && processedRequestBody.model !== model) {
         model = processedRequestBody.model;
     }
-    const finalRouteResult = CONFIG._codexRouteResult || null;
+    const temporaryRouteResult = CONFIG._temporaryKeyModelRouteResult || null;
+    const finalRouteResult = temporaryRouteResult
+        ? {
+            selectedProviderUuid: temporaryRouteResult.providerUuid,
+            providerName: temporaryRouteResult.providerName
+        }
+        : CONFIG._codexRouteResult || null;
     const finalUsageModel = getUsageTrackingModel(model, processedRequestBody, toProvider);
-    const finalUsageModelForAudit = finalRouteResult?.actualModel || finalUsageModel;
+    const finalUsageModelForAudit = temporaryRouteResult?.actualModel
+        || CONFIG._codexRouteResult?.actualModel
+        || finalUsageModel;
     const finalUsageAccount = resolveFinalUsageAccountContext(finalRouteResult, {
         providerUuid: actualUuid,
         providerName: actualCustomName,
@@ -2408,7 +2653,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             originalRequestBody,
             processedRequestBody,
             fromProvider,
-            toProvider,
+            toProvider: temporaryRouteResult?.actualProviderType || toProvider,
             ...finalUsageAccount,
             model: finalUsageModelForAudit,
             isStream

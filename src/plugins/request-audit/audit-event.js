@@ -194,7 +194,15 @@ export function buildRequestAuditEvent(context = {}) {
             spilloverReason: context._codexRouting?.spilloverReason || null,
             assignmentMissing: context._codexRouting?.assignmentMissing === true,
             affinitySource: context._codexRouting?.affinitySource || null,
-            hotShardApplied: context._codexRouting?.hotShardApplied === true
+            hotShardApplied: context._codexRouting?.hotShardApplied === true,
+            ...(context._temporaryKeyModelRouteResult ? {
+                temporaryModelRoute: {
+                    id: context._temporaryKeyModelRouteResult.id || null,
+                    targetProviderType: context._temporaryKeyModelRouteResult.targetProviderType || null,
+                    targetModel: context._temporaryKeyModelRouteResult.targetModel || null,
+                    fallbackUsed: context._temporaryKeyModelRouteResult.fallbackUsed === true
+                }
+            } : {})
         },
         cache: {
             clientPromptCacheKeyHash: context.cache?.clientPromptCacheKeyHash || null,
