@@ -610,3 +610,75 @@ test('current Beijing date repair requires an explicit stopped-service override'
   assert.equal(allowed.report.days[0].eligible, true);
   assert.equal(allowed.report.currentDateOverride, true);
 });
+
+test('allowDecreasing removes a fully filtered historical day and applies the negative delta idempotently', async () => {
+  const fixture = await makeEligibleRepairFixture();
+  const auditPath = path.join(fixture.base, 'request-audit', 'audit-2026-07-20.jsonl');
+  const auditBefore = fs.readFileSync(auditPath, 'utf8');
+  const outDir = path.join(fixture.base, 'decreasing-output');
+  const modelStatsPath = path.join(fixture.base, 'model-usage-stats.json');
+  const initialModelStats = JSON.parse(fs.readFileSync(modelStatsPath, 'utf8'));
+  const accountKey = 'openai-codex-oauth:apply@example.com';
+  const accountDay = {
+    provider: 'openai-codex-oauth',
+    providerUuid: 'apply@example.com',
+    accountIdentity: 'apply@example.com',
+    accountEmail: 'apply@example.com',
+    providerUuids: ['provider-1'],
+    providerName: null,
+    summary: usageBucket(1, 5),
+    models: { 'gpt-5.6': usageBucket(1, 5) },
+  };
+  initialModelStats.daily['2026-07-21'].accounts[accountKey] = accountDay;
+  initialModelStats.accounts[accountKey] = {
+    ...accountDay,
+    summary: usageBucket(10, 50),
+    models: { 'gpt-5.6': usageBucket(10, 50) },
+  };
+  writeJson(modelStatsPath, initialModelStats);
+
+  const bundle = await createRepairBundle({
+    base: fixture.base,
+    from: '2026-07-21',
+    to: '2026-07-21',
+    outDir,
+    now: new Date('2026-07-23T00:00:00.000Z'),
+    allowDecreasing: true,
+    eventFilter: () => false,
+    cleanupMetadata: { operation: 'test-drop-all' },
+  });
+
+  assert.equal(bundle.report.days[0].eligible, true);
+  assert.equal(bundle.report.days[0].candidate.potluck.requestCount, 0);
+  assert.equal(bundle.report.days[0].candidate.modelStats.totalTokens, 0);
+  assert.equal(bundle.report.allowDecreasing, true);
+  assert.deepEqual(bundle.report.cleanupMetadata, { operation: 'test-drop-all' });
+
+  const options = {
+    base: fixture.base,
+    bundle: outDir,
+    approvedManifestSha256: bundle.manifestSha256,
+    approvedReportSha256: bundle.reportSha256,
+    backupDir: path.join(fixture.base, 'decreasing-backup'),
+    now: new Date('2026-07-23T01:00:00.000Z'),
+  };
+  const applied = await applyRepairBundle(options);
+  assert.equal(applied.status, 'applied');
+
+  const potluck = JSON.parse(fs.readFileSync(path.join(fixture.base, 'api-potluck-keys.json'), 'utf8'));
+  const key = potluck.keys[fixture.rawKey];
+  assert.equal(key.usageHistory['2026-07-21'].summary.requestCount, 0);
+  assert.equal(key.usageHistory['2026-07-21'].summary.totalTokens, 0);
+  assert.equal(key.totalUsage, 9);
+  assert.equal(key.totalTokens, 45);
+
+  const modelStats = JSON.parse(fs.readFileSync(modelStatsPath, 'utf8'));
+  assert.equal(modelStats.daily['2026-07-21'].requestCount, 0);
+  assert.equal(modelStats.daily['2026-07-21'].totalTokens, 0);
+  assert.equal(modelStats.summary.requestCount, 9);
+  assert.equal(modelStats.summary.totalTokens, 45);
+  assert.equal(fs.readFileSync(auditPath, 'utf8'), auditBefore);
+
+  const repeated = await applyRepairBundle(options);
+  assert.equal(repeated.status, 'already-applied');
+});

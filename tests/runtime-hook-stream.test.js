@@ -4,6 +4,70 @@ import path from 'node:path';
 import { RuntimeHookStream } from '../src/runtime/runtime-hook-stream.js';
 
 describe('RuntimeHookStream', () => {
+    test('uses a dedicated Redis connection for blocking reads', async () => {
+        const redis = {
+            command: jest.fn(async parts => parts[0] === 'SISMEMBER' ? 0 : 'OK')
+        };
+        const blockingRedis = {
+            command: jest.fn(async parts => {
+                if (parts[0] === 'XGROUP') return 'OK';
+                if (parts[0] === 'XAUTOCLAIM') return ['0-0', [], []];
+                if (parts[0] === 'XREADGROUP') return null;
+                throw new Error(`unexpected blocking command: ${parts[0]}`);
+            })
+        };
+        const stream = new RuntimeHookStream({
+            redis,
+            blockingRedis,
+            epoch: 'test',
+            workerId: 'control-1'
+        });
+
+        await expect(stream.readBatch({ blockMs: 0 })).resolves.toEqual([]);
+        await expect(stream.hasApplied({ eventId: 'evt-isolated' })).resolves.toBe(false);
+
+        expect(blockingRedis.command).toHaveBeenCalledWith(
+            expect.arrayContaining(['XREADGROUP']),
+            expect.any(Object)
+        );
+        expect(redis.command).toHaveBeenCalledWith(
+            expect.arrayContaining(['SISMEMBER']),
+            expect.any(Object)
+        );
+        expect(redis.command.mock.calls.some(([parts]) => parts[0] === 'XREADGROUP')).toBe(false);
+    });
+
+    test('closes a failed blocking connection so the next poll can reconnect', async () => {
+        const redis = { command: jest.fn().mockResolvedValue('OK') };
+        const blockingRedis = {
+            command: jest.fn().mockRejectedValue(new Error('Redis connection timeout')),
+            close: jest.fn().mockResolvedValue(undefined)
+        };
+        const replacement = {
+            command: jest.fn(async parts => {
+                if (parts[0] === 'XAUTOCLAIM') return ['0-0', [], []];
+                if (parts[0] === 'XREADGROUP') return null;
+                return 'OK';
+            }),
+            close: jest.fn().mockResolvedValue(undefined)
+        };
+        const createBlockingRedis = jest.fn(() => replacement);
+        const stream = new RuntimeHookStream({
+            redis,
+            blockingRedis,
+            createBlockingRedis,
+            epoch: 'test',
+            workerId: 'control-1'
+        });
+
+        await expect(stream.readBatch({ blockMs: 0 })).rejects.toThrow('Redis connection timeout');
+        await expect(stream.readBatch({ blockMs: 0 })).resolves.toEqual([]);
+
+        expect(blockingRedis.close).toHaveBeenCalledTimes(1);
+        expect(createBlockingRedis).toHaveBeenCalledTimes(1);
+        expect(replacement.command).toHaveBeenCalled();
+    });
+
     test('spools failed Redis publishes and flushes them after recovery', async () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-hook-spool-'));
         let available = false;

@@ -71,8 +71,8 @@ function addDateDays(dateString, delta) {
 function getCompleteDateRange(now, days = DEFAULT_HISTORY_DAYS, timeZone = DEFAULT_TIME_ZONE) {
     const today = dateStringInTimeZone(now, timeZone);
     return {
-        startDate: addDateDays(today, -days),
-        endDate: addDateDays(today, -1)
+        startDate: addDateDays(today, -(days - 1)),
+        endDate: today
     };
 }
 
@@ -329,6 +329,9 @@ export function summarizeKeyDemand(key = {}, options = {}) {
     const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
     const { startDate, endDate } = getCompleteDateRange(now, days, timeZone);
     let actualUsd = 0;
+    let estimatedUsd = 0;
+    let missingPriceTokens = 0;
+    let estimatedPriceTokens = 0;
     let totalTokens = 0;
     let requestCount = 0;
 
@@ -336,15 +339,19 @@ export function summarizeKeyDemand(key = {}, options = {}) {
         if (date < startDate || date > endDate) continue;
         const summary = day?.summary || day || {};
         actualUsd += toFiniteNumber(summary?.cost?.actualUsd, 0);
+        estimatedUsd += toFiniteNumber(summary?.cost?.estimatedUsd, 0);
+        missingPriceTokens += toFiniteNumber(summary?.cost?.missingPriceTokens, 0);
+        estimatedPriceTokens += toFiniteNumber(summary?.cost?.estimatedPriceTokens, 0);
         totalTokens += toFiniteNumber(summary.totalTokens, 0);
         requestCount += toFiniteNumber(summary.requestCount, 0);
     }
 
     let metric = 'newKey';
     let totalDemand = 0;
-    if (actualUsd > 0) {
-        metric = 'actualUsd';
-        totalDemand = actualUsd;
+    const usd = actualUsd + estimatedUsd;
+    if (usd > 0) {
+        metric = 'usd';
+        totalDemand = usd;
     } else if (totalTokens > 0) {
         metric = 'totalTokens';
         totalDemand = totalTokens;
@@ -358,7 +365,14 @@ export function summarizeKeyDemand(key = {}, options = {}) {
         endDate,
         timeZone,
         days,
+        usd,
         actualUsd,
+        estimatedUsd,
+        missingPriceTokens,
+        estimatedPriceTokens,
+        pricingCoverage: totalTokens > 0
+            ? Math.max(0, Math.min(1, (totalTokens - missingPriceTokens) / totalTokens))
+            : 1,
         totalTokens,
         requestCount,
         metric,
@@ -398,13 +412,29 @@ function findCurrentCredentialGroupId(currentGroups, uuid) {
     return currentGroups.find(group => group.credentialUuids.includes(uuid))?.id || null;
 }
 
-function markHighConsumption(demands) {
-    const positive = demands.map(item => item.demand.totalDemand).filter(value => value > 0).sort((a, b) => a - b);
+function selectDemandMetric(demands) {
+    if (demands.some(item => item.demand.usd > 0)) return 'usd';
+    if (demands.some(item => item.demand.totalTokens > 0)) return 'totalTokens';
+    if (demands.some(item => item.demand.requestCount > 0)) return 'requestCount';
+    return 'newKey';
+}
+
+function demandValueForMetric(demand, metric) {
+    if (metric === 'usd') return demand.usd;
+    if (metric === 'totalTokens') return demand.totalTokens;
+    if (metric === 'requestCount') return demand.requestCount;
+    return 0;
+}
+
+function markHighConsumption(demands, metric) {
+    const positive = demands.map(item => demandValueForMetric(item.demand, metric)).filter(value => value > 0).sort((a, b) => a - b);
     if (positive.length < 2) return new Set();
     const median = positive[Math.floor((positive.length - 1) / 2)];
     const average = positive.reduce((sum, value) => sum + value, 0) / positive.length;
     const threshold = Math.max(median * 2, average * 1.5);
-    return new Set(demands.filter(item => item.demand.totalDemand >= threshold).map(item => item.keyId));
+    return new Set(demands
+        .filter(item => demandValueForMetric(item.demand, metric) >= threshold)
+        .map(item => item.keyId));
 }
 
 export function generateCredentialGroupSuggestion(options = {}) {
@@ -509,7 +539,8 @@ export function generateCredentialGroupSuggestion(options = {}) {
             timeZone: options.timeZone || DEFAULT_TIME_ZONE
         })
     })).filter(item => item.keyId);
-    const highConsumptionKeyIds = markHighConsumption(demands);
+    const demandMetric = selectDemandMetric(demands);
+    const highConsumptionKeyIds = markHighConsumption(demands, demandMetric);
     const assignments = [];
 
     for (const item of demands) {
@@ -523,7 +554,7 @@ export function generateCredentialGroupSuggestion(options = {}) {
             manualLock: true
         });
         const targetGroup = normalized.routingMode === 'auto' ? groupById.get(normalized.primaryGroupId) : null;
-        const demandUnits = item.demand.isNew ? 1 : item.demand.totalDemand;
+        const demandUnits = item.demand.isNew ? 1 : demandValueForMetric(item.demand, demandMetric);
         if (targetGroup) targetGroup._assignedDemand += demandUnits;
         assignments.push({
             ...normalized,
@@ -534,7 +565,8 @@ export function generateCredentialGroupSuggestion(options = {}) {
 
     const unlockedDemands = demands
         .filter(item => !assignments.some(assignment => assignment.keyId === item.keyId))
-        .sort((a, b) => b.demand.totalDemand - a.demand.totalDemand || a.keyId.localeCompare(b.keyId));
+        .sort((a, b) => demandValueForMetric(b.demand, demandMetric) - demandValueForMetric(a.demand, demandMetric)
+            || a.keyId.localeCompare(b.keyId));
 
     for (const item of unlockedDemands) {
         const existing = currentAssignments.get(item.keyId);
@@ -561,7 +593,7 @@ export function generateCredentialGroupSuggestion(options = {}) {
             continue;
         }
 
-        const demandUnits = item.demand.isNew ? 1 : item.demand.totalDemand;
+        const demandUnits = item.demand.isNew ? 1 : demandValueForMetric(item.demand, demandMetric);
         const target = chooseGroupForKey(groups, demandUnits);
         target._assignedDemand += demandUnits;
         assignments.push({
@@ -575,7 +607,12 @@ export function generateCredentialGroupSuggestion(options = {}) {
         });
     }
 
-    const publicGroups = groups.map(group => ({
+    const totalAssignedDemand = groups.reduce((sum, group) => sum + group._assignedDemand, 0);
+    const totalCapacity = groups.reduce((sum, group) => sum + Math.max(0, group.capacity), 0);
+    const publicGroups = groups.map(group => {
+        const demandShare = totalAssignedDemand > 0 ? group._assignedDemand / totalAssignedDemand : 0;
+        const capacityShare = totalCapacity > 0 ? Math.max(0, group.capacity) / totalCapacity : 0;
+        return {
         id: group.id,
         name: group.name,
         manualLock: group.manualLock,
@@ -583,12 +620,18 @@ export function generateCredentialGroupSuggestion(options = {}) {
         capacity: group.capacity,
         confidence: group.confidence,
         predictedDemand: group._assignedDemand,
+        predictedDemandUsd: demandMetric === 'usd' ? group._assignedDemand : 0,
+        demandShare,
+        capacityShare,
+        loadIndex: capacityShare > 0 ? demandShare / capacityShare : 0,
         predictedUtilization: group._assignedDemand / (group.capacity > 0 ? group.capacity : DEFAULT_UNKNOWN_CAPACITY)
-    }));
+    };
+    });
 
     return {
         applicable: true,
         generatedAt: now.toISOString(),
+        demandMetric,
         timeZone: options.timeZone || DEFAULT_TIME_ZONE,
         historyDays: options.days || DEFAULT_HISTORY_DAYS,
         groupCount: publicGroups.length,

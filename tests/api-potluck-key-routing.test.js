@@ -342,6 +342,48 @@ describe('API Potluck key credential routing', () => {
         expect((await keyManager.getKey(created.id)).usageHistory).toEqual({});
     });
 
+    test('limits the credential routing catalog to the rolling seven-day summary window', async () => {
+        const usageHistory = {};
+        for (let day = 1; day <= 13; day += 1) {
+            const date = `2026-08-${String(day).padStart(2, '0')}`;
+            usageHistory[date] = {
+                summary: {
+                    requestCount: day,
+                    totalTokens: day * 100,
+                    cost: { actualUsd: day, estimatedUsd: 0, missingPriceTokens: 0 }
+                },
+                accounts: { [`account-${day}`]: { summary: { totalTokens: day * 100 } } }
+            };
+        }
+        writeStore({
+            keys: {
+                maki_catalog: {
+                    id: 'maki_catalog',
+                    name: 'Catalog',
+                    enabled: true,
+                    lastResetDate: '2026-08-13',
+                    usageHistory
+                }
+            }
+        });
+        const { keyManager } = await loadPotluckModules();
+
+        const [catalog] = keyManager.getCredentialRoutingKeyCatalog();
+
+        expect(Object.keys(catalog.usageHistory)).toEqual([
+            '2026-08-07', '2026-08-08', '2026-08-09', '2026-08-10',
+            '2026-08-11', '2026-08-12', '2026-08-13'
+        ]);
+        expect(catalog.usageHistory['2026-08-13']).toEqual({
+            summary: expect.objectContaining({
+                requestCount: 13,
+                totalTokens: 1300,
+                cost: expect.objectContaining({ actualUsd: 13 })
+            })
+        });
+        expect(catalog.usageHistory['2026-08-13']).not.toHaveProperty('accounts');
+    });
+
     test('applies routing assignments atomically, skips locked keys, and persists once', async () => {
         const { keyManager } = await loadPotluckModules();
         const first = await keyManager.createKey('Batch One', 1000);

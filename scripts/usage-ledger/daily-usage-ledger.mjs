@@ -1416,7 +1416,7 @@ function modelProviderAttributionSafe(currentDay = {}, candidateProviders = {}) 
     for (const field of REPAIR_USAGE_FIELDS) covered[field] += toNumber(account?.summary?.[field]);
   }
   const fullyCovered = REPAIR_USAGE_FIELDS.every(field => toNumber(covered[field]) === toNumber(currentDay?.[field]));
-  return fullyCovered || Object.keys(candidateProviders || {}).length <= 1;
+  return fullyCovered || Object.keys(candidateProviders || {}).length === 1;
 }
 
 function beijingDateNow(now) {
@@ -1462,7 +1462,17 @@ async function buildRepairBaseline({
   };
 }
 
-export async function createRepairBundle({ base, from, to, outDir, now = new Date(), allowCurrentDate = false }) {
+export async function createRepairBundle({
+  base,
+  from,
+  to,
+  outDir,
+  now = new Date(),
+  allowCurrentDate = false,
+  allowDecreasing = false,
+  eventFilter = null,
+  cleanupMetadata = null,
+}) {
   if (!base || !from || !outDir) throw new Error('base, from, and outDir are required');
   if (fs.existsSync(outDir)) throw new Error('out-dir already exists');
   const end = to || from;
@@ -1478,7 +1488,9 @@ export async function createRepairBundle({ base, from, to, outDir, now = new Dat
     from,
     to: end,
     collectEvents: false,
-    onEvent: event => candidateAccumulator.add(event),
+    onEvent: event => {
+      if (!eventFilter || eventFilter(event) !== false) candidateAccumulator.add(event);
+    },
   });
   const modelStatsStore = await readJsonIfExists(modelStatsPath, { summary: {}, providers: {}, accounts: {}, accountUsageEvents: {}, daily: {} });
   const candidates = candidateAccumulator.finish();
@@ -1527,7 +1539,9 @@ export async function createRepairBundle({ base, from, to, outDir, now = new Dat
       missingSourceDates.length === 0 &&
       corruptSourceDates.length === 0 &&
       unknownPotluckKeys === 0 &&
-      Object.values(nonDecreasing).every(Boolean);
+      (allowDecreasing
+        ? nonDecreasing.modelProviderAttribution
+        : Object.values(nonDecreasing).every(Boolean));
     days.push({
       date,
       eligible,
@@ -1565,6 +1579,8 @@ export async function createRepairBundle({ base, from, to, outDir, now = new Dat
     to: end,
     eligibleDates,
     currentDateOverride: allowCurrentDate === true,
+    allowDecreasing: allowDecreasing === true,
+    cleanupMetadata,
     sourceEventDigest: scan.sourceEventDigest,
     sourceFiles: scan.sourceFiles.map(file => ({ utcDate: file.utcDate, sha256: file.sha256, size: file.size })),
     baselineDigest: sha256Text(stableJson(baseline)),
@@ -1579,6 +1595,8 @@ export async function createRepairBundle({ base, from, to, outDir, now = new Dat
     generatedAt: now.toISOString(),
     range: { from, to: end, excludedActiveDate: today },
     currentDateOverride: allowCurrentDate === true,
+    allowDecreasing: allowDecreasing === true,
+    cleanupMetadata,
     scan: {
       sourceFiles: scan.sourceFiles.map(file => ({
         path: path.relative(base, file.path).replaceAll('\\', '/'),
@@ -1743,7 +1761,8 @@ function buildNextPotluckStore(currentStore, patch) {
   for (const date of patch.eligibleDates) {
     for (const [rawKey, keyData] of Object.entries(next.keys || {})) {
       const previousDay = keyData?.usageHistory?.[date] || null;
-      const candidateDay = patch.potluckDaysByKey?.[rawKey]?.[date] || null;
+      const candidateDay = patch.potluckDaysByKey?.[rawKey]?.[date]
+        || (patch.allowDecreasing && previousDay ? ensureRepairDay({}, date) : null);
       if (!candidateDay) continue;
       const replacement = preserveRepairPeaks(candidateDay, previousDay);
       if (!keyData.usageHistory) keyData.usageHistory = {};
@@ -1772,7 +1791,10 @@ function buildNextModelStatsStore(currentStore, patch, now) {
 
   for (const date of patch.eligibleDates) {
     const previousDay = next.daily[date] || null;
-    const candidateDay = modelDailySlice(patch.modelDays?.[date]);
+    const candidateDay = modelDailySlice(
+      patch.modelDays?.[date]
+        || (patch.allowDecreasing && previousDay ? ensureRepairDay({}, date) : null),
+    );
     if (!candidateDay) continue;
     const replacement = preserveRepairPeaks(candidateDay, previousDay);
     applyUsageDelta(next.summary, usageDelta(replacement, previousDay));

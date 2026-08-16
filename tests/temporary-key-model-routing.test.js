@@ -131,6 +131,7 @@ describe('temporary per-key model routing', () => {
                 targetModel: 'gemini-2.5-flash',
                 actualProviderType: 'gemini-antigravity',
                 actualModel: 'gemini-2.5-flash',
+                credentialRetryUsed: true,
                 fallbackUsed: false
             }
         });
@@ -144,6 +145,9 @@ describe('temporary per-key model routing', () => {
             id: 'temporary-antigravity-flash',
             targetProviderType: 'gemini-antigravity',
             targetModel: 'gemini-2.5-flash',
+            actualProviderType: 'gemini-antigravity',
+            actualModel: 'gemini-2.5-flash',
+            credentialRetryUsed: true,
             fallbackUsed: false
         });
         expect(JSON.stringify(event)).not.toContain(API_KEY);

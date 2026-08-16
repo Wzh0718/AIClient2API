@@ -1111,6 +1111,24 @@ function cloneUsageHistorySummaryOnly(usageHistory = {}, conversionModel = DEFAU
     return compact;
 }
 
+function cloneCredentialRoutingUsageHistory(usageHistory = {}) {
+    const recentEntries = Object.entries(usageHistory || {})
+        .sort(([left], [right]) => left.localeCompare(right))
+        .slice(-7);
+    const recentHistory = Object.fromEntries(recentEntries);
+    const compact = cloneUsageHistorySummaryOnly(
+        recentHistory,
+        DEFAULT_CONVERSION_MODEL,
+        { compactCosts: true }
+    );
+    for (const [date, day] of recentEntries) {
+        if (day?.summary?.cost) {
+            compact[date].summary.cost = cloneCompactCostBucket(day.summary.cost);
+        }
+    }
+    return compact;
+}
+
 function cloneUsageMapForCompactHistory(usageMap = {}) {
     const compact = {};
     for (const [name, usage] of Object.entries(usageMap || {})) {
@@ -1550,7 +1568,7 @@ export function getCredentialRoutingKeyCatalog() {
         primaryGroupId: keyData.primaryGroupId || null,
         fixedCredential: keyData.fixedCredential ? { ...keyData.fixedCredential } : null,
         manualLock: keyData.manualLock === true,
-        usageHistory: JSON.parse(JSON.stringify(keyData.usageHistory || {}))
+        usageHistory: cloneCredentialRoutingUsageHistory(keyData.usageHistory || {})
     }));
 }
 

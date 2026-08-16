@@ -376,6 +376,9 @@ function buildPublicGroup(group, credentials, overrides = {}) {
         ? Number(overrides.capacity ?? group.capacity)
         : capacity;
     const predictedDemand = Number(overrides.predictedDemand ?? group?.predictedDemand ?? 0) || 0;
+    const demandShare = Number(overrides.demandShare ?? group?.demandShare ?? 0) || 0;
+    const capacityShare = Number(overrides.capacityShare ?? group?.capacityShare ?? 0) || 0;
+    const loadIndex = Number(overrides.loadIndex ?? group?.loadIndex ?? 0) || 0;
 
     return {
         id: String(group?.id || ''),
@@ -388,6 +391,10 @@ function buildPublicGroup(group, credentials, overrides = {}) {
         capacity: publicCapacity,
         confidence: overrides.confidence || group?.confidence || confidence,
         predictedDemand,
+        predictedDemandUsd: Number(overrides.predictedDemandUsd ?? group?.predictedDemandUsd ?? predictedDemand) || 0,
+        demandShare,
+        capacityShare,
+        loadIndex,
         predictedUtilization: Number.isFinite(Number(overrides.predictedUtilization ?? group?.predictedUtilization))
             ? Number(overrides.predictedUtilization ?? group.predictedUtilization)
             : predictedDemand / (publicCapacity > 0 ? publicCapacity : 0.5)
@@ -449,14 +456,34 @@ function buildPublicCredentialGroupView(currentConfig, credentials, keys, now = 
         const keyId = String(key?.keyId || key?.id || '');
         return buildPublicKeyAssignment(key, assignmentByKeyId.get(keyId), credentials, { now });
     });
+    const demandMetric = publicKeys.some(key => Number(key.demand?.usd) > 0)
+        ? 'usd'
+        : publicKeys.some(key => Number(key.demand?.totalTokens) > 0)
+            ? 'totalTokens'
+            : publicKeys.some(key => Number(key.demand?.requestCount) > 0)
+                ? 'requestCount'
+                : 'newKey';
+    const getDemandUnits = demand => {
+        if (demand?.isNew) return 1;
+        if (demandMetric === 'usd') return Number(demand?.usd) || 0;
+        if (demandMetric === 'totalTokens') return Number(demand?.totalTokens) || 0;
+        if (demandMetric === 'requestCount') return Number(demand?.requestCount) || 0;
+        return 0;
+    };
     const keyDemandByGroup = new Map();
     for (const key of publicKeys) {
         if (key.routingMode !== 'auto' || !key.primaryGroupId) continue;
-        const demandUnits = key.demand?.isNew ? 1 : (Number(key.demand?.totalDemand) || 0);
+        const demandUnits = getDemandUnits(key.demand);
         keyDemandByGroup.set(key.primaryGroupId, (keyDemandByGroup.get(key.primaryGroupId) || 0) + demandUnits);
     }
 
     const { byUuid } = buildCredentialIndexes(credentials);
+    const totalDemand = [...keyDemandByGroup.values()].reduce((sum, value) => sum + value, 0);
+    const totalCapacity = (currentConfig?.groups || []).reduce((sum, group) => {
+        return sum + (group.credentialUuids || []).reduce((groupSum, uuid) => {
+            return groupSum + calculateCredentialCapacity(byUuid.get(uuid) || {}).capacity;
+        }, 0);
+    }, 0);
     const groups = (currentConfig?.groups || []).map(group => {
         let capacity = 0;
         let confidence = 'high';
@@ -467,10 +494,16 @@ function buildPublicCredentialGroupView(currentConfig, credentials, keys, now = 
             if (!credential || details.confidence !== 'high') confidence = 'low';
         }
         const predictedDemand = keyDemandByGroup.get(group.id) || 0;
+        const demandShare = totalDemand > 0 ? predictedDemand / totalDemand : 0;
+        const capacityShare = totalCapacity > 0 ? capacity / totalCapacity : 0;
         return buildPublicGroup(group, credentials, {
             capacity,
             confidence,
             predictedDemand,
+            predictedDemandUsd: demandMetric === 'usd' ? predictedDemand : 0,
+            demandShare,
+            capacityShare,
+            loadIndex: capacityShare > 0 ? demandShare / capacityShare : 0,
             predictedUtilization: predictedDemand / (capacity > 0 ? capacity : 0.5)
         });
     });
@@ -481,6 +514,7 @@ function buildPublicCredentialGroupView(currentConfig, credentials, keys, now = 
         generatedAt: currentConfig?.generatedAt || null,
         timeZone: currentConfig?.timeZone || 'Asia/Shanghai',
         historyDays: Number(currentConfig?.historyDays || 7),
+        demandMetric,
         groups,
         credentials: (credentials || []).map(credential => buildPublicCredential(credential, providerEmailIndex)),
         keys: publicKeys,
@@ -499,6 +533,7 @@ function buildPublicSuggestion(suggestion, credentials, keys) {
         generatedAt: suggestion?.generatedAt || null,
         timeZone: suggestion?.timeZone || 'Asia/Shanghai',
         historyDays: Number(suggestion?.historyDays || 7),
+        demandMetric: suggestion?.demandMetric || 'newKey',
         groupCount: Number(suggestion?.groupCount || 0),
         healthyCredentialCount: Number(suggestion?.healthyCredentialCount || 0),
         groups: (suggestion?.groups || []).map(group => buildPublicGroup(group, credentials)),

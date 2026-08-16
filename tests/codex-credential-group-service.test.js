@@ -121,31 +121,31 @@ describe('Codex credential group sizing and capacity', () => {
 });
 
 describe('Codex key demand and capacity-aware assignment', () => {
-    test('uses the latest seven complete Asia/Shanghai calendar days and excludes today', () => {
+    test('uses the current Asia/Shanghai day plus the previous six calendar days', () => {
         const demand = summarizeKeyDemand({
             id: 'key-1',
             usageHistory: {
-                '2026-08-06': day({ totalTokens: 9999, requestCount: 99 }),
-                '2026-08-07': day({ totalTokens: 100, requestCount: 1 }),
+                '2026-08-07': day({ totalTokens: 9999, requestCount: 99 }),
+                '2026-08-08': day({ totalTokens: 100, requestCount: 1 }),
                 '2026-08-13': day({ totalTokens: 700, requestCount: 7 }),
                 '2026-08-14': day({ totalTokens: 8888, requestCount: 88 })
             }
         }, { now: NOW, timeZone: 'Asia/Shanghai' });
 
-        expect(demand.startDate).toBe('2026-08-07');
-        expect(demand.endDate).toBe('2026-08-13');
-        expect(demand.totalTokens).toBe(800);
-        expect(demand.requestCount).toBe(8);
+        expect(demand.startDate).toBe('2026-08-08');
+        expect(demand.endDate).toBe('2026-08-14');
+        expect(demand.totalTokens).toBe(9688);
+        expect(demand.requestCount).toBe(96);
         expect(demand.metric).toBe('totalTokens');
     });
 
-    test('falls back from actual cost to tokens and then request count', () => {
+    test('uses total USD including estimates before falling back to tokens and request count', () => {
         const costDemand = summarizeKeyDemand({
             usageHistory: {
                 '2026-08-13': day({
                     totalTokens: 1000,
                     requestCount: 10,
-                    cost: { actualUsd: 2.5 }
+                    cost: { actualUsd: 2.5, estimatedUsd: 0.75, missingPriceTokens: 100 }
                 })
             }
         }, { now: NOW });
@@ -156,9 +156,70 @@ describe('Codex key demand and capacity-aware assignment', () => {
             usageHistory: { '2026-08-13': day({ requestCount: 10 }) }
         }, { now: NOW });
 
-        expect(costDemand).toMatchObject({ metric: 'actualUsd', totalDemand: 2.5 });
+        expect(costDemand).toMatchObject({
+            metric: 'usd',
+            usd: 3.25,
+            actualUsd: 2.5,
+            estimatedUsd: 0.75,
+            missingPriceTokens: 100,
+            pricingCoverage: 0.9,
+            totalDemand: 3.25
+        });
         expect(tokenDemand).toMatchObject({ metric: 'totalTokens', totalDemand: 1000 });
         expect(requestDemand).toMatchObject({ metric: 'requestCount', totalDemand: 10 });
+    });
+
+    test('marks high-consumption keys by USD even when another key has more tokens', () => {
+        const suggestion = generateCredentialGroupSuggestion({
+            credentials: createCredentials(3),
+            keys: [
+                { id: 'key-expensive', usageHistory: { '2026-08-14': day({ totalTokens: 100, cost: { actualUsd: 100 } }) } },
+                { id: 'key-token-heavy', usageHistory: { '2026-08-14': day({ totalTokens: 100000, cost: { actualUsd: 5 } }) } },
+                { id: 'key-small', usageHistory: { '2026-08-14': day({ totalTokens: 50, cost: { actualUsd: 1 } }) } }
+            ],
+            now: NOW
+        });
+
+        expect(suggestion.keyAssignments.find(item => item.keyId === 'key-expensive').highConsumption).toBe(true);
+        expect(suggestion.keyAssignments.find(item => item.keyId === 'key-token-heavy').highConsumption).toBe(false);
+    });
+
+    test('does not mix token counts with USD when only some keys have priced usage', () => {
+        const suggestion = generateCredentialGroupSuggestion({
+            credentials: createCredentials(3),
+            keys: [
+                { id: 'key-expensive', usageHistory: { '2026-08-14': day({ totalTokens: 100, cost: { actualUsd: 100 } }) } },
+                { id: 'key-unpriced-huge', usageHistory: { '2026-08-14': day({ totalTokens: 1_000_000_000 }) } },
+                { id: 'key-priced-small', usageHistory: { '2026-08-14': day({ totalTokens: 10, cost: { actualUsd: 1 } }) } }
+            ],
+            now: NOW
+        });
+
+        expect(suggestion.demandMetric).toBe('usd');
+        expect(suggestion.keyAssignments.find(item => item.keyId === 'key-expensive').highConsumption).toBe(true);
+        expect(suggestion.keyAssignments.find(item => item.keyId === 'key-unpriced-huge').highConsumption).toBe(false);
+        expect(suggestion.groups.reduce((sum, group) => sum + group.predictedDemand, 0)).toBeCloseTo(101, 10);
+        expect(suggestion.groups.reduce((sum, group) => sum + group.predictedDemandUsd, 0)).toBeCloseTo(101, 10);
+    });
+
+    test('reports group demand share, capacity share, and capacity load index', () => {
+        const suggestion = generateCredentialGroupSuggestion({
+            credentials: createCredentials(3),
+            keys: [
+                { id: 'key-a', usageHistory: { '2026-08-14': day({ totalTokens: 100, cost: { actualUsd: 90 } }) } },
+                { id: 'key-b', usageHistory: { '2026-08-14': day({ totalTokens: 100, cost: { actualUsd: 10 } }) } }
+            ],
+            now: NOW
+        });
+
+        expect(suggestion.groups.reduce((sum, group) => sum + group.demandShare, 0)).toBeCloseTo(1, 10);
+        expect(suggestion.groups.reduce((sum, group) => sum + group.capacityShare, 0)).toBeCloseTo(1, 10);
+        for (const group of suggestion.groups) {
+            expect(group.loadIndex).toBeCloseTo(
+                group.capacityShare > 0 ? group.demandShare / group.capacityShare : 0,
+                10
+            );
+        }
     });
 
     test('capacity-balances new keys with no history', () => {

@@ -9,18 +9,30 @@ function keyStableRef(key = {}) {
     return String(key.maskedKey || key.keyRef || key.keyId || '');
 }
 
-function keySortCategory(key = {}) {
+function keySortCategory(key = {}, preferUsd = true) {
     if (key.enabled === false) return 2;
-    return finiteNumber(key?.demand?.totalTokens) > 0 ? 0 : 1;
+    return keyDemandValue(key, preferUsd) > 0 ? 0 : 1;
+}
+
+function keyDemandValue(key = {}, preferUsd = true) {
+    const usd = finiteNumber(key?.demand?.usd)
+        || finiteNumber(key?.demand?.actualUsd) + finiteNumber(key?.demand?.estimatedUsd);
+    if (preferUsd) return usd;
+    return finiteNumber(key?.demand?.totalTokens) || finiteNumber(key?.demand?.requestCount);
 }
 
 export function sortCredentialGroupKeys(keys = []) {
+    const preferUsd = keys.some(key => key.enabled !== false && (
+        finiteNumber(key?.demand?.usd)
+        || finiteNumber(key?.demand?.actualUsd)
+        || finiteNumber(key?.demand?.estimatedUsd)
+    ));
     return [...keys].sort((left, right) => {
-        const categoryDelta = keySortCategory(left) - keySortCategory(right);
+        const categoryDelta = keySortCategory(left, preferUsd) - keySortCategory(right, preferUsd);
         if (categoryDelta !== 0) return categoryDelta;
 
-        const tokenDelta = finiteNumber(right?.demand?.totalTokens) - finiteNumber(left?.demand?.totalTokens);
-        if (tokenDelta !== 0) return tokenDelta;
+        const demandDelta = keyDemandValue(right, preferUsd) - keyDemandValue(left, preferUsd);
+        if (demandDelta !== 0) return demandDelta;
 
         const requestDelta = finiteNumber(right?.demand?.requestCount) - finiteNumber(left?.demand?.requestCount);
         if (requestDelta !== 0) return requestDelta;
@@ -31,16 +43,23 @@ export function sortCredentialGroupKeys(keys = []) {
 
 export function getFocusedCredentialGroupKeys(keys = [], focusShare = DEFAULT_FOCUS_SHARE) {
     const all = sortCredentialGroupKeys(keys);
-    const activeWithUsage = all.filter(key => key.enabled !== false && finiteNumber(key?.demand?.totalTokens) > 0);
+    const active = all.filter(key => key.enabled !== false);
+    const preferUsd = active.some(key => finiteNumber(key?.demand?.usd)
+        || finiteNumber(key?.demand?.actualUsd)
+        || finiteNumber(key?.demand?.estimatedUsd));
+    const activeWithUsage = active.filter(key => keyDemandValue(key, preferUsd) > 0);
     const totalTokens = activeWithUsage.reduce((sum, key) => sum + finiteNumber(key?.demand?.totalTokens), 0);
+    const totalDemand = activeWithUsage.reduce((sum, key) => sum + keyDemandValue(key, preferUsd), 0);
     const normalizedShare = Math.max(0, Math.min(1, finiteNumber(focusShare) || DEFAULT_FOCUS_SHARE));
     const visibleRefs = new Set();
     let coveredTokens = 0;
+    let coveredDemand = 0;
 
     for (const key of activeWithUsage) {
-        if (totalTokens <= 0 || coveredTokens / totalTokens >= normalizedShare) break;
+        if (totalDemand <= 0 || coveredDemand / totalDemand >= normalizedShare) break;
         visibleRefs.add(keyStableRef(key));
         coveredTokens += finiteNumber(key?.demand?.totalTokens);
+        coveredDemand += keyDemandValue(key, preferUsd);
     }
 
     all.forEach(key => {
@@ -55,7 +74,22 @@ export function getFocusedCredentialGroupKeys(keys = [], focusShare = DEFAULT_FO
         visible,
         hiddenCount: Math.max(0, all.length - visible.length),
         totalTokens,
-        coveredTokens
+        coveredTokens,
+        totalDemand,
+        coveredDemand,
+        metric: preferUsd ? 'usd' : 'totalTokens'
+    };
+}
+
+export function resolveCredentialGroupMemberLabel(credentialRef, credentials = []) {
+    const ref = String(credentialRef || '');
+    const credential = credentials.find(item => String(item?.credentialRef || '') === ref);
+    const email = String(credential?.accountEmail || '').trim();
+    const customName = String(credential?.customName || '').trim();
+    const primary = email || customName || ref;
+    return {
+        primary,
+        secondary: primary !== ref ? ref : ''
     };
 }
 

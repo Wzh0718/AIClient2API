@@ -1,7 +1,7 @@
 import { RuntimeHookBridge } from '../src/runtime/runtime-hook-bridge.js';
 
 describe('RuntimeHookBridge', () => {
-    test('uses durable backpressure instead of dropping when the ipc retry queue is full', async () => {
+    test('uses only the durable stream when transport is configured', async () => {
         const messages = [];
         const durableTransport = {
             publish: jest.fn().mockResolvedValue({ persisted: true, streamId: '1-0' }),
@@ -13,10 +13,9 @@ describe('RuntimeHookBridge', () => {
         await bridge.handle('onRequestCompleted', { requestId: 'two' });
         expect(bridge.snapshot()).toMatchObject({ pending: 1, dropped: 0, backpressured: 1, spooled: 0 });
         expect(durableTransport.publish).toHaveBeenCalledTimes(2);
-        expect(messages[0].streamId).toBe('1-0');
+        expect(messages).toHaveLength(0);
         bridge.retryUnacked();
-        expect(messages).toHaveLength(3);
-        expect(messages[2].eventId).toBe(messages[0].eventId);
+        expect(messages).toHaveLength(0);
     });
 
     test('persists only a key hash in durable runtime events', async () => {
@@ -37,8 +36,12 @@ describe('RuntimeHookBridge', () => {
     });
 
     test('drain retries pending ipc events and flushes durable spool', async () => {
+        const published = [];
         const transport = {
-            publish: jest.fn().mockResolvedValue({ streamId: '3-0' }),
+            publish: jest.fn(async event => {
+                published.push(event);
+                return { streamId: '3-0' };
+            }),
             flushSpool: jest.fn().mockResolvedValue(1),
             snapshot: () => ({ spooled: 0 })
         };
@@ -47,7 +50,7 @@ describe('RuntimeHookBridge', () => {
         await bridge.handle('onRequestCompleted', { requestId: 'drain-1' });
         const drain = bridge.drain({ timeoutMs: 100, pollIntervalMs: 1 });
         await Promise.resolve();
-        await bridge.ack(sent[0].eventId);
+        await bridge.ack(published[0].eventId);
         await expect(drain).resolves.toMatchObject({ drained: true, pending: 0 });
         expect(transport.flushSpool).toHaveBeenCalled();
     });
@@ -172,10 +175,65 @@ describe('RuntimeHookBridge', () => {
         expect(messages[0].args[0]).not.toHaveProperty('providerName');
         expect(messages[0].args[0]).not.toHaveProperty('accountIdentity');
         expect(messages[0].args[0]).not.toHaveProperty('accountEmail');
+        expect(messages[0].args[0]).not.toHaveProperty('model');
+        expect(messages[0].args[0]).not.toHaveProperty('fromProvider');
+        expect(messages[0].args[0]).not.toHaveProperty('toProvider');
+        expect(messages[0].args[0]).not.toHaveProperty('isStream');
         expect(messages[0].args[0].response).toEqual({
             httpStatus: 200,
             completed: true
         });
+    });
+
+    test('preserves safe final route identity and requested model metadata across workers', async () => {
+        const messages = [];
+        const bridge = new RuntimeHookBridge({ send: message => messages.push(message) });
+
+        await bridge.handle('onContentGenerated', {
+            requestId: 'temporary-route-1',
+            model: 'gemini-2.5-flash',
+            fromProvider: 'openaiResponses',
+            toProvider: 'gemini-antigravity',
+            isStream: true,
+            originalRequestBody: { model: 'gpt-5.4-mini', input: 'private prompt' },
+            processedRequestBody: { model: 'gemini-2.5-flash', contents: [{ text: 'private prompt' }] },
+            potluckKeyData: { id: 'raw-key-id', name: 'Route smoke key' },
+            _temporaryKeyModelRouteResult: {
+                id: 'temporary-antigravity-flash',
+                targetProviderType: 'gemini-antigravity',
+                targetModel: 'gemini-2.5-flash',
+                actualProviderType: 'gemini-antigravity',
+                actualModel: 'gemini-2.5-flash',
+                providerUuid: 'raw-provider-uuid',
+                providerName: 'provider@example.com',
+                accountIdentity: 'account-1',
+                accountEmail: 'provider@example.com',
+                credentialRetryUsed: true,
+                fallbackUsed: false
+            }
+        });
+
+        expect(messages[0].args[0]).toMatchObject({
+            model: 'gemini-2.5-flash',
+            fromProvider: 'openaiResponses',
+            toProvider: 'gemini-antigravity',
+            isStream: true,
+            originalRequestBody: { model: 'gpt-5.4-mini' },
+            processedRequestBody: { model: 'gemini-2.5-flash' },
+            potluckKeyData: { name: 'Route smoke key' },
+            _temporaryKeyModelRouteResult: {
+                id: 'temporary-antigravity-flash',
+                actualProviderType: 'gemini-antigravity',
+                actualModel: 'gemini-2.5-flash',
+                credentialRetryUsed: true,
+                fallbackUsed: false
+            }
+        });
+        const serialized = JSON.stringify(messages[0]);
+        expect(serialized).not.toContain('private prompt');
+        expect(serialized).not.toContain('raw-key-id');
+        expect(messages[0].args[0]._temporaryKeyModelRouteResult).not.toHaveProperty('providerUuid');
+        expect(messages[0].args[0]._temporaryKeyModelRouteResult).not.toHaveProperty('accountIdentity');
     });
 
     test('bridges only cache fingerprints for prepared upstream requests, never raw prompts', async () => {

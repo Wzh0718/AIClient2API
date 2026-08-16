@@ -45,6 +45,8 @@ export function decodeRuntimeHookStreamResponse(response) {
 export class RuntimeHookStream {
     constructor({
         redis,
+        blockingRedis = redis,
+        createBlockingRedis = null,
         epoch = 'default',
         workerId = `worker-${process.pid}`,
         group = 'control',
@@ -54,7 +56,10 @@ export class RuntimeHookStream {
         pendingClaimIdleMs = 30_000
     } = {}) {
         if (!redis?.command) throw new TypeError('Redis executor with command() is required');
+        if (!blockingRedis?.command) throw new TypeError('Blocking Redis executor with command() is required');
         this.redis = redis;
+        this.blockingRedis = blockingRedis;
+        this.createBlockingRedis = createBlockingRedis;
         this.workerId = workerId;
         this.group = group;
         this.streamKey = `aiclient2api:${epoch}:runtime-hooks`;
@@ -136,6 +141,18 @@ export class RuntimeHookStream {
         this.groupReady = true;
     }
 
+    async _blockingCommand(parts, options) {
+        try {
+            return await this.blockingRedis.command(parts, options);
+        } catch (error) {
+            if (!isMissingConsumerGroup(error)) {
+                await this.blockingRedis.close?.().catch(() => {});
+                if (this.createBlockingRedis) this.blockingRedis = this.createBlockingRedis();
+            }
+            throw error;
+        }
+    }
+
     async readBatch({ count = 100, blockMs = 1000 } = {}) {
         await this.ensureGroup();
         const claimCommand = [
@@ -144,12 +161,12 @@ export class RuntimeHookStream {
         ];
         let claimed;
         try {
-            claimed = await this.redis.command(claimCommand, { timeoutMs: this.redisCommandTimeoutMs });
+            claimed = await this._blockingCommand(claimCommand, { timeoutMs: this.redisCommandTimeoutMs });
         } catch (error) {
             if (!isMissingConsumerGroup(error)) throw error;
             this.groupReady = false;
             await this.ensureGroup();
-            claimed = await this.redis.command(claimCommand, { timeoutMs: this.redisCommandTimeoutMs });
+            claimed = await this._blockingCommand(claimCommand, { timeoutMs: this.redisCommandTimeoutMs });
         }
         const claimedEvents = decodeRuntimeHookStreamResponse([[
             this.streamKey,
@@ -163,12 +180,12 @@ export class RuntimeHookStream {
         ];
         let response;
         try {
-            response = await this.redis.command(command, { timeoutMs: Math.max(this.redisCommandTimeoutMs, blockMs + 1000) });
+            response = await this._blockingCommand(command, { timeoutMs: Math.max(this.redisCommandTimeoutMs, blockMs + 1000) });
         } catch (error) {
             if (!isMissingConsumerGroup(error)) throw error;
             this.groupReady = false;
             await this.ensureGroup();
-            response = await this.redis.command(command, { timeoutMs: Math.max(this.redisCommandTimeoutMs, blockMs + 1000) });
+            response = await this._blockingCommand(command, { timeoutMs: Math.max(this.redisCommandTimeoutMs, blockMs + 1000) });
         }
         return decodeRuntimeHookStreamResponse(response);
     }
@@ -250,21 +267,27 @@ export class RuntimeHookStream {
         this.closed = true;
         await this.flushSpool().catch(() => {});
         await this.redis.close?.();
+        if (this.blockingRedis !== this.redis) await this.blockingRedis.close?.();
     }
 }
 
 export function createRuntimeHookStreamFromEnv({ env = process.env, workerId } = {}) {
     if (!env.REDIS_URL) return null;
     const url = new URL(env.REDIS_URL);
-    const redis = new RedisRespClient({
+    const redisOptions = {
         host: url.hostname,
         port: Number(url.port || (url.protocol === 'rediss:' ? 6380 : 6379)),
         password: url.password ? decodeURIComponent(url.password) : null,
         database: Number(url.pathname.replace(/^\//, '') || 0),
         tls: url.protocol === 'rediss:'
-    });
+    };
+    const redis = new RedisRespClient(redisOptions);
+    const createBlockingRedis = () => new RedisRespClient(redisOptions);
+    const blockingRedis = createBlockingRedis();
     return new RuntimeHookStream({
         redis,
+        blockingRedis,
+        createBlockingRedis,
         epoch: env.RUNTIME_DEPLOYMENT_EPOCH || 'default',
         workerId: workerId || env.RUNTIME_WORKER_ID || `worker-${process.pid}`,
         spoolDir: env.RUNTIME_HOOK_SPOOL_DIR || path.join(process.cwd(), 'configs', 'runtime-hook-spool', workerId || env.RUNTIME_WORKER_ID || `worker-${process.pid}`)

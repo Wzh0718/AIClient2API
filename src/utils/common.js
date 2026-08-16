@@ -81,7 +81,9 @@ function recordTemporaryRouteResult(retryContext, {
     actualProviderType,
     actualModel,
     providerUuid = null,
-    providerName = null
+    providerName = null,
+    accountIdentity = null,
+    accountEmail = null
 }) {
     const route = getTemporaryRouteRetryConfig(retryContext);
     const config = retryContext?.CONFIG;
@@ -96,6 +98,9 @@ function recordTemporaryRouteResult(retryContext, {
         actualModel,
         providerUuid,
         providerName,
+        accountIdentity,
+        accountEmail,
+        credentialRetryUsed: Number(retryContext?.currentRetry || 0) > 0,
         fallbackUsed: retryContext?.temporaryRouteFallbackAttempted === true
     };
 }
@@ -1429,7 +1434,9 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         actualProviderType: toProvider,
         actualModel: model,
         providerUuid: pooluuid,
-        providerName: customName
+        providerName: customName,
+        accountIdentity,
+        accountEmail
     });
     
     // 使用共享的 clientDisconnected 状态（如果是重试，继承上层的状态）
@@ -1628,7 +1635,9 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             actualProviderType: toProvider,
             actualModel: model,
             providerUuid: pooluuid,
-            providerName: customName
+            providerName: customName,
+            accountIdentity,
+            accountEmail
         });
 
     }  catch (error) {
@@ -1931,7 +1940,9 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         actualProviderType: toProvider,
         actualModel: model,
         providerUuid: pooluuid,
-        providerName: customName
+        providerName: customName,
+        accountIdentity,
+        accountEmail
     });
     
     try{
@@ -1996,7 +2007,9 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             actualProviderType: toProvider,
             actualModel: model,
             providerUuid: pooluuid,
-            providerName: customName
+            providerName: customName,
+            accountIdentity,
+            accountEmail
         });
     } catch (error) {
         logger.error('\n[Server] Error during unary processing:', error.stack);
@@ -2631,7 +2644,9 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     const finalRouteResult = temporaryRouteResult
         ? {
             selectedProviderUuid: temporaryRouteResult.providerUuid,
-            providerName: temporaryRouteResult.providerName
+            providerName: temporaryRouteResult.providerName,
+            accountIdentity: temporaryRouteResult.accountIdentity,
+            accountEmail: temporaryRouteResult.accountEmail
         }
         : CONFIG._codexRouteResult || null;
     const finalUsageModel = getUsageTrackingModel(model, processedRequestBody, toProvider);

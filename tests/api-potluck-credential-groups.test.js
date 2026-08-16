@@ -249,6 +249,38 @@ describe('Potluck Codex credential group management API', () => {
         expect(serialized).not.toContain(RAW_UUID_PREFIX);
     });
 
+    test('returns normalized demand shares and capacity load indexes in a preview', async () => {
+        const response = await createPreview({
+            credentialCount: 3,
+            keys: [
+                {
+                    id: 'maki_expensive',
+                    name: 'Expensive',
+                    usageHistory: {
+                        '2026-08-14': { summary: { totalTokens: 100, requestCount: 1, cost: { actualUsd: 90 } } }
+                    }
+                },
+                {
+                    id: 'maki_small',
+                    name: 'Small',
+                    usageHistory: {
+                        '2026-08-14': { summary: { totalTokens: 1000, requestCount: 10, cost: { actualUsd: 10 } } }
+                    }
+                }
+            ]
+        });
+
+        const groups = response.body.data.suggestion.groups;
+        expect(response.body.data.suggestion.demandMetric).toBe('usd');
+        expect(groups.reduce((sum, group) => sum + group.demandShare, 0)).toBeCloseTo(1, 10);
+        expect(groups.reduce((sum, group) => sum + group.capacityShare, 0)).toBeCloseTo(1, 10);
+        expect(groups.every(group => Number.isFinite(group.loadIndex))).toBe(true);
+        expect(response.body.data.suggestion.keyAssignments.find(item => item.name === 'Expensive').demand).toMatchObject({
+            metric: 'usd',
+            usd: 90
+        });
+    });
+
     test('does not create an applicable preview when no credential is available', async () => {
         setCredentialPool([
             makeCredential(1, { fiveHourRemainingRatio: 0 }),

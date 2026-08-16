@@ -144,13 +144,17 @@ describe('temporary key model content routing', () => {
             requestedModel: 'gpt-5.4-mini',
             actualProviderType: 'gemini-antigravity',
             actualModel: 'gemini-2.5-flash',
+            providerUuid: 'antigravity-test',
+            providerName: 'Antigravity test',
             fallbackUsed: false
         });
         expect(mockExecuteHook).toHaveBeenCalledWith(
             'onContentGenerated',
             expect.objectContaining({
                 toProvider: 'gemini-antigravity',
-                model: 'gemini-2.5-flash'
+                model: 'gemini-2.5-flash',
+                providerUuid: 'antigravity-test',
+                providerName: 'Antigravity test'
             })
         );
     });
@@ -368,7 +372,11 @@ describe('temporary key model content routing', () => {
                 actualProviderType: 'openai-codex-oauth',
                 actualModel: 'gpt-5.4-mini',
                 uuid: 'codex-selection-fallback',
-                serviceConfig: { customName: 'Codex selection fallback' },
+                serviceConfig: {
+                    customName: 'Codex selection fallback',
+                    codexAccountKey: 'codex-account-final',
+                    codexEmail: 'final.account@example.com'
+                },
                 isFallback: false
                 };
             });
@@ -427,7 +435,22 @@ describe('temporary key model content routing', () => {
         expect(config._temporaryKeyModelRouteResult).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
             actualModel: 'gpt-5.4-mini',
+            providerUuid: 'codex-selection-fallback',
+            providerName: 'Codex selection fallback',
+            accountIdentity: 'codex-account-final',
+            accountEmail: 'final.account@example.com',
             fallbackUsed: true
         });
+        expect(mockExecuteHook).toHaveBeenCalledWith(
+            'onContentGenerated',
+            expect.objectContaining({
+                toProvider: 'openai-codex-oauth',
+                model: 'gpt-5.4-mini',
+                providerUuid: 'codex-selection-fallback',
+                providerName: 'Codex selection fallback',
+                accountIdentity: 'codex-account-final',
+                accountEmail: 'final.account@example.com'
+            })
+        );
     });
 });

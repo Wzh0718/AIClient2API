@@ -18,7 +18,8 @@ import {
 } from './oauth-popup.js';
 import {
     getFocusedCredentialGroupKeys,
-    getFocusedCredentials
+    getFocusedCredentials,
+    resolveCredentialGroupMemberLabel
 } from './credential-group-view.js';
 
 // 保存初始服务器时间和运行时间
@@ -75,6 +76,18 @@ function formatCredentialGroupRatio(value) {
         return t('providers.credentialGroups.unknown');
     }
     return formatCredentialGroupPercent(value);
+}
+
+function formatCredentialGroupLoadIndex(value) {
+    if (value === null || value === undefined || value === '') {
+        return t('providers.credentialGroups.unknown');
+    }
+    const number = Number(value);
+    if (!Number.isFinite(number)) return t('providers.credentialGroups.unknown');
+    return `${(Math.max(0, number) * 100).toLocaleString(getCurrentLanguage() === 'en-US' ? 'en-US' : 'zh-CN', {
+        maximumFractionDigits: 1,
+        minimumFractionDigits: 0
+    })}%`;
 }
 
 function formatCredentialGroupUsd(value) {
@@ -255,16 +268,23 @@ function renderCredentialGroupCards(groups, emptyKey = 'providers.credentialGrou
         const credentialRefs = Array.isArray(group?.credentialRefs) ? group.credentialRefs : [];
         const credentialCount = Number(group?.credentialCount ?? credentialRefs.length);
         const capacity = formatCredentialGroupNumber(group?.capacity, 2);
-        const predictedDemand = formatCredentialGroupNumber(group?.predictedDemand, 2);
-        const utilization = formatCredentialGroupPercent(group?.predictedUtilization);
+        const predictedDemand = formatCredentialGroupUsd(group?.predictedDemandUsd ?? group?.predictedDemand);
+        const loadIndex = formatCredentialGroupLoadIndex(group?.loadIndex);
         const lockBadge = group?.manualLock === true
             ? credentialGroupBadge(t('providers.credentialGroups.status.locked'), 'is-locked')
             : '';
         const confidenceBadge = group?.confidence && group.confidence !== 'high'
             ? credentialGroupBadge(t('providers.credentialGroups.status.lowConfidence'), 'is-warning')
             : '';
+        const credentials = Array.isArray(credentialGroupView?.credentials) ? credentialGroupView.credentials : [];
         const members = credentialRefs.length > 0
-            ? credentialRefs.map(ref => `<span class="credential-group-member"><i class="fas fa-id-card" aria-hidden="true"></i><code>${escapeHtml(ref)}</code></span>`).join('')
+            ? credentialRefs.map(ref => {
+                const label = resolveCredentialGroupMemberLabel(ref, credentials);
+                const secondary = label.secondary
+                    ? `<small title="${escapeHtml(label.secondary)}">${escapeHtml(label.secondary)}</small>`
+                    : '';
+                return `<span class="credential-group-member"><i class="fas fa-id-card" aria-hidden="true"></i><span>${escapeHtml(label.primary)}${secondary}</span></span>`;
+            }).join('')
             : `<span class="credential-group-member">${escapeHtml(t('providers.credentialGroups.unknown'))}</span>`;
         return `
             <article class="credential-group-card${group?.manualLock === true ? ' is-locked' : ''}">
@@ -279,7 +299,7 @@ function renderCredentialGroupCards(groups, emptyKey = 'providers.credentialGrou
                     <div class="credential-group-metric"><span>${escapeHtml(t('providers.credentialGroups.label.credentials'))}</span><strong>${escapeHtml(formatCredentialGroupNumber(credentialCount, 0))}</strong></div>
                     <div class="credential-group-metric"><span>${escapeHtml(t('providers.credentialGroups.label.capacity'))}</span><strong>${escapeHtml(capacity)}</strong></div>
                     <div class="credential-group-metric"><span>${escapeHtml(t('providers.credentialGroups.label.predictedDemand'))}</span><strong>${escapeHtml(predictedDemand)}</strong></div>
-                    <div class="credential-group-metric"><span>${escapeHtml(t('providers.credentialGroups.label.utilization'))}</span><strong>${escapeHtml(utilization)}</strong></div>
+                    <div class="credential-group-metric"><span>${escapeHtml(t('providers.credentialGroups.label.loadIndex'))}</span><strong>${escapeHtml(loadIndex)}</strong></div>
                 </div>
                 <div class="credential-group-members">${members}</div>
             </article>
@@ -345,8 +365,9 @@ function formatCredentialGroupDemand(demand) {
     if (!demand || demand.isNew === true) {
         return t('providers.credentialGroups.metricNewKey');
     }
-    const cost = Number(demand.actualUsd) > 0
-        ? t('providers.credentialGroups.costSuffix', { cost: formatCredentialGroupUsd(demand.actualUsd) })
+    const usd = Number(demand.usd ?? (Number(demand.actualUsd || 0) + Number(demand.estimatedUsd || 0)));
+    const cost = usd > 0
+        ? t('providers.credentialGroups.costSuffix', { cost: formatCredentialGroupUsd(usd) })
         : '';
     return t('providers.credentialGroups.metricDemand', {
         requests: formatCredentialGroupNumber(demand.requestCount, 0),

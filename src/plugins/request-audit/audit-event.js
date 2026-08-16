@@ -200,6 +200,9 @@ export function buildRequestAuditEvent(context = {}) {
                     id: context._temporaryKeyModelRouteResult.id || null,
                     targetProviderType: context._temporaryKeyModelRouteResult.targetProviderType || null,
                     targetModel: context._temporaryKeyModelRouteResult.targetModel || null,
+                    actualProviderType: context._temporaryKeyModelRouteResult.actualProviderType || null,
+                    actualModel: context._temporaryKeyModelRouteResult.actualModel || null,
+                    credentialRetryUsed: context._temporaryKeyModelRouteResult.credentialRetryUsed === true,
                     fallbackUsed: context._temporaryKeyModelRouteResult.fallbackUsed === true
                 }
             } : {})

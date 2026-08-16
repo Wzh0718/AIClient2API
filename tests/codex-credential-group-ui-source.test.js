@@ -75,6 +75,14 @@ describe('Codex credential-group UI source', () => {
         expect(providerManager).not.toContain('credential.uuid');
     });
 
+    test('shows credential emails on group cards and labels the normalized capacity load index', () => {
+        expect(providerManager).toContain('resolveCredentialGroupMemberLabel');
+        expect(providerManager).toContain('credentialGroupView?.credentials');
+        expect(providerManager).toContain('group?.loadIndex');
+        expect(providerManager).toContain("t('providers.credentialGroups.label.loadIndex')");
+        expect(providerManager).not.toContain("t('providers.credentialGroups.label.utilization')");
+    });
+
     test('shows a compact safe Potluck routing badge beside the key-name editor', () => {
         const helperStart = potluckHtml.indexOf('function renderKeyRoutingSummary');
         const helperEnd = potluckHtml.indexOf('function renderKeys', helperStart);

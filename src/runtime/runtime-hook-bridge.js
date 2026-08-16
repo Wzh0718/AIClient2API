@@ -40,6 +40,19 @@ function compactCodexRouting(routing) {
     };
 }
 
+function compactTemporaryModelRoute(route) {
+    if (!route || typeof route !== 'object') return undefined;
+    return {
+        id: route.id || null,
+        targetProviderType: route.targetProviderType || null,
+        targetModel: route.targetModel || null,
+        actualProviderType: route.actualProviderType || null,
+        actualModel: route.actualModel || null,
+        credentialRetryUsed: route.credentialRetryUsed === true,
+        fallbackUsed: route.fallbackUsed === true
+    };
+}
+
 function compactMetadata(context = {}) {
     const metadata = {
         requestId: context.requestId || context._monitorRequestId || null,
@@ -49,8 +62,16 @@ function compactMetadata(context = {}) {
         fromProvider: context.fromProvider || null,
         toProvider: context.toProvider || null,
         potluckApiKey: context.potluckApiKey || null,
+        potluckKeyData: context.potluckKeyData?.name ? { name: context.potluckKeyData.name } : undefined,
         _codexRouting: compactCodexRouting(context._codexRouting),
-        isStream: context.isStream === true,
+        _temporaryKeyModelRouteResult: compactTemporaryModelRoute(context._temporaryKeyModelRouteResult),
+        originalRequestBody: context.originalRequestBody?.model
+            ? { model: context.originalRequestBody.model }
+            : undefined,
+        processedRequestBody: context.processedRequestBody?.model
+            ? { model: context.processedRequestBody.model }
+            : undefined,
+        isStream: typeof context.isStream === 'boolean' ? context.isStream : undefined,
         method: context.method || null,
         path: context.path || null,
         normalizedPath: context.normalizedPath || null,
@@ -72,7 +93,7 @@ function compactMetadata(context = {}) {
     if (metadata.response) {
         metadata.response = Object.fromEntries(Object.entries(metadata.response).filter(([, value]) => value !== undefined));
     }
-    return metadata;
+    return Object.fromEntries(Object.entries(metadata).filter(([, value]) => value !== undefined && value !== null && value !== ''));
 }
 
 export class RuntimeHookBridge {
@@ -107,7 +128,7 @@ export class RuntimeHookBridge {
         }
         if (this.outbound.size < this.maxPending) this.outbound.set(eventId, outbound);
         else this.backpressured += 1;
-        this.send?.(outbound);
+        if (!this.durableTransport) this.send?.(outbound);
         return true;
     }
 
@@ -118,6 +139,7 @@ export class RuntimeHookBridge {
     }
 
     retryUnacked() {
+        if (this.durableTransport) return;
         for (const message of this.outbound.values()) this.send(message);
     }
 
