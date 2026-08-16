@@ -1,6 +1,14 @@
 import { RuntimeHookBridge } from '../src/runtime/runtime-hook-bridge.js';
 
 describe('RuntimeHookBridge', () => {
+    test('uses a stable event id for replaying the same terminal request hook', async () => {
+        const published = [];
+        const durableTransport = { publish: event => { published.push(event); return { streamId: `${published.length}-0` }; }, snapshot: () => ({}) };
+        const bridge = new RuntimeHookBridge({ send: jest.fn(), durableTransport });
+        await bridge.handle('onRequestCompleted', { requestId: 'stable-request-id' });
+        await bridge.handle('onRequestCompleted', { requestId: 'stable-request-id' });
+        expect(published[0].eventId).toBe(published[1].eventId);
+    });
     test('uses only the durable stream when transport is configured', async () => {
         const messages = [];
         const durableTransport = {

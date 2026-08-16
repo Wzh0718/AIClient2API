@@ -78,30 +78,96 @@ test('acks a durably applied stream replay through the durable state', async () 
     expect(ack).toHaveBeenCalledWith(event);
 });
 
-test('durable hook apply flushes every persistence sink before commit can run', async () => {
+test('durable hook apply does not force persistence sink snapshots per event', async () => {
     const order = [];
+    const flusher = jest.fn();
     const apply = createDurableRuntimeHookApply({
         executeHook: async () => order.push('hook'),
-        flushers: [
-            async () => { order.push('potluck'); return true; },
-            async () => { order.push('model'); return true; },
-            async () => { order.push('audit'); }
-        ]
+        flushers: [flusher]
     });
     const durableState = { hasApplied: jest.fn().mockReturnValue(false), commit: jest.fn(() => order.push('commit')) };
     const consumer = new RuntimeEventConsumer({ apply, ack: jest.fn(), durableState });
 
     await consumer.consume({ eventId: 'evt-flush', hookName: 'onContentGenerated', args: [{}] });
 
-    expect(order).toEqual(['hook', 'potluck', 'model', 'audit', 'commit']);
+    expect(order).toEqual(['hook', 'commit']);
+    expect(flusher).not.toHaveBeenCalled();
 });
 
-test('durable hook apply rejects when a persistence sink cannot flush', async () => {
+test('durable hook apply is not failed by a legacy flusher', async () => {
     const apply = createDurableRuntimeHookApply({
         executeHook: jest.fn().mockResolvedValue(undefined),
         flushers: [async () => false]
     });
 
-    await expect(apply({ hookName: 'onContentGenerated', args: [{}] }))
-        .rejects.toThrow(/persistence flush failed/i);
+    await expect(apply({ hookName: 'onContentGenerated', args: [{}] })).resolves.toBeUndefined();
+});
+
+test('commits a durable batch before applying and acknowledging Redis entries', async () => {
+    const order = [];
+    const consumer = new RuntimeEventConsumer({
+        appendBatch: async events => {
+            order.push(`commit:${events.length}`);
+            return { inserted: events.length, duplicates: 0 };
+        },
+        apply: async event => order.push(`apply:${event.eventId}`),
+        ackBatch: async events => order.push(`ack:${events.length}`)
+    });
+
+    await consumer.consumeBatch([
+        { eventId: 'batch-a', hookName: 'onContentGenerated', args: [] },
+        { eventId: 'batch-b', hookName: 'onContentGenerated', args: [] }
+    ]);
+
+    expect(order).toEqual(['commit:2', 'apply:batch-a', 'apply:batch-b', 'ack:2']);
+});
+
+test('replays a committed but unprojected duplicate and marks projection before ACK', async () => {
+    const order = [];
+    const consumer = new RuntimeEventConsumer({
+        appendBatch: async () => ({
+            inserted: 0,
+            duplicates: 1,
+            pendingEventIds: ['replay-unprojected']
+        }),
+        apply: async event => order.push(`apply:${event.eventId}`),
+        markProjectedBatch: async events => order.push(`projected:${events.length}`),
+        ackBatch: async events => order.push(`ack:${events.length}`)
+    });
+
+    await consumer.consumeBatch([
+        { eventId: 'replay-unprojected', hookName: 'onContentGenerated', args: [{}] }
+    ]);
+
+    expect(order).toEqual(['apply:replay-unprojected', 'projected:1', 'ack:1']);
+});
+
+test('injects the durable event id into the hook context', async () => {
+    const executeHook = jest.fn().mockResolvedValue(undefined);
+    const apply = createDurableRuntimeHookApply({ executeHook });
+
+    await apply({
+        eventId: 'runtime-event-id',
+        hookName: 'onContentGenerated',
+        args: [{ requestId: 'request-id' }]
+    });
+
+    expect(executeHook).toHaveBeenCalledWith('onContentGenerated', {
+        requestId: 'request-id',
+        _runtimeEventId: 'runtime-event-id'
+    });
+});
+
+test('does not acknowledge a batch when the durable ledger commit fails', async () => {
+    const ackBatch = jest.fn();
+    const consumer = new RuntimeEventConsumer({
+        appendBatch: async () => { throw new Error('sqlite unavailable'); },
+        apply: jest.fn(),
+        ackBatch
+    });
+
+    await expect(consumer.consumeBatch([
+        { eventId: 'not-acked', hookName: 'onContentGenerated', args: [] }
+    ])).rejects.toThrow('sqlite unavailable');
+    expect(ackBatch).not.toHaveBeenCalled();
 });

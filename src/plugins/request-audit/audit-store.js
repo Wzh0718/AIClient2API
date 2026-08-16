@@ -32,6 +32,7 @@ export class RequestAuditStore {
         this.archiveDir = archiveDir || path.join(this.dir, 'archived-large');
         this.retentionHours = Number(retentionHours) || 24;
         this.maxFileBytes = Number(maxFileBytes) || 100 * 1024 * 1024;
+        this.eventIdsByFile = new Map();
     }
 
     getFilePath(timestamp = new Date()) {
@@ -41,9 +42,31 @@ export class RequestAuditStore {
     async append(event) {
         await fsp.mkdir(this.dir, { recursive: true });
         const filePath = this.getFilePath(event?.timestamp);
+        const eventId = event?.eventId || null;
+        if (eventId) {
+            const eventIds = await this.loadEventIds(filePath);
+            if (eventIds.has(eventId)) return { appended: false, duplicate: true };
+        }
         const line = `${JSON.stringify(event)}\n`;
         await this.rotateIfNeeded(filePath, Buffer.byteLength(line, 'utf8'));
         await fsp.appendFile(filePath, line, { encoding: 'utf8', mode: 0o600 });
+        if (eventId) {
+            const eventIds = await this.loadEventIds(filePath);
+            eventIds.add(eventId);
+        }
+        return { appended: true, duplicate: false };
+    }
+
+    async loadEventIds(filePath) {
+        if (this.eventIdsByFile.has(filePath)) return this.eventIdsByFile.get(filePath);
+        const eventIds = new Set();
+        if (fs.existsSync(filePath)) {
+            for await (const event of this.readEvents(filePath)) {
+                if (event?.eventId) eventIds.add(event.eventId);
+            }
+        }
+        this.eventIdsByFile.set(filePath, eventIds);
+        return eventIds;
     }
 
     async query(filters = {}) {
@@ -85,6 +108,7 @@ export class RequestAuditStore {
         await fsp.rename(filePath, destination).catch(error => {
             if (error?.code !== 'ENOENT') throw error;
         });
+        this.eventIdsByFile.delete(filePath);
     }
 
     async getArchivePath(filePath) {
@@ -148,6 +172,7 @@ export class RequestAuditStore {
             const fileDate = match ? new Date(`${match[1]}T23:59:59.999Z`) : null;
             if (fileDate && fileDate.getTime() < cutoff) {
                 await fsp.unlink(filePath).catch(() => {});
+                this.eventIdsByFile.delete(filePath);
             }
         }
     }

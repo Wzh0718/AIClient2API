@@ -7,6 +7,17 @@ function hashSecret(value, length = 32) {
     return `sha256:${createHash('sha256').update(String(value)).digest('hex').slice(0, length)}`;
 }
 
+function stableRuntimeEventId(message = {}) {
+    const context = message.args?.[0] || {};
+    const requestId = context.requestId || context._monitorRequestId;
+    if (!requestId) return null;
+    const epoch = process.env.RUNTIME_DEPLOYMENT_EPOCH || 'default';
+    const sourceWorkerId = process.env.RUNTIME_WORKER_ID || 'standalone';
+    return `runtime:${createHash('sha256')
+        .update(`${epoch}\0${sourceWorkerId}\0${message.hookName || 'unknown'}\0${requestId}`)
+        .digest('hex')}`;
+}
+
 function containsImage(value, seen = new Set()) {
     if (!value || typeof value !== 'object' || seen.has(value)) return false;
     seen.add(value);
@@ -108,7 +119,7 @@ export class RuntimeHookBridge {
     }
 
     async _send(message) {
-        const eventId = message.eventId || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const eventId = message.eventId || stableRuntimeEventId(message) || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const outbound = {
             ...message,
             eventId,

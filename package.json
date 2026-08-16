@@ -8,6 +8,7 @@
     "adm-zip": "^0.5.16",
     "ai": "^6.0.175",
     "axios": "^1.14.0",
+    "better-sqlite3": "^12.4.1",
     "busboy": "^1.6.0",
     "deepmerge": "^4.3.1",
     "dotenv": "^16.6.1",

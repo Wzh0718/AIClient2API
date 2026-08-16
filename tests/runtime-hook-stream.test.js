@@ -106,6 +106,24 @@ describe('RuntimeHookStream', () => {
         );
     });
 
+    test('commits a batch of stream entries after the local ledger transaction', async () => {
+        const redis = {
+            command: jest.fn().mockResolvedValue(0),
+            evalScript: jest.fn().mockResolvedValue(2)
+        };
+        const stream = new RuntimeHookStream({ redis, epoch: 'test', workerId: 'control-1' });
+        await stream.commitBatch([
+            { eventId: 'evt-a', streamId: '10-0' },
+            { eventId: 'evt-b', streamId: '11-0' }
+        ]);
+        expect(redis.evalScript).toHaveBeenCalledWith(
+            'commit-runtime-hook-batch',
+            expect.stringContaining("redis.call('XACK'"),
+            expect.any(Array),
+            ['evt-a', '10-0', 'evt-b', '11-0']
+        );
+    });
+
     test('closes the underlying Redis connection', async () => {
         const redis = {
             command: jest.fn().mockResolvedValue(0),
@@ -220,6 +238,23 @@ describe('RuntimeHookStream', () => {
 
         await expect(stream.publish({ eventId: 'evt-timeout' })).resolves.toMatchObject({ spooled: true });
         expect(redis.command).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ timeoutMs: expect.any(Number) }));
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('rejects new spool writes after the configured disk bound without growing memory', async () => {
+        const redis = { command: jest.fn().mockRejectedValue(new Error('redis unavailable')) };
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-hook-spool-bound-'));
+        const stream = new RuntimeHookStream({
+            redis,
+            epoch: 'test',
+            workerId: 'execution-1',
+            spoolDir: dir,
+            spoolMaxBytes: 128
+        });
+        await stream.publish({ eventId: 'small', args: [{ value: 'x'.repeat(16) }] });
+        await expect(stream.publish({ eventId: 'too-large', args: [{ value: 'x'.repeat(256) }] }))
+            .rejects.toMatchObject({ code: 'RUNTIME_HOOK_SPOOL_FULL' });
+        expect(stream.snapshot()).toMatchObject({ spoolFull: true });
         fs.rmSync(dir, { recursive: true, force: true });
     });
 });

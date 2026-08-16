@@ -4,6 +4,21 @@ import path from 'path';
 import { RequestAuditStore } from '../src/plugins/request-audit/audit-store.js';
 
 describe('request audit store', () => {
+  test('does not append a duplicate durable runtime event id', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-event-id-'));
+    const store = new RequestAuditStore({ dir });
+    const event = {
+      eventId: 'runtime-audit-event',
+      timestamp: '2026-08-16T12:00:00.000Z',
+      requestId: 'request-audit-event'
+    };
+
+    await store.append(event);
+    await store.append(event);
+
+    expect(await store.query({ requestId: 'request-audit-event' })).toHaveLength(1);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   test('persists and queries request audit jsonl by key hash and Beijing time window', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-'));
     const store = new RequestAuditStore({ dir, retentionHours: 24 });

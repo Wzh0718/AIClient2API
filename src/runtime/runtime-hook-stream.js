@@ -11,6 +11,17 @@ redis.call('XACK', KEYS[2], ARGV[4], ARGV[2])
 return added
 `;
 
+const COMMIT_BATCH_SCRIPT = `
+local committed = 0
+for index = 1, #ARGV, 2 do
+    redis.call('SADD', KEYS[1], ARGV[index])
+    redis.call('XACK', KEYS[2], ARGV[2], ARGV[index + 1])
+    committed = committed + 1
+end
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
+return committed
+`;
+
 function safeFileName(eventId) {
     return `${createHash('sha256').update(String(eventId)).digest('hex')}.json`;
 }
@@ -51,6 +62,7 @@ export class RuntimeHookStream {
         workerId = `worker-${process.pid}`,
         group = 'control',
         spoolDir = path.join(process.cwd(), 'configs', 'runtime-hook-spool', workerId),
+        spoolMaxBytes = 256 * 1024 * 1024,
         retentionSeconds = 45 * 24 * 60 * 60,
         redisCommandTimeoutMs = 3000,
         pendingClaimIdleMs = 30_000
@@ -65,6 +77,8 @@ export class RuntimeHookStream {
         this.streamKey = `aiclient2api:${epoch}:runtime-hooks`;
         this.processedKey = `${this.streamKey}:processed`;
         this.spoolDir = spoolDir;
+        this.spoolMaxBytes = Math.max(1, Number(spoolMaxBytes) || 1);
+        this.spoolFull = false;
         this.retentionSeconds = retentionSeconds;
         this.redisCommandTimeoutMs = redisCommandTimeoutMs;
         this.pendingClaimIdleMs = pendingClaimIdleMs;
@@ -78,10 +92,19 @@ export class RuntimeHookStream {
 
     async _writeSpool(event) {
         await fsp.mkdir(this.spoolDir, { recursive: true });
+        const serialized = `${JSON.stringify(event)}\n`;
+        const currentBytes = this.snapshot().spoolBytes;
+        if (currentBytes + Buffer.byteLength(serialized, 'utf8') > this.spoolMaxBytes) {
+            this.spoolFull = true;
+            const error = new Error(`Runtime hook spool limit exceeded (${this.spoolMaxBytes} bytes)`);
+            error.code = 'RUNTIME_HOOK_SPOOL_FULL';
+            throw error;
+        }
         const target = path.join(this.spoolDir, safeFileName(event.eventId));
         const temp = `${target}.${process.pid}.tmp`;
-        await fsp.writeFile(temp, `${JSON.stringify(event)}\n`, { encoding: 'utf8', mode: 0o600 });
+        await fsp.writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600 });
         await fsp.rename(temp, target);
+        this.spoolFull = false;
         return target;
     }
 
@@ -206,6 +229,18 @@ export class RuntimeHookStream {
         this.lastCommittedAt = new Date().toISOString();
     }
 
+    async commitBatch(events = []) {
+        const committed = events.filter(event => event?.eventId && event?.streamId);
+        if (committed.length === 0) return 0;
+        const args = committed.flatMap(event => [event.eventId, event.streamId]);
+        const script = COMMIT_BATCH_SCRIPT
+            .replace('tonumber(ARGV[1])', `tonumber('${this.retentionSeconds}')`)
+            .replace('ARGV[2]', `'${this.group}'`);
+        await this.redis.evalScript('commit-runtime-hook-batch', script, [this.processedKey, this.streamKey], args);
+        this.lastCommittedAt = new Date().toISOString();
+        return committed.length;
+    }
+
     async pendingSnapshot() {
         for (let attempt = 0; attempt < 2; attempt++) {
             try {
@@ -259,7 +294,9 @@ export class RuntimeHookStream {
             oldestPendingAgeMs,
             lastPublishedAt: this.lastPublishedAt,
             lastCommittedAt: this.lastCommittedAt,
-            lastError: this.lastError
+            lastError: this.lastError,
+            spoolMaxBytes: this.spoolMaxBytes,
+            spoolFull: this.spoolFull
         };
     }
 
@@ -290,6 +327,7 @@ export function createRuntimeHookStreamFromEnv({ env = process.env, workerId } =
         createBlockingRedis,
         epoch: env.RUNTIME_DEPLOYMENT_EPOCH || 'default',
         workerId: workerId || env.RUNTIME_WORKER_ID || `worker-${process.pid}`,
-        spoolDir: env.RUNTIME_HOOK_SPOOL_DIR || path.join(process.cwd(), 'configs', 'runtime-hook-spool', workerId || env.RUNTIME_WORKER_ID || `worker-${process.pid}`)
+        spoolDir: env.RUNTIME_HOOK_SPOOL_DIR || path.join(process.cwd(), 'configs', 'runtime-hook-spool', workerId || env.RUNTIME_WORKER_ID || `worker-${process.pid}`),
+        spoolMaxBytes: Number(env.RUNTIME_HOOK_SPOOL_MAX_BYTES || 256 * 1024 * 1024)
     });
 }

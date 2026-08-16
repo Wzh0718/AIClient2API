@@ -1,6 +1,7 @@
 import '../core/security-hardening.js';
 import logger from '../utils/logger.js';
 import * as http from 'http';
+import path from 'node:path';
 import { initializeConfig, CONFIG } from '../core/config-manager.js';
 import { initApiService, autoLinkProviderConfigs, getProviderPoolManager } from './service-manager.js';
 import { initializeUIManagement } from './ui-manager.js';
@@ -18,8 +19,7 @@ import { createRuntimeCoordination } from '../runtime/runtime-coordination.js';
 import { waitForCoordinationReady } from '../runtime/runtime-coordination-readiness.js';
 import { RuntimeEventConsumer, createDurableRuntimeHookApply } from '../runtime/runtime-event-consumer.js';
 import { createRuntimeHookStreamFromEnv } from '../runtime/runtime-hook-stream.js';
-import { flushPendingChanges as flushPotluckUsage } from '../plugins/api-potluck/key-manager.js';
-import { flushStatsPersistence as flushModelUsage } from '../plugins/model-usage-stats/stats-manager.js';
+import { createUsageEventStore } from '../runtime/usage-event-store.js';
 import { migrateCodexFingerprintProviderPoolsFile } from '../utils/codex-fingerprint-migration.js';
 import { invalidateServiceAdapter } from '../providers/adapter.js';
 
@@ -149,6 +149,9 @@ let heartbeatTimerId = null;
 let runtimeMetricsTimerId = null;
 let runtimeHookRetryTimerId = null;
 let runtimeHookStream = null;
+let usageEventStore = null;
+let usageEventStoreSnapshot = null;
+let usageEventMaintenanceTimerId = null;
 let runtimeHookPollPromise = null;
 let runtimeHookPollStopped = false;
 let runtimeHookStreamStatus = { pending: 0, consumerLag: 0, available: true, error: null };
@@ -159,10 +162,26 @@ const healthCheckActivityTracker = createAsyncActivityTracker();
 const startupShutdownGate = createStartupShutdownGate({ logger });
 const runtimeHookConsumer = new RuntimeEventConsumer({
     apply: createDurableRuntimeHookApply({
-        executeHook: (hookName, ...args) => getPluginManager()?.executeHook?.(hookName, ...args),
-        flushers: [flushPotluckUsage, flushModelUsage, drainAuditQueue]
+        executeHook: (hookName, ...args) => getPluginManager()?.executeHook?.(hookName, ...args)
     }),
     ack: message => sendToMaster({ type: 'runtime_hook_ack', sourceWorkerId: message.sourceWorkerId, eventId: message.eventId }),
+    appendBatch: async messages => {
+        if (!usageEventStore) throw new Error('Usage event store is not initialized');
+        const result = await usageEventStore.appendBatch(messages);
+        usageEventStoreSnapshot = await usageEventStore.snapshot();
+        return result;
+    },
+    markProjectedBatch: async messages => {
+        if (!usageEventStore) throw new Error('Usage event store is not initialized');
+        await usageEventStore.markProjected(messages.map(message => message.eventId));
+        usageEventStoreSnapshot = await usageEventStore.snapshot();
+    },
+    ackBatch: async messages => {
+        await runtimeHookStream?.commitBatch?.(messages);
+        for (const message of messages) {
+            sendToMaster({ type: 'runtime_hook_ack', sourceWorkerId: message.sourceWorkerId, eventId: message.eventId });
+        }
+    },
     durableState: {
         hasApplied: message => runtimeHookStream?.hasApplied?.(message) || false,
         commit: message => runtimeHookStream?.commit?.(message)
@@ -178,8 +197,12 @@ function getRuntimeHookSnapshot() {
         backpressured: Number(bridgeSnapshot.backpressured || 0),
         spooled: Number(bridgeSnapshot.spooled || streamSnapshot.spooled || 0),
         spoolBytes: Number(bridgeSnapshot.spoolBytes || streamSnapshot.spoolBytes || 0),
+        spoolMaxBytes: Number(bridgeSnapshot.spoolMaxBytes || streamSnapshot.spoolMaxBytes || 0),
+        spoolFull: bridgeSnapshot.spoolFull === true || streamSnapshot.spoolFull === true,
         consumerLag: Number(runtimeHookStreamStatus.consumerLag || 0),
-        available: runtimeHookStreamStatus.available !== false,
+        available: runtimeHookStreamStatus.available !== false
+            && bridgeSnapshot.spoolFull !== true
+            && streamSnapshot.spoolFull !== true,
         error: runtimeHookStreamStatus.error || null,
         oldestPendingAgeMs: Math.max(
             Number(bridgeSnapshot.oldestPendingAgeMs || 0),
@@ -187,7 +210,8 @@ function getRuntimeHookSnapshot() {
         ),
         lastPublishedAt: streamSnapshot.lastPublishedAt || null,
         lastCommittedAt: streamSnapshot.lastCommittedAt || null,
-        lastError: streamSnapshot.lastError || null
+        lastError: streamSnapshot.lastError || null,
+        usageLedger: usageEventStoreSnapshot
     };
 }
 
@@ -205,8 +229,11 @@ function startRuntimeHookPolling() {
     runtimeHookPollPromise = (async () => {
         while (!runtimeHookPollStopped) {
             try {
-                const events = await runtimeHookStream.readBatch({ count: 100, blockMs: 1000 });
-                for (const event of events) await runtimeHookConsumer.consume(event);
+                const events = await runtimeHookStream.readBatch({
+                    count: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_SIZE || process.env.USAGE_EVENT_BATCH_SIZE || 100)),
+                    blockMs: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_WAIT_MS || process.env.USAGE_EVENT_BATCH_WAIT_MS || 20))
+                });
+                await runtimeHookConsumer.consumeBatch(events);
                 runtimeHookStreamStatus = await runtimeHookStream.pendingSnapshot();
             } catch (error) {
                 if (!runtimeHookPollStopped) {
@@ -224,10 +251,19 @@ async function stopRuntimeHookTransport() {
         clearInterval(runtimeHookRetryTimerId);
         runtimeHookRetryTimerId = null;
     }
+    if (usageEventMaintenanceTimerId) {
+        clearInterval(usageEventMaintenanceTimerId);
+        usageEventMaintenanceTimerId = null;
+    }
     runtimeHookPollStopped = true;
     await runtimeHookPollPromise;
     await getPluginManager()?.runtimeHookBridge?.drain?.({ timeoutMs: 20000 });
     await runtimeHookStream?.flushSpool?.();
+    if (usageEventStore) {
+        usageEventStoreSnapshot = await usageEventStore.checkpoint();
+        await usageEventStore.close();
+        usageEventStore = null;
+    }
     await runtimeHookStream?.close?.();
 }
 
@@ -375,7 +411,14 @@ async function startServer() {
     }
     await pluginManager.initAll(CONFIG);
     if (IS_WORKER_PROCESS && ['execution', 'control'].includes(RUNTIME_WORKER_ROLE)) {
-        runtimeHookStream = createRuntimeHookStreamFromEnv({ workerId: process.env.RUNTIME_WORKER_ID });
+        runtimeHookStream = createRuntimeHookStreamFromEnv({
+            workerId: process.env.RUNTIME_WORKER_ID,
+            env: {
+                ...process.env,
+                RUNTIME_HOOK_SPOOL_MAX_BYTES: CONFIG.RUNTIME_HOOK_SPOOL_MAX_BYTES
+                    || process.env.RUNTIME_HOOK_SPOOL_MAX_BYTES
+            }
+        });
         if (IS_EXECUTION_WORKER) {
             pluginManager.configureRuntimeHookBridge({ durableTransport: runtimeHookStream });
             runtimeHookRetryTimerId = setInterval(() => {
@@ -386,6 +429,21 @@ async function startServer() {
             }, Number(process.env.RUNTIME_HOOK_RETRY_MS || 5000));
             runtimeHookRetryTimerId.unref?.();
         } else {
+            usageEventStore = createUsageEventStore({
+                dbPath: process.env.USAGE_EVENT_DB_PATH || path.join(process.cwd(), 'configs', 'usage-events', 'usage-events.sqlite')
+            });
+            usageEventStoreSnapshot = await usageEventStore.snapshot();
+            const pruneUsageEvents = async () => {
+                const retentionDays = Math.max(1, Number(CONFIG.USAGE_EVENT_RETENTION_DAYS || process.env.USAGE_EVENT_RETENTION_DAYS || 45));
+                const before = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+                await usageEventStore?.prune({ before });
+                usageEventStoreSnapshot = await usageEventStore?.snapshot();
+            };
+            await pruneUsageEvents();
+            usageEventMaintenanceTimerId = setInterval(() => {
+                pruneUsageEvents().catch(error => logger.error('[Usage Ledger] Retention cleanup failed:', error.message));
+            }, 24 * 60 * 60 * 1000);
+            usageEventMaintenanceTimerId.unref?.();
             startRuntimeHookPolling();
         }
     }

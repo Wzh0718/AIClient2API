@@ -138,6 +138,7 @@ export function buildRequestAuditEvent(context = {}) {
 
     return {
         schemaVersion: 4,
+        eventId: context._runtimeEventId || context.eventId || null,
         timestamp,
         beijingDate: beijing.date,
         beijingHour: beijing.hour,

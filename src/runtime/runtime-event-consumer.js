@@ -1,22 +1,54 @@
-export function createDurableRuntimeHookApply({ executeHook, flushers = [] } = {}) {
+export function createDurableRuntimeHookApply({ executeHook } = {}) {
     return async message => {
-        await executeHook?.(message.hookName, ...(message.args || []));
-        for (const flush of flushers) {
-            const result = await flush(message);
-            if (result === false) throw new Error('Durable runtime hook persistence flush failed');
+        const args = [...(message.args || [])];
+        if (args[0] && typeof args[0] === 'object' && !Array.isArray(args[0])) {
+            args[0] = { ...args[0], _runtimeEventId: message.eventId };
         }
+        await executeHook?.(message.hookName, ...args);
     };
 }
 
 export class RuntimeEventConsumer {
-    constructor({ apply, ack, durableState = null, maxRemembered = 10000 } = {}) {
+    constructor({ apply, ack, appendBatch = null, markProjectedBatch = null, ackBatch = null, durableState = null, maxRemembered = 10000 } = {}) {
         this.apply = apply;
         this.ack = ack;
+        this.appendBatch = appendBatch;
+        this.markProjectedBatch = markProjectedBatch;
+        this.ackBatch = ackBatch;
         this.durableState = durableState;
         this.maxRemembered = maxRemembered;
         this.applied = new Set();
         this.pending = new Map();
         this.tail = Promise.resolve();
+    }
+
+    async consumeBatch(events = []) {
+        const batch = events.filter(Boolean);
+        if (batch.length === 0) return { inserted: 0, duplicates: 0 };
+        if (!this.appendBatch) {
+            for (const event of batch) await this.consume(event);
+            return { inserted: batch.length, duplicates: 0 };
+        }
+
+        return this._enqueue(async () => {
+            const persisted = await this.appendBatch(batch);
+            const inserted = new Set(
+                persisted?.pendingEventIds
+                || persisted?.insertedEventIds
+                || batch.map(event => event.eventId)
+            );
+            const projected = [];
+            for (const event of batch) {
+                if (inserted.has(event.eventId)) {
+                    await this.apply?.(event);
+                    projected.push(event);
+                }
+            }
+            if (projected.length > 0) await this.markProjectedBatch?.(projected);
+            if (this.ackBatch) await this.ackBatch(batch);
+            else for (const event of batch) await this.ack?.(event);
+            return persisted;
+        });
     }
 
     async consume(event) {

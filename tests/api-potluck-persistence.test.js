@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globa
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import Database from 'better-sqlite3';
 
 const mockAtomicWriteFile = jest.fn();
 const mockAtomicWriteFileSync = jest.fn();
@@ -34,6 +35,26 @@ function getStorePath() {
 
 function readStore() {
     return JSON.parse(fs.readFileSync(getStorePath(), 'utf8'));
+}
+
+function getUsageDatabasePath() {
+    return path.join(tempDir, 'configs', 'usage-events', 'usage-events.sqlite');
+}
+
+function readUsageHistoryRows() {
+    const database = new Database(getUsageDatabasePath(), { readonly: true });
+    try {
+        return database.prepare(`
+            SELECT key_ref, usage_date, day_json
+            FROM potluck_usage_history
+            ORDER BY key_ref, usage_date
+        `).all().map((row) => ({
+            ...row,
+            day: JSON.parse(row.day_json)
+        }));
+    } finally {
+        database.close();
+    }
 }
 
 function expectPersistenceStatus(result, expected) {
@@ -106,6 +127,105 @@ afterEach(() => {
 });
 
 describe('api potluck persistence', () => {
+    test('migrates legacy usage history into SQLite before writing a metadata-only key snapshot', async () => {
+        const legacyStore = {
+            keys: {
+                maki_legacy: {
+                    id: 'maki_legacy',
+                    name: 'Legacy Usage',
+                    enabled: true,
+                    dailyLimit: 1000,
+                    usageHistory: {
+                        '2026-07-21': {
+                            summary: {
+                                requestCount: 2,
+                                promptTokens: 100,
+                                completionTokens: 20,
+                                totalTokens: 120
+                            }
+                        }
+                    },
+                    totalModels: {
+                        'gpt-5.5': { requestCount: 2, totalTokens: 120 }
+                    }
+                }
+            }
+        };
+        fs.writeFileSync(getStorePath(), JSON.stringify(legacyStore));
+
+        const plugin = await loadPotluckPlugin();
+        await plugin.init({
+            API_POTLUCK_PERSIST_INTERVAL: 60_000,
+            API_POTLUCK_MAX_DIRTY_AGE: 60_000
+        });
+        await plugin.exports.getKey('maki_legacy');
+        await plugin.destroy();
+
+        const rows = readUsageHistoryRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+            usage_date: '2026-07-21',
+            day: { summary: { requestCount: 2, totalTokens: 120 } }
+        });
+        expect(readStore().keys.maki_legacy).not.toHaveProperty('usageHistory');
+        expect(readStore().keys.maki_legacy).not.toHaveProperty('totalModels');
+        const backups = fs.readdirSync(path.dirname(getStorePath()))
+            .filter((name) => /^api-potluck-keys\.json\.pre-usage-split-[a-f0-9]{12}\.bak$/.test(name));
+        expect(backups).toHaveLength(1);
+        expect(JSON.parse(fs.readFileSync(path.join(path.dirname(getStorePath()), backups[0]), 'utf8')))
+            .toEqual(legacyStore);
+    });
+
+    test('persists reset and delete operations to the SQLite usage history', async () => {
+        const { plugin, keyManager } = await loadPotluckModules();
+        await plugin.init({
+            API_POTLUCK_PERSIST_INTERVAL: 60_000,
+            API_POTLUCK_MAX_DIRTY_AGE: 60_000
+        });
+        const key = await plugin.exports.createKey('SQLite Reset Delete', 1000);
+        await plugin.exports.incrementUsage(key.id, 'openai-codex-oauth', 'gpt-5.5', {
+            requestCount: 1,
+            promptTokens: 100,
+            completionTokens: 20,
+            totalTokens: 120
+        }, 'req-sqlite-reset-delete');
+        await keyManager.flushPendingChanges();
+        expect(readUsageHistoryRows()[0].day.summary.totalTokens).toBe(120);
+
+        await plugin.exports.resetKeyTokenStats(key.id);
+        expect(readUsageHistoryRows()[0].day.summary.totalTokens).toBe(0);
+
+        await plugin.exports.deleteKey(key.id);
+        expect(readUsageHistoryRows()).toHaveLength(0);
+    });
+
+    test('deduplicates a replayed durable runtime event without relying on in-memory request ids', async () => {
+        const plugin = await loadPotluckPlugin();
+        await plugin.init({
+            API_POTLUCK_PERSIST_INTERVAL: 60_000,
+            API_POTLUCK_MAX_DIRTY_AGE: 60_000
+        });
+        const key = await plugin.exports.createKey('Durable Event Dedup', 1000);
+        const usage = {
+            requestCount: 1,
+            promptTokens: 100,
+            completionTokens: 20,
+            totalTokens: 120
+        };
+
+        await plugin.exports.incrementUsage(key.id, 'openai-codex-oauth', 'gpt-5.5', usage, null, {
+            runtimeEventId: 'runtime-event-replay'
+        });
+        await plugin.exports.incrementUsage(key.id, 'openai-codex-oauth', 'gpt-5.5', usage, null, {
+            runtimeEventId: 'runtime-event-replay'
+        });
+
+        const stored = await plugin.exports.getKey(key.id);
+        expect(stored.totalUsage).toBe(1);
+        expect(stored.totalTokens).toBe(120);
+        expect(readUsageHistoryRows()[0].day.summary.totalTokens).toBe(120);
+    });
+
     test('resets stale daily counters before a control-worker usage hook records the new day', async () => {
         const plugin = await loadPotluckPlugin();
         await plugin.init({
@@ -578,7 +698,7 @@ describe('api potluck persistence', () => {
         const firstWriteRelease = new Promise((resolve) => { releaseFirstWrite = resolve; });
         const trailingWriteRelease = new Promise((resolve) => { releaseTrailingWrite = resolve; });
 
-        const plugin = await loadPotluckPlugin();
+        const { plugin, keyManager } = await loadPotluckModules();
         await plugin.init({
             API_POTLUCK_PERSIST_INTERVAL: 5_000,
             API_POTLUCK_MAX_DIRTY_AGE: 10_000
@@ -624,6 +744,8 @@ describe('api potluck persistence', () => {
             totalTokens: 120
         });
         expect((await plugin.exports.getKey(key.id)).totalTokens).toBe(240);
+        await keyManager.flushPendingChanges();
+        expect(readUsageHistoryRows()[0].day.summary.totalTokens).toBe(240);
     });
 
     test('flushes pending changes when the plugin is destroyed', async () => {

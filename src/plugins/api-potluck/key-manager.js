@@ -4,9 +4,18 @@
  */
 
 import { atomicWriteFile, atomicWriteFileSync } from '../../utils/file-lock.js';
+import {
+    importLegacyUsageHistories,
+    hasAppliedUsageEvent,
+    loadUsageHistory,
+    loadUsageTotals,
+    persistUsageHistory,
+    persistUsageHistoryEvent,
+    deleteUsageHistory
+} from './usage-history-store.js';
 import { promises as fs } from 'fs';
 import logger from '../../utils/logger.js';
-import { existsSync, mkdirSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { RateManager } from '../../utils/rate-tracker.js';
@@ -79,6 +88,8 @@ function getTodayDateString() {
 
 // 插件状态
 let keyStore = null;
+const dirtyUsageKeys = new Set();
+let legacyUsageMigrationPending = false;
 let isDirty = false;
 let isWriting = false;
 let persistTimer = null;
@@ -1221,7 +1232,41 @@ function ensureLoaded() {
     try {
         if (existsSync(KEYS_STORE_FILE)) {
             const content = readFileSync(KEYS_STORE_FILE, 'utf8');
-            keyStore = normalizeStore(JSON.parse(content));
+            const parsedStore = JSON.parse(content);
+            keyStore = normalizeStore(parsedStore);
+            const legacyHistories = Object.entries(keyStore.keys || {})
+                .filter(([apiKey, keyData]) => (
+                    Object.keys(keyData.usageHistory || {}).length > 0
+                    && Object.keys(loadUsageHistory(apiKey)).length === 0
+                ))
+                .map(([apiKey, keyData]) => ({
+                    apiKey,
+                    usageHistory: keyData.usageHistory,
+                    totalModels: keyData.totalModels || {}
+                }));
+            if (legacyHistories.length > 0) {
+                const sourceSha256 = crypto.createHash('sha256').update(content).digest('hex');
+                const backupPath = `${KEYS_STORE_FILE}.pre-usage-split-${sourceSha256.slice(0, 12)}.bak`;
+                if (!existsSync(backupPath)) {
+                    writeFileSync(backupPath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+                }
+                importLegacyUsageHistories({
+                    sourceSha256,
+                    sourcePath: path.basename(KEYS_STORE_FILE),
+                    histories: legacyHistories
+                });
+                legacyUsageMigrationPending = true;
+            }
+            for (const [apiKey, keyData] of Object.entries(keyStore.keys || {})) {
+                const storedHistory = loadUsageHistory(apiKey);
+                if (Object.keys(storedHistory).length > 0) {
+                    keyData.usageHistory = storedHistory;
+                }
+                const storedTotals = loadUsageTotals(apiKey);
+                keyData.totalModels = Object.keys(storedTotals).length > 0
+                    ? storedTotals
+                    : collectModelsFromUsageHistory(keyData.usageHistory || {});
+            }
         } else {
             keyStore = { keys: {} };
             syncWriteToFile();
@@ -1232,6 +1277,27 @@ function ensureLoaded() {
     }
 
     refreshPersistenceConfig();
+    if (legacyUsageMigrationPending) markDirty();
+}
+
+function buildMetadataSnapshot() {
+    return {
+        ...keyStore,
+        keys: Object.fromEntries(Object.entries(keyStore?.keys || {}).map(([apiKey, keyData]) => {
+            const { usageHistory, totalModels, ...metadata } = keyData;
+            return [apiKey, metadata];
+        }))
+    };
+}
+
+function persistDirtyUsageHistories() {
+    const keysToPersist = [...dirtyUsageKeys];
+    for (const apiKey of keysToPersist) {
+        const keyData = keyStore?.keys?.[apiKey];
+        if (keyData) persistUsageHistory(apiKey, keyData.usageHistory || {}, keyData.totalModels || {});
+        else deleteUsageHistory(apiKey);
+    }
+    return keysToPersist;
 }
 
 function unrefTimer(timer) {
@@ -1292,7 +1358,10 @@ function syncWriteToFile() {
         if (!existsSync(dir)) {
             mkdirSync(dir, { recursive: true });
         }
-        atomicWriteFileSync(KEYS_STORE_FILE, JSON.stringify(keyStore), { encoding: 'utf8', mode: 0o600 });
+        persistDirtyUsageHistories();
+        atomicWriteFileSync(KEYS_STORE_FILE, JSON.stringify(buildMetadataSnapshot()), { encoding: 'utf8', mode: 0o600 });
+        dirtyUsageKeys.clear();
+        legacyUsageMigrationPending = false;
     } catch (error) {
         logger.error('[API Potluck] Sync write failed:', error.message);
     }
@@ -1312,10 +1381,11 @@ async function persistIfDirty() {
     const serializeStartedAt = performance.now();
     let snapshot;
     try {
-        snapshot = JSON.stringify(keyStore);
+        persistDirtyUsageHistories();
+        snapshot = JSON.stringify(buildMetadataSnapshot());
     } catch (error) {
         retryNotBefore = Date.now() + PERSIST_RETRY_DELAY_MS;
-        logger.error('[API Potluck] Snapshot serialization failed:', error.message);
+        logger.error('[API Potluck] Usage history or snapshot preparation failed:', error.message);
         schedulePersistence({ resetDebounce: true });
         return false;
     }
@@ -1337,6 +1407,10 @@ async function persistIfDirty() {
             await atomicWriteFile(KEYS_STORE_FILE, snapshot, { encoding: 'utf8', mode: 0o600 });
 
             lastPersistedVersion = Math.max(lastPersistedVersion, versionAtStart);
+            if (mutationVersion === versionAtStart) {
+                dirtyUsageKeys.clear();
+                legacyUsageMigrationPending = false;
+            }
             retryNotBefore = 0;
             const writeMs = performance.now() - writeStartedAt;
             const memory = process.memoryUsage();
@@ -1579,6 +1653,7 @@ export async function deleteKey(keyId) {
     ensureLoaded();
     if (!keyStore.keys[keyId]) return null;
     delete keyStore.keys[keyId];
+    dirtyUsageKeys.add(keyId);
     
     // 清理速率追踪器，防止内存泄漏
     rateManager.remove(`key:${keyId}`);
@@ -1618,6 +1693,7 @@ export async function resetKeyUsage(keyId) {
     keyStore.keys[keyId].lastResetDate = getTodayDateString();
     if (!keyStore.keys[keyId].usageHistory) keyStore.keys[keyId].usageHistory = {};
     keyStore.keys[keyId].usageHistory[getTodayDateString()] = normalizeUsageHistoryDay();
+    dirtyUsageKeys.add(keyId);
     const targetVersion = markDirty();
     return buildManagementMutationResult(targetVersion, keyStore.keys[keyId]);
 }
@@ -1642,6 +1718,7 @@ export async function resetKeyTokenStats(keyId) {
     keyData.totalCachedTokens = 0;
     keyData.totalModels = {};
     resetUsageHistoryTokens(keyData.usageHistory);
+    dirtyUsageKeys.add(keyId);
 
     // 重置该 Key 的速率追踪器
     rateManager.remove(`key:${keyId}`);
@@ -1659,7 +1736,7 @@ export async function resetAllTokenStats() {
     ensureLoaded();
     let updated = 0;
 
-    for (const keyData of Object.values(keyStore.keys)) {
+    for (const [keyId, keyData] of Object.entries(keyStore.keys)) {
         keyData.todayPromptTokens = 0;
         keyData.todayCompletionTokens = 0;
         keyData.todayReasoningTokens = 0;
@@ -1672,6 +1749,7 @@ export async function resetAllTokenStats() {
         keyData.totalCachedTokens = 0;
         keyData.totalModels = {};
         resetUsageHistoryTokens(keyData.usageHistory);
+        dirtyUsageKeys.add(keyId);
         updated++;
     }
 
@@ -1876,8 +1954,30 @@ function hasBillableUsage(usage = {}) {
  */
 export async function incrementUsage(apiKey, pName = 'unknown', mName = 'unknown', usage = {}, requestId = null, context = {}) {
     ensureLoaded();
-    const keyData = keyStore.keys[apiKey];
-    if (!keyData) return { usageRecordingStatus: 'missing-key', persistencePending: false };
+    const storedKeyData = keyStore.keys[apiKey];
+    if (!storedKeyData) return { usageRecordingStatus: 'missing-key', persistencePending: false };
+    const runtimeEventId = context.runtimeEventId || null;
+    if (runtimeEventId && hasAppliedUsageEvent(runtimeEventId)) {
+        return {
+            ...storedKeyData,
+            usedBonus: false,
+            usageRecordingStatus: 'deduplicated-event',
+            persistencePending: isDirty
+        };
+    }
+    const today = getTodayDateString();
+    const keyData = runtimeEventId
+        ? {
+            ...storedKeyData,
+            usageHistory: {
+                ...(storedKeyData.usageHistory || {}),
+                ...(storedKeyData.usageHistory?.[today]
+                    ? { [today]: structuredClone(storedKeyData.usageHistory[today]) }
+                    : {})
+            },
+            totalModels: structuredClone(storedKeyData.totalModels || {})
+        }
+        : storedKeyData;
     const previousResetDate = keyData.lastResetDate;
     checkAndResetDailyCount(keyData);
     const dailyCountReset = previousResetDate !== keyData.lastResetDate;
@@ -1930,7 +2030,6 @@ export async function incrementUsage(apiKey, pName = 'unknown', mName = 'unknown
         ...usageToApply,
         lastUsedAt: usage.lastUsedAt || recordedAt
     };
-    const today = getTodayDateString();
     if (!keyData.usageHistory) keyData.usageHistory = {};
     if (!keyData.usageHistory[today]) {
         keyData.usageHistory[today] = normalizeUsageHistoryDay();
@@ -2011,6 +2110,24 @@ export async function incrementUsage(apiKey, pName = 'unknown', mName = 'unknown
 
     // 清理该 Key 的过期历史。
     trimUsageHistory(keyData.usageHistory, USAGE_HISTORY_RETENTION_DAYS);
+    if (runtimeEventId) {
+        const persistedEvent = persistUsageHistoryEvent(
+            apiKey,
+            keyData.usageHistory,
+            keyData.totalModels || {},
+            runtimeEventId
+        );
+        if (persistedEvent.duplicate) {
+            return {
+                ...storedKeyData,
+                usedBonus: false,
+                usageRecordingStatus: 'deduplicated-event',
+                persistencePending: isDirty
+            };
+        }
+        keyStore.keys[apiKey] = keyData;
+    }
+    dirtyUsageKeys.add(apiKey);
 
     markDirty();
     
@@ -2360,6 +2477,8 @@ export async function regenerateKey(oldKeyId) {
     // 删除旧 Key，添加新 Key
     delete keyStore.keys[oldKeyId];
     keyStore.keys[newKeyId] = newKeyData;
+    dirtyUsageKeys.add(oldKeyId);
+    dirtyUsageKeys.add(newKeyId);
     
     // 清理旧 Key 的速率追踪器
     rateManager.remove(`key:${oldKeyId}`);
