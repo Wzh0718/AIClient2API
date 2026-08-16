@@ -11,6 +11,13 @@ import {
     mergeUsage as mergeNormalizedUsage,
     normalizeUsageCandidate as normalizeSharedUsageCandidate
 } from '../../utils/usage-normalizer.js';
+import {
+    hasAppliedModelUsageEvent,
+    loadModelUsageState,
+    persistModelUsageEvent,
+    persistModelUsageState,
+    closeModelUsageStore
+} from './sqlite-store.js';
 
 const STATS_STORE_FILE = path.join(process.cwd(), 'configs', 'model-usage-stats.json');
 const USAGE_CACHE_FILE = path.join(process.cwd(), 'configs', 'usage-cache.json');
@@ -398,9 +405,14 @@ function ensureLoaded() {
     if (statsStore !== null) return;
 
     try {
-        if (existsSync(STATS_STORE_FILE)) {
+        const sqliteState = loadModelUsageState();
+        if (sqliteState) {
+            statsStore = normalizeStore(sqliteState);
+            logger.info(`[Model Usage Stats] Loaded SQLite stats store: providers=${Object.keys(statsStore.providers).length}, requests=${statsStore.summary.requestCount}, totalTokens=${statsStore.summary.totalTokens}`);
+        } else if (existsSync(STATS_STORE_FILE)) {
             const content = readFileSync(STATS_STORE_FILE, 'utf8');
             statsStore = normalizeStore(JSON.parse(content));
+            persistModelUsageState(statsStore);
             logger.info(`[Model Usage Stats] Loaded stats store: providers=${Object.keys(statsStore.providers).length}, requests=${statsStore.summary.requestCount}, totalTokens=${statsStore.summary.totalTokens}`);
         } else {
             statsStore = createDefaultStore();
@@ -579,6 +591,7 @@ export async function shutdownStatsPersistence() {
         persisted = await flushStatsPersistence({ targetVersion, rescheduleOnFailure: false });
     }
     clearPersistenceTimers();
+    closeModelUsageStore();
     return persisted;
 }
 
@@ -865,10 +878,11 @@ function getRollingRecoveryTime(events, limit, rollingWindowMs, nowMs) {
     return null;
 }
 
-function cleanupAccountUsageEvents(nowMs = Date.now()) {
+function cleanupAccountUsageEvents(nowMs = Date.now(), onlyAccountKey = null) {
     if (!statsStore?.accountUsageEvents) return;
     const cutoff = nowMs - ACCOUNT_EVENT_RETENTION_MS;
     for (const [accountKey, events] of Object.entries(statsStore.accountUsageEvents)) {
+        if (onlyAccountKey && accountKey !== onlyAccountKey) continue;
         const retained = Array.isArray(events)
             ? events.filter(event => Date.parse(event.timestamp) >= cutoff)
             : [];
@@ -891,7 +905,7 @@ function recordAccountUsageEvent(provider, providerUuid, usage, timestamp, accou
         timestamp,
         totalTokens: usage.totalTokens || (usage.promptTokens + usage.completionTokens)
     });
-    cleanupAccountUsageEvents(Date.parse(timestamp));
+    cleanupAccountUsageEvents(Date.parse(timestamp), accountKey);
 }
 
 function addCacheHitRatio(block) {
@@ -970,7 +984,7 @@ export function recordStreamChunkUsage({ requestId, model, provider, providerUui
     }
 }
 
-export async function finalizeRequest({ requestId, model, provider, providerUuid, providerName, accountIdentity, accountEmail, fromProvider, isStream }) {
+export async function finalizeRequest({ requestId, model, provider, providerUuid, providerName, accountIdentity, accountEmail, fromProvider, isStream, runtimeEventId = null }) {
     if (!requestId) {
         logger.warn(`${getTracePrefix(null)} Skip finalize: missing requestId`);
         return false;
@@ -992,6 +1006,10 @@ export async function finalizeRequest({ requestId, model, provider, providerUuid
         return false;
     }
 
+    if (runtimeEventId && hasAppliedModelUsageEvent(runtimeEventId)) {
+        return true;
+    }
+
     const now = new Date();
     const timestamp = now.toISOString();
     const dateKey = getBeijingDateString();
@@ -1001,6 +1019,26 @@ export async function finalizeRequest({ requestId, model, provider, providerUuid
     const normalizedAccountIdentity = state.accountIdentity || accountIdentity || null;
     const normalizedAccountEmail = state.accountEmail || normalizeEmail(accountEmail) || null;
     const normalizedProviderName = state.providerName || providerName || null;
+    const normalizedAccountKey = getAccountKey(
+        normalizedProvider,
+        normalizedProviderUuid,
+        normalizedAccountIdentity,
+        normalizedAccountEmail,
+        normalizedProviderName
+    );
+    const snapshotEntry = (collection, key) => ({
+        existed: Boolean(key) && Object.prototype.hasOwnProperty.call(collection || {}, key),
+        value: key && Object.prototype.hasOwnProperty.call(collection || {}, key)
+            ? structuredClone(collection[key])
+            : null
+    });
+    const durableRollbackState = runtimeEventId ? {
+        summary: structuredClone(statsStore.summary),
+        provider: snapshotEntry(statsStore.providers, normalizedProvider),
+        account: snapshotEntry(statsStore.accounts, normalizedAccountKey),
+        daily: snapshotEntry(statsStore.daily, dateKey),
+        accountEvents: snapshotEntry(statsStore.accountUsageEvents, normalizedAccountKey)
+    } : null;
     
     const usage = {
         promptTokens: state.usage.promptTokens,
@@ -1024,7 +1062,6 @@ export async function finalizeRequest({ requestId, model, provider, providerUuid
     // 记录速率统计
     rateManager.record(`provider:${normalizedProvider}`, usage.totalTokens);
     rateManager.record(`model:${normalizedModel}`, usage.totalTokens);
-    const normalizedAccountKey = getAccountKey(normalizedProvider, normalizedProviderUuid, normalizedAccountIdentity, normalizedAccountEmail, normalizedProviderName);
     if (normalizedAccountKey) {
         rateManager.record(`account:${normalizedAccountKey}`, usage.totalTokens);
     }
@@ -1063,6 +1100,27 @@ export async function finalizeRequest({ requestId, model, provider, providerUuid
 
     logger.info(`[Request Audit][${requestId}] Provider: ${normalizedProvider} | Account: ${normalizedProviderName || 'unknown'} | UUID: ${normalizedProviderUuid || 'unknown'} | Model: ${normalizedModel} | ${formatUsageWindow('5h', usageSnapshot.fiveHourPercent)} | ${formatUsageWindow('Weekly', usageSnapshot.weeklyPercent)} | UsageCacheAgeMs: ${usageSnapshot.cacheAgeMs ?? 'unavailable'} | Prompt: ${usage.promptTokens} | Completion: ${usage.completionTokens} | Reasoning: ${usage.reasoningTokens} | Total: ${usage.totalTokens} | Cached: ${usage.cachedTokens} | Stream: ${Boolean(state.isStream)}`);
     logger.info(`${getTracePrefix(requestId)} >>> Request Finalized: Provider: ${normalizedProvider} | Account: ${normalizedProviderName || 'unknown'} | UUID: ${normalizedProviderUuid || 'unknown'} | Model: ${normalizedModel} | Prompt: ${usage.promptTokens} | Completion: ${usage.completionTokens} | Reasoning: ${usage.reasoningTokens} | Total: ${usage.totalTokens} | Cached: ${usage.cachedTokens} | Stream: ${Boolean(state.isStream)} | QPS: ${globalRates.qps}`);
+    if (runtimeEventId) {
+        try {
+            persistModelUsageEvent(runtimeEventId, statsStore, {
+                provider: normalizedProvider,
+                accountKey: normalizedAccountKey,
+                dateKey
+            });
+        } catch (error) {
+            const restoreEntry = (collection, key, snapshot) => {
+                if (!key) return;
+                if (snapshot.existed) collection[key] = snapshot.value;
+                else delete collection[key];
+            };
+            statsStore.summary = durableRollbackState.summary;
+            restoreEntry(statsStore.providers, normalizedProvider, durableRollbackState.provider);
+            restoreEntry(statsStore.accounts, normalizedAccountKey, durableRollbackState.account);
+            restoreEntry(statsStore.daily, dateKey, durableRollbackState.daily);
+            restoreEntry(statsStore.accountUsageEvents, normalizedAccountKey, durableRollbackState.accountEvents);
+            throw error;
+        }
+    }
     markDirty();
     return true;
 }
@@ -1176,6 +1234,7 @@ export async function resetStats() {
     statsStore = createDefaultStore();
     pendingRequests.clear();
     rateManager.clear(); // 同时重置速率统计
+    persistModelUsageState(statsStore);
     const targetVersion = markDirty();
     const persisted = await flushStatsPersistence({ targetVersion });
     logger.warn(persisted
@@ -1191,6 +1250,7 @@ export async function resetTokenStats() {
 
     pendingRequests.clear();
     rateManager.clear(); // 同时重置速率统计
+    persistModelUsageState(statsStore);
     const targetVersion = markDirty();
     const persisted = await flushStatsPersistence({ targetVersion });
     logger.warn(persisted

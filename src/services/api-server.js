@@ -20,6 +20,7 @@ import { waitForCoordinationReady } from '../runtime/runtime-coordination-readin
 import { RuntimeEventConsumer, createDurableRuntimeHookApply } from '../runtime/runtime-event-consumer.js';
 import { createRuntimeHookStreamFromEnv } from '../runtime/runtime-hook-stream.js';
 import { createUsageEventStore } from '../runtime/usage-event-store.js';
+import { RuntimeUsageProjector } from '../runtime/runtime-usage-projector.js';
 import { migrateCodexFingerprintProviderPoolsFile } from '../utils/codex-fingerprint-migration.js';
 import { invalidateServiceAdapter } from '../providers/adapter.js';
 
@@ -151,6 +152,7 @@ let runtimeHookRetryTimerId = null;
 let runtimeHookStream = null;
 let usageEventStore = null;
 let usageEventStoreSnapshot = null;
+let runtimeUsageProjector = null;
 let usageEventMaintenanceTimerId = null;
 let runtimeHookPollPromise = null;
 let runtimeHookPollStopped = false;
@@ -182,6 +184,7 @@ const runtimeHookConsumer = new RuntimeEventConsumer({
             sendToMaster({ type: 'runtime_hook_ack', sourceWorkerId: message.sourceWorkerId, eventId: message.eventId });
         }
     },
+    scheduleProjections: () => runtimeUsageProjector?.schedule(),
     durableState: {
         hasApplied: message => runtimeHookStream?.hasApplied?.(message) || false,
         commit: message => runtimeHookStream?.commit?.(message)
@@ -211,7 +214,8 @@ function getRuntimeHookSnapshot() {
         lastPublishedAt: streamSnapshot.lastPublishedAt || null,
         lastCommittedAt: streamSnapshot.lastCommittedAt || null,
         lastError: streamSnapshot.lastError || null,
-        usageLedger: usageEventStoreSnapshot
+        usageLedger: usageEventStoreSnapshot,
+        ack: runtimeHookConsumer.snapshot()
     };
 }
 
@@ -259,6 +263,8 @@ async function stopRuntimeHookTransport() {
     await runtimeHookPollPromise;
     await getPluginManager()?.runtimeHookBridge?.drain?.({ timeoutMs: 20000 });
     await runtimeHookStream?.flushSpool?.();
+    await runtimeUsageProjector?.drain?.();
+    runtimeUsageProjector = null;
     if (usageEventStore) {
         usageEventStoreSnapshot = await usageEventStore.checkpoint();
         await usageEventStore.close();
@@ -432,11 +438,25 @@ async function startServer() {
             usageEventStore = createUsageEventStore({
                 dbPath: process.env.USAGE_EVENT_DB_PATH || path.join(process.cwd(), 'configs', 'usage-events', 'usage-events.sqlite')
             });
+            runtimeUsageProjector = new RuntimeUsageProjector({
+                store: usageEventStore,
+                batchSize: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_SIZE || process.env.USAGE_EVENT_BATCH_SIZE || 100)),
+                executeProjection: async (projectionName, hookName, ...argsAndEventId) => {
+                    const eventId = argsAndEventId.pop();
+                    return getPluginManager()?.executeUsageProjection?.(
+                        projectionName,
+                        hookName,
+                        argsAndEventId,
+                        eventId
+                    );
+                }
+            });
             usageEventStoreSnapshot = await usageEventStore.snapshot();
             const pruneUsageEvents = async () => {
                 const retentionDays = Math.max(1, Number(CONFIG.USAGE_EVENT_RETENTION_DAYS || process.env.USAGE_EVENT_RETENTION_DAYS || 45));
                 const before = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
                 await usageEventStore?.prune({ before });
+                await runtimeUsageProjector?.schedule?.();
                 usageEventStoreSnapshot = await usageEventStore?.snapshot();
             };
             await pruneUsageEvents();
@@ -444,8 +464,50 @@ async function startServer() {
                 pruneUsageEvents().catch(error => logger.error('[Usage Ledger] Retention cleanup failed:', error.message));
             }, 24 * 60 * 60 * 1000);
             usageEventMaintenanceTimerId.unref?.();
+            runtimeUsageProjector.schedule().catch(error => {
+                logger.error('[Usage Projection] Startup drain failed:', error.message);
+            });
             startRuntimeHookPolling();
         }
+    } else if (!IS_WORKER_PROCESS) {
+        usageEventStore = createUsageEventStore({
+            dbPath: process.env.USAGE_EVENT_DB_PATH || path.join(process.cwd(), 'configs', 'usage-events', 'usage-events.sqlite')
+        });
+        runtimeUsageProjector = new RuntimeUsageProjector({
+            store: usageEventStore,
+            batchSize: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_SIZE || process.env.USAGE_EVENT_BATCH_SIZE || 100)),
+            executeProjection: async (projectionName, hookName, ...argsAndEventId) => {
+                const eventId = argsAndEventId.pop();
+                return getPluginManager()?.executeUsageProjection?.(projectionName, hookName, argsAndEventId, eventId);
+            }
+        });
+        usageEventStoreSnapshot = await usageEventStore.snapshot();
+        pluginManager.configureRuntimeHookBridge({
+            durableTransport: {
+                publish: async event => {
+                    const result = await runtimeHookConsumer.consumeBatch([event]);
+                    usageEventStoreSnapshot = await usageEventStore.snapshot();
+                    return { streamId: `local:${event.eventId}`, ...result };
+                },
+                acknowledge: async () => true,
+                snapshot: () => ({
+                    pending: Number(usageEventStoreSnapshot?.pending || 0),
+                    consumerLag: Object.values(usageEventStoreSnapshot?.projections || {})
+                        .reduce((total, projection) => total + Number(projection.lag || 0), 0)
+                })
+            }
+        });
+        await runtimeUsageProjector.schedule();
+        usageEventMaintenanceTimerId = setInterval(() => {
+            const retentionDays = Math.max(1, Number(CONFIG.USAGE_EVENT_RETENTION_DAYS || process.env.USAGE_EVENT_RETENTION_DAYS || 45));
+            const before = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+            usageEventStore?.prune({ before })
+                .then(() => runtimeUsageProjector?.schedule?.())
+                .then(() => usageEventStore?.snapshot?.())
+                .then(snapshot => { usageEventStoreSnapshot = snapshot; })
+                .catch(error => logger.error('[Usage Ledger] Standalone retention cleanup failed:', error.message));
+        }, 24 * 60 * 60 * 1000);
+        usageEventMaintenanceTimerId.unref?.();
     }
     if (startupShutdownGate.shouldAbort('plugin status logging')) return null;
     
@@ -757,7 +819,7 @@ const shutdownHandlers = registerWorkerShutdownHandlers({
             return true;
         }
         if (message.type === 'runtime_hook' && RUNTIME_WORKER_ROLE === 'control') {
-            runtimeHookConsumer.consume(message).catch(error => {
+            runtimeHookConsumer.consumeBatch([message]).catch(error => {
                 logger.error('[Runtime Hook] Failed to apply remote hook:', error.message);
             });
             return true;

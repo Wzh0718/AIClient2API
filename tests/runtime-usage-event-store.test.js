@@ -71,6 +71,39 @@ describe('runtime usage event store', () => {
         expect(replayAfterProjection.pendingEventIds).toEqual([]);
     });
 
+    test('tracks Potluck, model usage, and audit projection state independently', async () => {
+        store = createUsageEventStore({ dbPath: path.join(dir, 'usage.sqlite') });
+        await store.appendBatch([event('projection-state')]);
+
+        const initial = await store.listPendingProjections({ limit: 10 });
+        expect(initial.map(item => item.projectionName).sort()).toEqual([
+            'api-potluck',
+            'model-usage-stats',
+            'request-audit'
+        ]);
+
+        await store.completeProjection({ eventId: 'projection-state', projectionName: 'api-potluck' });
+        await store.failProjection({
+            eventId: 'projection-state',
+            projectionName: 'model-usage-stats',
+            error: 'temporary model projection failure',
+            retryDelayMs: 0
+        });
+
+        const remaining = await store.listPendingProjections({ limit: 10 });
+        expect(remaining.map(item => item.projectionName).sort()).toEqual([
+            'model-usage-stats',
+            'request-audit'
+        ]);
+        const snapshot = await store.snapshot();
+        expect(snapshot.projections['api-potluck'].lag).toBe(0);
+        expect(snapshot.projections['model-usage-stats']).toMatchObject({
+            lag: 1,
+            lastError: 'temporary model projection failure'
+        });
+        expect(snapshot.projections['request-audit'].lag).toBe(1);
+    });
+
     test('records bounded batch and persistence metrics without serializing a key store', async () => {
         store = createUsageEventStore({ dbPath: path.join(dir, 'usage.sqlite') });
         const events = Array.from({ length: 1000 }, (_, index) => event(`event-${index}`));

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globa
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import Database from 'better-sqlite3';
 
 const mockAtomicWriteFile = jest.fn();
 const mockAtomicWriteFileSync = jest.fn();
@@ -34,7 +35,7 @@ async function loadPluginAndManager(config = {}) {
     return { plugin, statsManager };
 }
 
-function recordUsage(statsManager, requestId, totalTokens = 120) {
+function recordUsage(statsManager, requestId, totalTokens = 120, runtimeEventId = null) {
     statsManager.recordUnaryUsage({
         requestId,
         model: 'gpt-5.5',
@@ -58,7 +59,8 @@ function recordUsage(statsManager, requestId, totalTokens = 120) {
         providerUuid: 'codex-account-a',
         providerName: 'user@example.com',
         accountEmail: 'user@example.com',
-        isStream: false
+        isStream: false,
+        runtimeEventId
     });
 }
 
@@ -106,6 +108,61 @@ afterEach(() => {
 });
 
 describe('model usage stats persistence', () => {
+    test('deduplicates a durable runtime event in SQLite', async () => {
+        const { statsManager } = await loadPluginAndManager();
+        await recordUsage(statsManager, 'req-runtime-model-1', 120, 'event-runtime-model');
+        await recordUsage(statsManager, 'req-runtime-model-2', 120, 'event-runtime-model');
+
+        const stats = await statsManager.getStats();
+        expect(stats.summary).toMatchObject({ requestCount: 1, totalTokens: 120 });
+        expect(fs.existsSync(path.join(tempDir, 'configs', 'usage-events', 'usage-events.sqlite'))).toBe(true);
+    });
+
+    test('writes 1000 durable events as bounded shard updates instead of full-state blobs', async () => {
+        const { statsManager } = await loadPluginAndManager();
+        for (let index = 0; index < 1000; index += 1) {
+            await recordUsage(statsManager, `req-sharded-${index}`, 1, `event-sharded-${index}`);
+        }
+
+        const database = new Database(path.join(tempDir, 'configs', 'usage-events', 'usage-events.sqlite'), { readonly: true });
+        try {
+            const metrics = database.prepare(`
+                SELECT event_writes, event_bytes, full_state_writes
+                FROM model_usage_write_metrics WHERE singleton = 1
+            `).get();
+            const eventRows = database.prepare('SELECT COUNT(*) AS count FROM model_usage_account_event_rows').get();
+            expect(metrics.event_writes).toBe(1000);
+            expect(metrics.full_state_writes).toBe(0);
+            expect(metrics.event_bytes).toBeLessThan(10 * 1024 * 1024);
+            expect(eventRows.count).toBe(1000);
+        } finally {
+            database.close();
+        }
+    });
+
+    test('resetStats replaces the durable SQLite state used after restart', async () => {
+        let loaded = await loadPluginAndManager();
+        await recordUsage(loaded.statsManager, 'req-before-reset', 120, 'event-before-reset');
+        await loaded.statsManager.resetStats();
+        await loaded.plugin.destroy();
+
+        jest.resetModules();
+        loaded = await loadPluginAndManager();
+        const stats = await loaded.statsManager.getStats();
+        expect(stats.summary).toMatchObject({ requestCount: 0, totalTokens: 0 });
+    });
+
+    test('resetTokenStats replaces durable SQLite token totals while preserving request counts', async () => {
+        let loaded = await loadPluginAndManager();
+        await recordUsage(loaded.statsManager, 'req-before-token-reset', 120, 'event-before-token-reset');
+        await loaded.statsManager.resetTokenStats();
+        await loaded.plugin.destroy();
+
+        jest.resetModules();
+        loaded = await loadPluginAndManager();
+        const stats = await loaded.statsManager.getStats();
+        expect(stats.summary).toMatchObject({ requestCount: 1, totalTokens: 0, promptTokens: 0 });
+    });
     test('finalizeRequest returns without waiting for or starting persistence', async () => {
         const { statsManager } = await loadPluginAndManager({
             MODEL_USAGE_STATS_PERSIST_DEBOUNCE_MS: 30_000,

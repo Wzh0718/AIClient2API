@@ -9,6 +9,12 @@ describe('runtime durable hook integration source', () => {
         expect(server).toContain('createRuntimeHookStreamFromEnv');
         expect(server).toContain('runtimeHookStream.readBatch');
         expect(server).toContain('runtimeHookConsumer.consumeBatch(events)');
+        expect(server).toContain('RuntimeUsageProjector');
+        expect(server).toContain('scheduleProjections');
+        expect(server).toContain('executeUsageProjection');
+        expect(server).toContain('await runtimeUsageProjector?.drain?.()');
+        expect(runtime).toContain("if (message?.type === 'runtime_metrics' && message.snapshot)");
+        expect(runtime).toContain('ready.add(id)');
         expect(server).toContain('runtimeHookBridge?.snapshot?.()');
         expect(server).toContain("await runtimeHookStream?.flushSpool?.()");
         expect(plugins).toContain('configureRuntimeHookBridge');

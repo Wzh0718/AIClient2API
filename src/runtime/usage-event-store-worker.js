@@ -4,6 +4,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 import Database from 'better-sqlite3';
 
 const dbPath = workerData.dbPath;
+const PROJECTION_NAMES = ['api-potluck', 'model-usage-stats', 'request-audit'];
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
 const db = new Database(dbPath);
@@ -31,6 +32,20 @@ db.exec(`
         last_sequence INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS runtime_usage_projections (
+        event_id TEXT NOT NULL,
+        projection_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        last_success_at TEXT,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (event_id, projection_name),
+        FOREIGN KEY (event_id) REFERENCES runtime_usage_events(event_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS runtime_usage_projections_pending_idx
+        ON runtime_usage_projections (status, next_attempt_at, projection_name);
 `);
 const runtimeEventColumns = new Set(db.prepare('PRAGMA table_info(runtime_usage_events)').all().map(row => row.name));
 if (!runtimeEventColumns.has('projected_at')) {
@@ -43,6 +58,10 @@ const insertEvent = db.prepare(`
     ) VALUES (
         @eventId, @streamId, @hookName, @sourceWorkerId, @createdAt, @billingDate, @payloadJson
     )
+`);
+const insertProjection = db.prepare(`
+    INSERT OR IGNORE INTO runtime_usage_projections (event_id, projection_name)
+    VALUES (?, ?)
 `);
 const countEvents = db.prepare('SELECT COUNT(*) AS count FROM runtime_usage_events');
 const countPendingEvents = db.prepare('SELECT COUNT(*) AS count FROM runtime_usage_events WHERE projected_at IS NULL');
@@ -58,9 +77,56 @@ const markProjectedEvent = db.prepare(`
 `);
 const markProjectedTransaction = db.transaction(eventIds => {
     let updated = 0;
-    for (const eventId of eventIds) updated += markProjectedEvent.run(eventId).changes;
+    const completeAll = db.prepare(`
+        UPDATE runtime_usage_projections
+        SET status = 'completed', last_error = NULL, last_success_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE event_id = ?
+    `);
+    for (const eventId of eventIds) {
+        completeAll.run(eventId);
+        updated += markProjectedEvent.run(eventId).changes;
+    }
     return updated;
 });
+const selectProjectionPending = db.prepare(`
+    SELECT p.event_id, p.projection_name, p.attempts, e.payload_json
+    FROM runtime_usage_projections p
+    JOIN runtime_usage_events e ON e.event_id = p.event_id
+    WHERE p.status != 'completed' AND p.next_attempt_at <= ?
+    ORDER BY e.sequence, p.projection_name
+    LIMIT ?
+`);
+const completeProjectionStatement = db.prepare(`
+    UPDATE runtime_usage_projections
+    SET status = 'completed', last_error = NULL, last_success_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE event_id = ? AND projection_name = ?
+`);
+const failProjectionStatement = db.prepare(`
+    UPDATE runtime_usage_projections
+    SET status = 'pending', attempts = attempts + 1, next_attempt_at = ?, last_error = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE event_id = ? AND projection_name = ?
+`);
+const countProjectionLag = db.prepare(`
+    SELECT COUNT(*) AS count FROM runtime_usage_projections
+    WHERE projection_name = ? AND status != 'completed'
+`);
+const projectionLastState = db.prepare(`
+    SELECT last_error, last_success_at FROM runtime_usage_projections
+    WHERE projection_name = ?
+    ORDER BY updated_at DESC LIMIT 1
+`);
+const projectionRetryState = db.prepare(`
+    SELECT COALESCE(MAX(attempts), 0) AS attempts, MIN(updated_at) AS oldest_pending_at
+    FROM runtime_usage_projections
+    WHERE projection_name = ? AND status != 'completed'
+`);
+const countEventProjectionLag = db.prepare(`
+    SELECT COUNT(*) AS count FROM runtime_usage_projections
+    WHERE event_id = ? AND status != 'completed'
+`);
 const appendTransaction = db.transaction(events => {
     const insertedEventIds = [];
     let payloadBytes = 0;
@@ -80,6 +146,7 @@ const appendTransaction = db.transaction(events => {
             insertedEventIds.push(event.eventId);
             payloadBytes += Buffer.byteLength(payloadJson, 'utf8');
         }
+        for (const projectionName of PROJECTION_NAMES) insertProjection.run(event.eventId, projectionName);
     }
     return { insertedEventIds, payloadBytes };
 });
@@ -132,7 +199,25 @@ function snapshot() {
             databaseBytes += fs.statSync(`${dbPath}${suffix}`).size;
         } catch {}
     }
-    return { ...metrics, events, pending, oldestPendingAt, databaseBytes, dbPath };
+    const projections = {};
+    for (const projectionName of PROJECTION_NAMES) {
+        const state = projectionLastState.get(projectionName) || {};
+        const retryState = projectionRetryState.get(projectionName) || {};
+        projections[projectionName] = {
+            lag: Number(countProjectionLag.get(projectionName)?.count || 0),
+            attempts: Number(retryState.attempts || 0),
+            lastError: state.last_error || null,
+            lastSuccessAt: state.last_success_at || null,
+            oldestPendingAgeMs: retryState.oldest_pending_at
+                ? Math.max(0, Date.now() - Date.parse(`${retryState.oldest_pending_at}Z`))
+                : 0
+        };
+    }
+    return { ...metrics, events, pending, oldestPendingAt, projections, databaseBytes, dbPath };
+}
+
+function refreshProjectedAt(eventId) {
+    if (Number(countEventProjectionLag.get(eventId)?.count || 0) === 0) markProjectedEvent.run(eventId);
 }
 
 parentPort.on('message', message => {
@@ -140,6 +225,33 @@ parentPort.on('message', message => {
     try {
         let result;
         if (action === 'appendBatch') result = appendBatch(payload?.events);
+        else if (action === 'listPendingProjections') {
+            result = selectProjectionPending.all(Date.now(), Math.max(1, Number(payload?.limit || 100)))
+                .map(row => {
+                    const event = JSON.parse(row.payload_json);
+                    return {
+                        eventId: row.event_id,
+                        projectionName: row.projection_name,
+                        attempts: Number(row.attempts || 0),
+                        hookName: event.hookName,
+                        args: event.args || []
+                    };
+                });
+        }
+        else if (action === 'completeProjection') {
+            completeProjectionStatement.run(payload.eventId, payload.projectionName);
+            refreshProjectedAt(payload.eventId);
+            result = true;
+        }
+        else if (action === 'failProjection') {
+            failProjectionStatement.run(
+                Date.now() + Math.max(0, Number(payload.retryDelayMs || 0)),
+                String(payload.error || 'projection failed').slice(0, 1000),
+                payload.eventId,
+                payload.projectionName
+            );
+            result = true;
+        }
         else if (action === 'markProjected') {
             const eventIds = [...new Set((payload?.eventIds || []).filter(Boolean))];
             result = { updated: markProjectedTransaction(eventIds) };

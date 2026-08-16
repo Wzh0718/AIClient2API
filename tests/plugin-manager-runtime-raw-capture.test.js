@@ -22,4 +22,39 @@ describe('execution worker local raw capture hook', () => {
     expect(localHook).toHaveBeenCalledTimes(1);
     expect(localHook).toHaveBeenCalledWith({ requestId: 'one' });
   });
+
+  test('executes one durable usage projection and propagates its failure', async () => {
+    const manager = new PluginManager();
+    const potluckHook = jest.fn().mockResolvedValue(undefined);
+    const modelHook = jest.fn().mockRejectedValue(new Error('model projection failed'));
+    manager.register({
+      name: 'api-potluck',
+      _enabled: true,
+      hooks: { onContentGenerated: potluckHook }
+    });
+    manager.register({
+      name: 'model-usage-stats',
+      _enabled: true,
+      hooks: { onContentGenerated: modelHook }
+    });
+
+    await manager.executeUsageProjection(
+      'api-potluck',
+      'onContentGenerated',
+      [{ requestId: 'request-one' }],
+      'event-one'
+    );
+    await expect(manager.executeUsageProjection(
+      'model-usage-stats',
+      'onContentGenerated',
+      [{ requestId: 'request-one' }],
+      'event-one'
+    )).rejects.toThrow('model projection failed');
+
+    expect(potluckHook).toHaveBeenCalledWith({
+      requestId: 'request-one',
+      _runtimeEventId: 'event-one'
+    });
+    expect(modelHook).toHaveBeenCalledTimes(1);
+  });
 });

@@ -28,6 +28,7 @@ import {
     flushPendingChanges,
     resolveKeyIdByHash
 } from './key-manager.js';
+import { closeUsageHistoryStore } from './usage-history-store.js';
 
 import {
     extractPotluckKey,
@@ -95,6 +96,7 @@ const apiPotluckPlugin = {
         if (!persisted) {
             throw new Error('API Potluck shutdown failed: pending changes could not be persisted after 2 attempts');
         }
+        closeUsageHistoryStore();
         logger.info('[API Potluck Plugin] Destroying...');
     },
 

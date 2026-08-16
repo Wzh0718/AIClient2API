@@ -171,3 +171,38 @@ test('does not acknowledge a batch when the durable ledger commit fails', async 
     ])).rejects.toThrow('sqlite unavailable');
     expect(ackBatch).not.toHaveBeenCalled();
 });
+
+test('acknowledges after the ledger commit without waiting for usage projections', async () => {
+    const order = [];
+    let releaseProjection;
+    const projection = new Promise(resolve => { releaseProjection = resolve; });
+    const consumer = new RuntimeEventConsumer({
+        appendBatch: async () => {
+            order.push('ledger');
+            return { inserted: 1, duplicates: 0 };
+        },
+        ackBatch: async () => order.push('ack'),
+        scheduleProjections: () => {
+            order.push('schedule');
+            return projection;
+        }
+    });
+
+    await consumer.consumeBatch([{ eventId: 'deferred-projection', hookName: 'onContentGenerated', args: [{}] }]);
+    expect(order).toEqual(['ledger', 'ack', 'schedule']);
+    releaseProjection();
+});
+
+test('reports bounded ACK latency metrics for durable batches', async () => {
+    const consumer = new RuntimeEventConsumer({
+        appendBatch: jest.fn().mockResolvedValue({ inserted: 2 }),
+        ackBatch: jest.fn(),
+        scheduleProjections: jest.fn()
+    });
+    await consumer.consumeBatch([
+        { eventId: 'ack-metric-1' },
+        { eventId: 'ack-metric-2' }
+    ]);
+    expect(consumer.snapshot()).toMatchObject({ ackCount: 2, inMemoryPending: 0 });
+    expect(consumer.snapshot().lastAckLatencyMs).toBeGreaterThanOrEqual(0);
+});

@@ -190,6 +190,10 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
             }
             if (message?.type === 'runtime_metrics' && message.snapshot) {
                 workerMetrics.set(id, message.snapshot);
+                // A metrics snapshot is emitted immediately before the explicit ready message.
+                // Treat it as equivalent readiness evidence so a lost IPC ready frame cannot
+                // leave a successfully restarted worker stuck in "starting" forever.
+                ready.add(id);
             }
         });
         child.on('exit', (code, signal) => {

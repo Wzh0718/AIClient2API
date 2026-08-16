@@ -57,6 +57,19 @@ function readUsageHistoryRows() {
     }
 }
 
+function readUsageModelRows() {
+    const database = new Database(getUsageDatabasePath(), { readonly: true });
+    try {
+        return database.prepare(`
+            SELECT model_name, usage_json
+            FROM potluck_usage_model_totals
+            ORDER BY model_name
+        `).all().map(row => ({ ...row, usage: JSON.parse(row.usage_json) }));
+    } finally {
+        database.close();
+    }
+}
+
 function expectPersistenceStatus(result, expected) {
     expect(result.persistencePending).toBe(expected);
     expect(Object.prototype.propertyIsEnumerable.call(result, 'persistencePending')).toBe(false);
@@ -127,6 +140,58 @@ afterEach(() => {
 });
 
 describe('api potluck persistence', () => {
+    test('migrates a production-scale 43-50MB legacy key file and shrinks metadata by at least 90%', async () => {
+        jest.setTimeout(120_000);
+        const accounts = {};
+        for (let index = 0; index < 220; index += 1) {
+            accounts[`openai-codex-oauth:account-${index}`] = {
+                provider: 'openai-codex-oauth',
+                providerUuid: `account-${index}`,
+                accountEmail: `user-${index}@example.com`,
+                summary: { requestCount: 1, promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+                models: { 'gpt-5.5': { requestCount: 1, promptTokens: 100, completionTokens: 20, totalTokens: 120 } }
+            };
+        }
+        const day = {
+            summary: { requestCount: 220, promptTokens: 22_000, completionTokens: 4_400, totalTokens: 26_400 },
+            providers: {},
+            models: {},
+            accounts,
+            hours: {}
+        };
+        const legacyStore = { keys: {} };
+        for (let keyIndex = 0; keyIndex < 20; keyIndex += 1) {
+            const usageHistory = {};
+            for (let dayIndex = 1; dayIndex <= 35; dayIndex += 1) {
+                usageHistory[`2026-07-${String(dayIndex).padStart(2, '0')}`] = day;
+            }
+            legacyStore.keys[`maki_large_${keyIndex}`] = {
+                id: `maki_large_${keyIndex}`,
+                name: `Large ${keyIndex}`,
+                enabled: true,
+                dailyLimit: 1000,
+                usageHistory,
+                totalModels: { 'gpt-5.5': { requestCount: 7700, totalTokens: 924000 } }
+            };
+        }
+        const source = JSON.stringify(legacyStore);
+        const sourceBytes = Buffer.byteLength(source);
+        expect(sourceBytes).toBeGreaterThanOrEqual(43 * 1024 * 1024);
+        expect(sourceBytes).toBeLessThanOrEqual(50 * 1024 * 1024);
+        fs.writeFileSync(getStorePath(), source);
+
+        const plugin = await loadPotluckPlugin();
+        await plugin.init({ API_POTLUCK_PERSIST_INTERVAL: 60_000, API_POTLUCK_MAX_DIRTY_AGE: 60_000 });
+        await plugin.exports.getKey('maki_large_0');
+        await plugin.destroy();
+
+        const compactBytes = fs.statSync(getStorePath()).size;
+        expect(compactBytes).toBeLessThan(sourceBytes * 0.1);
+        expect(readUsageHistoryRows()).toHaveLength(20 * 35);
+        const backups = fs.readdirSync(path.dirname(getStorePath())).filter(name => name.includes('.pre-usage-split-'));
+        expect(backups).toHaveLength(1);
+    });
+
     test('migrates legacy usage history into SQLite before writing a metadata-only key snapshot', async () => {
         const legacyStore = {
             keys: {
@@ -224,6 +289,48 @@ describe('api potluck persistence', () => {
         expect(stored.totalUsage).toBe(1);
         expect(stored.totalTokens).toBe(120);
         expect(readUsageHistoryRows()[0].day.summary.totalTokens).toBe(120);
+    });
+
+    test('durable runtime events update only the current day and changed model rows', async () => {
+        const plugin = await loadPotluckPlugin();
+        await plugin.init({
+            API_POTLUCK_PERSIST_INTERVAL: 60_000,
+            API_POTLUCK_MAX_DIRTY_AGE: 60_000
+        });
+        const key = await plugin.exports.createKey('Incremental SQLite Event', 1000);
+
+        for (let index = 0; index < 1000; index += 1) {
+            await plugin.exports.incrementUsage(key.id, 'openai-codex-oauth', 'gpt-5.5', {
+                requestCount: 1,
+                promptTokens: 1,
+                completionTokens: 0,
+                totalTokens: 1
+            }, null, { runtimeEventId: `runtime-incremental-${index}` });
+        }
+
+        expect(readUsageHistoryRows()).toHaveLength(1);
+        expect(readUsageHistoryRows()[0].day.summary).toMatchObject({ requestCount: 1000, totalTokens: 1000 });
+        expect(readUsageModelRows()).toEqual([
+            expect.objectContaining({
+                model_name: 'gpt-5.5',
+                usage: expect.objectContaining({ requestCount: 1000, totalTokens: 1000 })
+            })
+        ]);
+
+        const database = new Database(getUsageDatabasePath(), { readonly: true });
+        try {
+            const metrics = database.prepare(`
+                SELECT event_day_writes, event_model_writes, full_history_day_writes
+                FROM potluck_usage_write_metrics WHERE singleton = 1
+            `).get();
+            expect(metrics).toEqual({
+                event_day_writes: 1000,
+                event_model_writes: 1000,
+                full_history_day_writes: 0
+            });
+        } finally {
+            database.close();
+        }
     });
 
     test('resets stale daily counters before a control-worker usage hook records the new day', async () => {

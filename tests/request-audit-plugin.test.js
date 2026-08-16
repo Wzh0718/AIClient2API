@@ -141,6 +141,36 @@ describe('request audit plugin', () => {
     resolveAppend();
   });
 
+  test('waits for durable runtime audit persistence and propagates write failures', async () => {
+    let resolveAppend;
+    const appendPromise = new Promise(resolve => { resolveAppend = resolve; });
+    const auditStore = { append: jest.fn(() => appendPromise), cleanup: jest.fn() };
+    await plugin.init({ REQUEST_AUDIT_ENABLED: true, _requestAuditStore: auditStore });
+
+    const durableHook = plugin.hooks.onContentGenerated({
+      _monitorRequestId: 'req-durable-audit',
+      _runtimeEventId: 'event-durable-audit',
+      _runtimeUsage: { promptTokens: 10, totalTokens: 10 },
+      model: 'gpt-5.5',
+      toProvider: 'openai-codex-oauth'
+    });
+    let settled = false;
+    durableHook.finally(() => { settled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(settled).toBe(false);
+    resolveAppend();
+    await durableHook;
+
+    const failedStore = { append: jest.fn().mockRejectedValue(new Error('audit disk unavailable')), cleanup: jest.fn() };
+    await plugin.init({ REQUEST_AUDIT_ENABLED: true, _requestAuditStore: failedStore });
+    await expect(plugin.hooks.onContentGenerated({
+      _monitorRequestId: 'req-durable-audit-failure',
+      _runtimeEventId: 'event-durable-audit-failure',
+      _runtimeUsage: { promptTokens: 10, totalTokens: 10 },
+      model: 'gpt-5.5'
+    })).rejects.toThrow('audit disk unavailable');
+  });
+
   test('does not block content generation when audit input is large', async () => {
     const auditStore = {
       append: jest.fn(),

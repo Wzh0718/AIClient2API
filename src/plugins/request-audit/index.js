@@ -150,7 +150,7 @@ function rememberFinalizedRequest(requestId) {
     }
 }
 
-function enqueueFinalAudit(context = {}) {
+async function enqueueFinalAudit(context = {}) {
     const requestId = getRequestId(context);
     if (!requestId || finalizedRequestIds.has(requestId)) return;
     cleanupPendingUsage();
@@ -176,7 +176,15 @@ function enqueueFinalAudit(context = {}) {
             logger.warn('[Request Audit] raw snapshot failure');
         }
     }
-    enqueueAuditContext({ event, rawCaptureEvent });
+    if (context._runtimeEventId) {
+        await store.append(event);
+        if (rawCaptureEvent && rawCaptureStore) {
+            const result = await rawCaptureStore.capture(rawCaptureEvent);
+            if (result?.stopReason) await disableRawCapture(result.stopReason);
+        }
+    } else {
+        enqueueAuditContext({ event, rawCaptureEvent });
+    }
     rememberFinalizedRequest(requestId);
     pendingUsage.delete(requestId);
     pendingAuditContexts.delete(requestId);
@@ -627,9 +635,10 @@ const requestAuditPlugin = {
                     pendingAuditContexts.set(requestId, { ...context, requestId });
                     return;
                 }
-                enqueueFinalAudit(context);
+                await enqueueFinalAudit(context);
             } catch (error) {
                 logger.warn('[Request Audit] Failed to enqueue audit event:', error.message);
+                if (context._runtimeEventId) throw error;
             }
         },
 
@@ -639,11 +648,12 @@ const requestAuditPlugin = {
             if (!requestId || finalizedRequestIds.has(requestId)) return;
             try {
                 const generatedContext = pendingAuditContexts.get(requestId) || {};
-                enqueueFinalAudit({ ...generatedContext, ...context, requestId });
+                await enqueueFinalAudit({ ...generatedContext, ...context, requestId });
             } catch (error) {
                 logger.warn('[Request Audit] Failed to finalize audit event:', error.message);
                 pendingUsage.delete(requestId);
                 pendingAuditContexts.delete(requestId);
+                if (context._runtimeEventId) throw error;
             }
         }
     }

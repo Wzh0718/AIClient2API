@@ -58,6 +58,18 @@ export class UsageEventStore {
         return this._call('markProjected', { eventIds });
     }
 
+    listPendingProjections({ limit = 100 } = {}) {
+        return this._call('listPendingProjections', { limit });
+    }
+
+    completeProjection({ eventId, projectionName }) {
+        return this._call('completeProjection', { eventId, projectionName });
+    }
+
+    failProjection({ eventId, projectionName, error, retryDelayMs = 1000 }) {
+        return this._call('failProjection', { eventId, projectionName, error, retryDelayMs });
+    }
+
     snapshot() {
         return this._call('snapshot');
     }

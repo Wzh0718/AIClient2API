@@ -2113,8 +2113,13 @@ export async function incrementUsage(apiKey, pName = 'unknown', mName = 'unknown
     if (runtimeEventId) {
         const persistedEvent = persistUsageHistoryEvent(
             apiKey,
-            keyData.usageHistory,
-            keyData.totalModels || {},
+            {
+                usageDate: today,
+                day: keyData.usageHistory[today],
+                modelName: mName,
+                modelUsage: keyData.totalModels?.[mName] || {},
+                retentionDays: USAGE_HISTORY_RETENTION_DAYS
+            },
             runtimeEventId
         );
         if (persistedEvent.duplicate) {

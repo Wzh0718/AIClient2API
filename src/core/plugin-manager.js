@@ -326,6 +326,10 @@ class PluginManager {
     }
 
     configureRuntimeHookBridge({ durableTransport } = {}) {
+        if (!this.runtimeHookBridge && durableTransport) {
+            this.runtimeHookBridge = new RuntimeHookBridge({ send: null, durableTransport });
+            return this.runtimeHookBridge;
+        }
         if (!this.runtimeHookBridge) return null;
         this.runtimeHookBridge.durableTransport = durableTransport || null;
         return this.runtimeHookBridge;
@@ -607,6 +611,22 @@ class PluginManager {
                 this.recordPluginError(plugin, `hook:${hookName}`, error);
             }
         }
+    }
+
+    async executeUsageProjection(pluginName, hookName, args = [], eventId = null) {
+        const plugin = this.plugins.get(pluginName);
+        if (!plugin || plugin._enabled !== true) return false;
+        const hook = plugin.hooks?.[hookName];
+        if (typeof hook !== 'function') return false;
+        const projectionArgs = [...args];
+        if (projectionArgs[0] && typeof projectionArgs[0] === 'object' && !Array.isArray(projectionArgs[0])) {
+            projectionArgs[0] = { ...projectionArgs[0], _runtimeEventId: eventId };
+        }
+        return this.executePluginOperation(
+            plugin,
+            `usage-projection:${hookName}`,
+            () => hook(...projectionArgs)
+        );
     }
 
     executePluginOperation(plugin, operationName, fn, operationTimeoutMs = PLUGIN_OPERATION_TIMEOUT_MS) {

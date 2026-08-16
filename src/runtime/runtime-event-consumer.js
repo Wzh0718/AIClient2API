@@ -9,17 +9,19 @@ export function createDurableRuntimeHookApply({ executeHook } = {}) {
 }
 
 export class RuntimeEventConsumer {
-    constructor({ apply, ack, appendBatch = null, markProjectedBatch = null, ackBatch = null, durableState = null, maxRemembered = 10000 } = {}) {
+    constructor({ apply, ack, appendBatch = null, markProjectedBatch = null, ackBatch = null, scheduleProjections = null, durableState = null, maxRemembered = 10000 } = {}) {
         this.apply = apply;
         this.ack = ack;
         this.appendBatch = appendBatch;
         this.markProjectedBatch = markProjectedBatch;
         this.ackBatch = ackBatch;
+        this.scheduleProjections = scheduleProjections;
         this.durableState = durableState;
         this.maxRemembered = maxRemembered;
         this.applied = new Set();
         this.pending = new Map();
         this.tail = Promise.resolve();
+        this.metrics = { ackCount: 0, lastAckLatencyMs: 0, maxAckLatencyMs: 0 };
     }
 
     async consumeBatch(events = []) {
@@ -31,7 +33,15 @@ export class RuntimeEventConsumer {
         }
 
         return this._enqueue(async () => {
+            const startedAt = Date.now();
             const persisted = await this.appendBatch(batch);
+            if (this.scheduleProjections) {
+                if (this.ackBatch) await this.ackBatch(batch);
+                else for (const event of batch) await this.ack?.(event);
+                this._recordAck(Date.now() - startedAt, batch.length);
+                Promise.resolve(this.scheduleProjections()).catch(() => {});
+                return persisted;
+            }
             const inserted = new Set(
                 persisted?.pendingEventIds
                 || persisted?.insertedEventIds
@@ -47,6 +57,7 @@ export class RuntimeEventConsumer {
             if (projected.length > 0) await this.markProjectedBatch?.(projected);
             if (this.ackBatch) await this.ackBatch(batch);
             else for (const event of batch) await this.ack?.(event);
+            this._recordAck(Date.now() - startedAt, batch.length);
             return persisted;
         });
     }
@@ -87,5 +98,15 @@ export class RuntimeEventConsumer {
         const result = this.tail.then(operation);
         this.tail = result.catch(() => {});
         return result;
+    }
+
+    _recordAck(latencyMs, count = 1) {
+        this.metrics.ackCount += Math.max(0, Number(count) || 0);
+        this.metrics.lastAckLatencyMs = Math.max(0, Number(latencyMs) || 0);
+        this.metrics.maxAckLatencyMs = Math.max(this.metrics.maxAckLatencyMs, this.metrics.lastAckLatencyMs);
+    }
+
+    snapshot() {
+        return { ...this.metrics, inMemoryPending: this.pending.size };
     }
 }

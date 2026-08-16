@@ -46,6 +46,20 @@ function getDatabase() {
             total_models_json TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS potluck_usage_model_totals (
+            key_ref TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            usage_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (key_ref, model_name)
+        );
+        CREATE TABLE IF NOT EXISTS potluck_usage_write_metrics (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            event_day_writes INTEGER NOT NULL DEFAULT 0,
+            event_model_writes INTEGER NOT NULL DEFAULT 0,
+            full_history_day_writes INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO potluck_usage_write_metrics (singleton) VALUES (1);
     `);
     return database;
 }
@@ -61,9 +75,17 @@ export function loadUsageHistory(apiKey) {
 }
 
 export function loadUsageTotals(apiKey) {
-    const row = getDatabase().prepare(`
+    const db = getDatabase();
+    const ref = keyRef(apiKey);
+    const modelRows = db.prepare(`
+        SELECT model_name, usage_json FROM potluck_usage_model_totals WHERE key_ref = ?
+    `).all(ref);
+    if (modelRows.length > 0) {
+        return Object.fromEntries(modelRows.map(row => [row.model_name, JSON.parse(row.usage_json)]));
+    }
+    const row = db.prepare(`
         SELECT total_models_json FROM potluck_usage_totals WHERE key_ref = ?
-    `).get(keyRef(apiKey));
+    `).get(ref);
     return row ? JSON.parse(row.total_models_json) : {};
 }
 
@@ -75,6 +97,18 @@ function persistUsageTotalsInDatabase(db, ref, totalModels = {}) {
             total_models_json = excluded.total_models_json,
             updated_at = CURRENT_TIMESTAMP
     `).run(ref, JSON.stringify(totalModels || {}));
+    const upsertModel = db.prepare(`
+        INSERT INTO potluck_usage_model_totals (key_ref, model_name, usage_json, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key_ref, model_name) DO UPDATE SET
+            usage_json = excluded.usage_json,
+            updated_at = CURRENT_TIMESTAMP
+    `);
+    const removeModels = db.prepare('DELETE FROM potluck_usage_model_totals WHERE key_ref = ?');
+    removeModels.run(ref);
+    for (const [modelName, usage] of Object.entries(totalModels || {})) {
+        upsertModel.run(ref, modelName, JSON.stringify(usage));
+    }
 }
 
 export function persistUsageHistory(apiKey, usageHistory = {}, totalModels = {}) {
@@ -95,6 +129,11 @@ export function persistUsageHistory(apiKey, usageHistory = {}, totalModels = {})
         for (const [date, day] of Object.entries(usageHistory || {})) upsert.run(ref, date, JSON.stringify(day));
         for (const date of existing) if (!dates.has(date)) remove.run(ref, date);
         persistUsageTotalsInDatabase(db, ref, totalModels);
+        db.prepare(`
+            UPDATE potluck_usage_write_metrics
+            SET full_history_day_writes = full_history_day_writes + ?
+            WHERE singleton = 1
+        `).run(Object.keys(usageHistory || {}).length);
     })();
     return true;
 }
@@ -106,8 +145,10 @@ export function hasAppliedUsageEvent(eventId) {
     `).get(eventId));
 }
 
-export function persistUsageHistoryEvent(apiKey, usageHistory = {}, totalModels = {}, eventId) {
-    if (!eventId) return persistUsageHistory(apiKey, usageHistory, totalModels);
+export function persistUsageHistoryEvent(apiKey, change = {}, eventId) {
+    if (!eventId) {
+        return persistUsageHistory(apiKey, change.usageHistory || {}, change.totalModels || {});
+    }
     const db = getDatabase();
     const ref = keyRef(apiKey);
     const alreadyApplied = db.prepare(`
@@ -122,18 +163,36 @@ export function persistUsageHistoryEvent(apiKey, usageHistory = {}, totalModels 
             day_json = excluded.day_json,
             updated_at = CURRENT_TIMESTAMP
     `);
-    const remove = db.prepare('DELETE FROM potluck_usage_history WHERE key_ref = ? AND usage_date = ?');
     const recordEvent = db.prepare(`
         INSERT INTO potluck_applied_events (event_id, key_ref) VALUES (?, ?)
     `);
-    const existing = db.prepare('SELECT usage_date FROM potluck_usage_history WHERE key_ref = ?').all(ref)
-        .map(row => row.usage_date);
-    const dates = new Set(Object.keys(usageHistory || {}));
+    const upsertModel = db.prepare(`
+        INSERT INTO potluck_usage_model_totals (key_ref, model_name, usage_json, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key_ref, model_name) DO UPDATE SET
+            usage_json = excluded.usage_json,
+            updated_at = CURRENT_TIMESTAMP
+    `);
     db.transaction(() => {
-        for (const [date, day] of Object.entries(usageHistory || {})) upsert.run(ref, date, JSON.stringify(day));
-        for (const date of existing) if (!dates.has(date)) remove.run(ref, date);
-        persistUsageTotalsInDatabase(db, ref, totalModels);
+        upsert.run(ref, change.usageDate, JSON.stringify(change.day));
+        if (change.modelName) {
+            upsertModel.run(ref, change.modelName, JSON.stringify(change.modelUsage || {}));
+        }
+        const retentionDays = Math.max(1, Number(change.retentionDays || 35));
+        db.prepare(`
+            DELETE FROM potluck_usage_history
+            WHERE key_ref = ? AND usage_date NOT IN (
+                SELECT usage_date FROM potluck_usage_history
+                WHERE key_ref = ? ORDER BY usage_date DESC LIMIT ?
+            )
+        `).run(ref, ref, retentionDays);
         recordEvent.run(eventId, ref);
+        db.prepare(`
+            UPDATE potluck_usage_write_metrics
+            SET event_day_writes = event_day_writes + 1,
+                event_model_writes = event_model_writes + ?
+            WHERE singleton = 1
+        `).run(change.modelName ? 1 : 0);
     })();
     return { applied: true, duplicate: false };
 }
@@ -178,6 +237,7 @@ export function deleteUsageHistory(apiKey) {
     db.transaction(() => {
         db.prepare('DELETE FROM potluck_usage_history WHERE key_ref = ?').run(ref);
         db.prepare('DELETE FROM potluck_usage_totals WHERE key_ref = ?').run(ref);
+        db.prepare('DELETE FROM potluck_usage_model_totals WHERE key_ref = ?').run(ref);
     })();
 }
 

@@ -111,7 +111,8 @@ const modelUsageStatsPlugin = {
                 accountIdentity: config.accountIdentity,
                 accountEmail: config.accountEmail,
                 fromProvider: config.fromProvider,
-                isStream: config.isStream
+                isStream: config.isStream,
+                runtimeEventId: config._runtimeEventId || null
             });
         }
     },
