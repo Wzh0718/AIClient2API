@@ -64,6 +64,63 @@ describe('temporary key model content routing', () => {
         jest.clearAllMocks();
     });
 
+    test('keeps the requested response model while non-batch GPT-5.4 executes on Luna', async () => {
+        const generateContent = jest.fn().mockResolvedValue({
+            type: 'response.completed',
+            response: {
+                id: 'luna-response',
+                object: 'response',
+                model: 'gpt-5.6-luna',
+                status: 'completed',
+                output: []
+            }
+        });
+        mockGetApiServiceWithFallback.mockResolvedValueOnce({
+            service: { generateContent },
+            actualProviderType: 'openai-codex-oauth',
+            actualModel: 'gpt-5.6-luna',
+            uuid: 'codex-luna',
+            serviceConfig: {
+                customName: 'Codex Luna',
+                codexAccountKey: 'luna-account',
+                codexEmail: 'luna@example.com'
+            },
+            isFallback: false
+        });
+        const config = {
+            MODEL_PROVIDER: 'openai-codex-oauth',
+            potluckApiKey: 'ordinary-key',
+            REQUEST_BODY_MAX_BYTES: 1024 * 1024,
+            CREDENTIAL_SWITCH_MAX_RETRIES: 0,
+            PROMPT_LOG_MODE: 'none',
+            providerPools: { 'openai-codex-oauth': [{ uuid: 'codex-luna' }] }
+        };
+        const request = new FakeRequest({ model: 'gpt-5.4-mini-fast', stream: false, input: 'hello' });
+        const response = new FakeResponse();
+        request.start();
+
+        await handleContentGenerationRequest(
+            request,
+            response,
+            null,
+            ENDPOINT_TYPE.OPENAI_RESPONSES,
+            config,
+            null,
+            { releaseSlot: jest.fn(), markProviderHealthy: jest.fn() },
+            null,
+            '/openai-codex-oauth/v1/responses'
+        );
+
+        expect(generateContent).toHaveBeenCalledWith('gpt-5.6-luna', expect.any(Object));
+        expect(JSON.parse(response.body).model).toBe('gpt-5.4-mini-fast');
+        expect(mockExecuteHook).toHaveBeenCalledWith('onContentGenerated', expect.objectContaining({
+            toProvider: 'openai-codex-oauth',
+            model: 'gpt-5.6-luna',
+            providerUuid: 'codex-luna',
+            accountEmail: 'luna@example.com'
+        }));
+    });
+
     test('converts a matching Responses request to Antigravity while preserving the client model', async () => {
         const apiKey = 'maki_content_route_test';
         const generateContent = jest.fn().mockResolvedValue({
@@ -87,6 +144,7 @@ describe('temporary key model content routing', () => {
         });
         const config = {
             MODEL_PROVIDER: 'openai-codex-oauth',
+            _originalRequestPath: '/openai-codex-oauth/v1/responses',
             potluckApiKey: apiKey,
             REQUEST_BODY_MAX_BYTES: 1024 * 1024,
             CREDENTIAL_SWITCH_MAX_RETRIES: 0,
@@ -95,7 +153,7 @@ describe('temporary key model content routing', () => {
                 id: 'temporary-antigravity-flash',
                 enabled: true,
                 keyHash: hashTemporaryRouteKey(apiKey),
-                paths: ['/v1/responses'],
+                paths: ['/openai-codex-oauth/v1/responses'],
                 models: ['gpt-5.4-mini', 'gpt-5.3-codex-spark'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
@@ -345,6 +403,12 @@ describe('temporary key model content routing', () => {
     test('marks target selection fallback once and keeps the original Codex provider chain isolated', async () => {
         const apiKey = 'maki_selection_fallback_test';
         const selectionSnapshots = [];
+        const providerPoolManager = {
+            recordGeminiSchedulingEvent: jest.fn(),
+            releaseSlot: jest.fn(),
+            markProviderHealthy: jest.fn(),
+            markProviderUnhealthy: jest.fn()
+        };
         const fallbackGenerateContent = jest.fn().mockResolvedValue({
             id: 'fallback-response',
             object: 'response',
@@ -413,7 +477,7 @@ describe('temporary key model content routing', () => {
             ENDPOINT_TYPE.OPENAI_RESPONSES,
             config,
             null,
-            null,
+            providerPoolManager,
             null,
             '/v1/responses'
         );
@@ -432,6 +496,7 @@ describe('temporary key model content routing', () => {
             }
         ]);
         expect(fallbackGenerateContent).toHaveBeenCalledTimes(1);
+        expect(providerPoolManager.recordGeminiSchedulingEvent).toHaveBeenCalledWith('fallbacks');
         expect(config._temporaryKeyModelRouteResult).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
             actualModel: 'gpt-5.4-mini',
@@ -452,5 +517,122 @@ describe('temporary key model content routing', () => {
                 accountEmail: 'final.account@example.com'
             })
         );
+    });
+
+    test('uses Luna when Gemini fails and the original Codex model has no eligible credential', async () => {
+        const apiKey = 'maki_runtime_fallback_to_luna';
+        const targetService = {
+            generateContent: jest.fn().mockRejectedValue(Object.assign(new Error('Gemini quota exhausted'), {
+                response: { status: 429 }
+            }))
+        };
+        const lunaService = {
+            generateContent: jest.fn().mockResolvedValue({
+                type: 'response.completed',
+                response: {
+                    id: 'luna-fallback-response',
+                    object: 'response',
+                    model: 'gpt-5.6-luna',
+                    status: 'completed',
+                    output: []
+                }
+            })
+        };
+        mockGetApiServiceWithFallback
+            .mockResolvedValueOnce({
+                service: targetService,
+                actualProviderType: 'gemini-antigravity',
+                actualModel: 'gemini-2.5-flash',
+                uuid: 'antigravity-quota',
+                serviceConfig: { customName: 'Antigravity quota' },
+                isFallback: false
+            })
+            .mockRejectedValueOnce(Object.assign(new Error('No alternate Gemini credential available'), {
+                status: 429
+            }))
+            .mockRejectedValueOnce(Object.assign(new Error('No Codex credential supports gpt-5.4-mini'), {
+                status: 429
+            }))
+            .mockResolvedValueOnce({
+                service: lunaService,
+                actualProviderType: 'openai-codex-oauth',
+                actualModel: 'gpt-5.6-luna',
+                uuid: 'codex-luna-fallback',
+                serviceConfig: {
+                    customName: 'Codex Luna fallback',
+                    codexAccountKey: 'luna-account',
+                    codexEmail: 'luna@example.com'
+                },
+                isFallback: true
+            });
+        const config = {
+            MODEL_PROVIDER: 'openai-codex-oauth',
+            _originalRequestPath: '/openai-codex-oauth/v1/responses',
+            potluckApiKey: apiKey,
+            REQUEST_BODY_MAX_BYTES: 1024 * 1024,
+            CREDENTIAL_SWITCH_MAX_RETRIES: 0,
+            PROMPT_LOG_MODE: 'none',
+            temporaryKeyModelRoutes: [{
+                id: 'temporary-antigravity-runtime-fallback',
+                enabled: true,
+                keyHash: hashTemporaryRouteKey(apiKey),
+                paths: ['/openai-codex-oauth/v1/responses'],
+                modelFamilies: ['gpt-5.3', 'gpt-5.4'],
+                targetProviderType: 'gemini-antigravity',
+                targetModel: 'gemini-2.5-flash',
+                fallbackToOriginal: true,
+                preserveResponseModel: true
+            }]
+        };
+        const request = new FakeRequest({
+            model: 'gpt-5.4-mini',
+            stream: false,
+            input: 'hello fallback'
+        });
+        const response = new FakeResponse();
+        const providerPoolManager = {
+            recordGeminiSchedulingEvent: jest.fn(),
+            releaseSlot: jest.fn(),
+            markProviderHealthy: jest.fn(),
+            markProviderUnhealthy: jest.fn()
+        };
+        request.start();
+
+        await handleContentGenerationRequest(
+            request,
+            response,
+            null,
+            ENDPOINT_TYPE.OPENAI_RESPONSES,
+            config,
+            null,
+            providerPoolManager,
+            null,
+            '/v1/responses'
+        );
+
+        expect(mockGetApiServiceWithFallback).toHaveBeenNthCalledWith(
+            4,
+            expect.objectContaining({ MODEL_PROVIDER: 'openai-codex-oauth' }),
+            'gpt-5.6-luna',
+            expect.objectContaining({ disableProviderFallback: true })
+        );
+        expect(lunaService.generateContent).toHaveBeenCalledWith('gpt-5.6-luna', expect.any(Object));
+        expect(JSON.parse(response.body)).toMatchObject({
+            model: 'gpt-5.4-mini',
+            status: 'completed'
+        });
+        expect(config._temporaryKeyModelRouteResult).toMatchObject({
+            actualProviderType: 'openai-codex-oauth',
+            actualModel: 'gpt-5.6-luna',
+            providerUuid: 'codex-luna-fallback',
+            fallbackUsed: true
+        });
+        expect(providerPoolManager.recordGeminiSchedulingEvent).toHaveBeenCalledWith('fallbacks');
+        expect(mockExecuteHook).toHaveBeenCalledWith('onContentGenerated', expect.objectContaining({
+            toProvider: 'openai-codex-oauth',
+            model: 'gpt-5.6-luna',
+            providerUuid: 'codex-luna-fallback',
+            accountEmail: 'luna@example.com'
+        }));
     });
 });

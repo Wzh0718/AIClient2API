@@ -60,7 +60,7 @@ function normalizeCodexFingerprintEnabled(config) {
         else if (['false', '0', 'no', 'off'].includes(normalized)) config.CODEX_FINGERPRINT_ENABLED = false;
     }
     if (config.CODEX_FINGERPRINT_ENABLED === undefined || config.CODEX_FINGERPRINT_ENABLED === null) {
-        config.CODEX_FINGERPRINT_ENABLED = true;
+        config.CODEX_FINGERPRINT_ENABLED = false;
     }
 }
 
@@ -161,7 +161,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         IMAGE_SIZE_NORMALIZATION_ENABLED: true, // Codex Images 接口是否将返回图片缩放到请求尺寸
         IMAGE_PROMPT_ASPECT_CONSTRAINT_ENABLED: true, // Codex 生图提示词是否追加最小画幅比例约束
         IMAGE_ASPECT_MISMATCH_THRESHOLD: 0.10, // 原图与目标长宽比偏差超过此值时拒绝拉伸
-        CODEX_FINGERPRINT_ENABLED: true, // Codex OAuth 出站设备指纹收敛总开关，默认启用 session 模式
+        CODEX_FINGERPRINT_ENABLED: false, // Codex OAuth 出站设备指纹收敛总开关，默认关闭；需全局和凭据双重显式启用
         IMAGE_SIZE_MAX_PIXELS: 8388608, // 后处理允许的最大目标总像素（约 4K UHD）
         CODEX_POTLUCK_STICKY_PROVIDER_ENABLED: false, // API Potluck 分发 Key 是否固定到同一个 Codex 账号
         CODEX_STICKY_HOT_SHARD_ENABLED: true, // Codex sticky 热 key 是否自动拆分到多个账号

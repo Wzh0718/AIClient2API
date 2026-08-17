@@ -242,6 +242,7 @@ function buildRuntimeMetricsSnapshot() {
     return {
         ...runtimeMetrics.snapshot(),
         workerId: process.env.RUNTIME_WORKER_ID || RUNTIME_WORKER_ROLE,
+        providerCoordination: getProviderPoolManager()?.coordination?.getStatus?.() || null,
         hooks: getRuntimeHookSnapshot()
     };
 }

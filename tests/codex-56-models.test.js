@@ -24,14 +24,16 @@ describe('codex 5.6 model registration', () => {
         ]));
     });
 
-    test('keeps bare GPT-5.6 invalid and falls unknown models back to GPT-5.4 mini', () => {
+    test('keeps bare GPT-5.6 invalid and falls unknown models back to shared GPT-5.6 Luna default', () => {
         const routingSource = fs.readFileSync(path.join(repoRoot, 'src', 'services', 'service-manager.js'), 'utf8');
         const codexSource = fs.readFileSync(path.join(repoRoot, 'src', 'providers', 'openai', 'codex-core.js'), 'utf8');
 
         expect(routingSource).not.toContain("'openai-codex-oauth:gpt-5.6': 'gpt-5.6-sol'");
-        expect(routingSource).toContain("const DEFAULT_CODEX_FALLBACK_MODEL = 'gpt-5.4-mini';");
-        expect(routingSource).toContain('actualModelName = DEFAULT_CODEX_FALLBACK_MODEL;');
-        expect(codexSource).toContain("const DEFAULT_CODEX_FALLBACK_MODEL = 'gpt-5.4-mini';");
+        expect(routingSource).toContain("DEFAULT_CODEX_FALLBACK_MODEL");
+        expect(routingSource).not.toContain("const DEFAULT_CODEX_FALLBACK_MODEL = 'gpt-5.4-mini';");
+        expect(routingSource).toContain('resolveCodexEntryModel');
+        expect(codexSource).toContain("DEFAULT_CODEX_FALLBACK_MODEL");
+        expect(codexSource).not.toContain("const DEFAULT_CODEX_FALLBACK_MODEL = 'gpt-5.4-mini';");
         expect(codexSource.match(/selectedModel = DEFAULT_CODEX_FALLBACK_MODEL;/g)).toHaveLength(2);
     });
 });

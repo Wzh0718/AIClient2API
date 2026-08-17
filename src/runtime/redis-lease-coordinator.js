@@ -21,6 +21,8 @@ local affinity_token = ARGV[8] or ''
 local affinity_key = affinity_token ~= '' and (KEYS[1] .. ':affinity:' .. affinity_token) or nil
 local affinity_provider_key = affinity_key and redis.call('GET', affinity_key) or nil
 local routed_provider_key = ARGV[10] or ''
+local probe_owner = ARGV[11] or ''
+local probe_ttl_ms = tonumber(ARGV[12] or '30000')
 local boot_id = redis.call('GET', KEYS[1] .. ':recovery:boot')
 if not boot_id or boot_id ~= ARGV[7] then
   return cjson.encode({ coordinationRestarted = true, bootId = boot_id })
@@ -31,17 +33,23 @@ local best_priority = nil
 local best_preferred = false
 local affinity_candidate = nil
 local affinity_active = nil
+local probe_blocked = false
 for _, candidate in ipairs(candidates) do
+  local cooling = candidate.cooldownHash and candidate.cooldownHash ~= ''
+    and redis.call('EXISTS', KEYS[1] .. ':model-cooldown:' .. candidate.cooldownHash) == 1
+  local probe_busy = candidate.probeHash and candidate.probeHash ~= ''
+    and redis.call('EXISTS', KEYS[1] .. ':model-probe:' .. candidate.probeHash) == 1
+  if probe_busy then probe_blocked = true end
   local active_key = KEYS[1] .. ':active:' .. candidate.key
   local now_ms = tonumber(ARGV[6])
   redis.call('ZREMRANGEBYSCORE', active_key, '-inf', now_ms)
   local active = tonumber(redis.call('ZCARD', active_key) or '0')
   local limit = tonumber(candidate.concurrencyLimit or 0)
-  if affinity_provider_key and candidate.key == affinity_provider_key then
+  if not cooling and not probe_busy and affinity_provider_key and candidate.key == affinity_provider_key then
     affinity_candidate = candidate
     affinity_active = active
   end
-  if limit <= 0 or active < limit then
+  if not cooling and not probe_busy and (limit <= 0 or active < limit) then
     local priority = tonumber(candidate.priority or 0)
     local preferred = candidate.preferred == true
     if best == nil
@@ -65,7 +73,11 @@ end
 local affinity_binding_key = best and best.key or nil
 if routed_provider_key ~= '' then
   for _, candidate in ipairs(candidates) do
-    if candidate.key == routed_provider_key then
+    local routed_cooling = candidate.cooldownHash and candidate.cooldownHash ~= ''
+      and redis.call('EXISTS', KEYS[1] .. ':model-cooldown:' .. candidate.cooldownHash) == 1
+    local routed_probe_busy = candidate.probeHash and candidate.probeHash ~= ''
+      and redis.call('EXISTS', KEYS[1] .. ':model-probe:' .. candidate.probeHash) == 1
+    if candidate.key == routed_provider_key and not routed_cooling and not routed_probe_busy then
       local routed_active_key = KEYS[1] .. ':active:' .. candidate.key
       local routed_now_ms = tonumber(ARGV[6])
       redis.call('ZREMRANGEBYSCORE', routed_active_key, '-inf', routed_now_ms)
@@ -78,12 +90,23 @@ if routed_provider_key ~= '' then
     end
   end
 end
-if best == nil then return nil end
+if best == nil then
+  if probe_blocked then return cjson.encode({ probeRejected = true }) end
+  return nil
+end
+if best.probeHash and best.probeHash ~= '' then
+  local probe_key = KEYS[1] .. ':model-probe:' .. best.probeHash
+  local acquired_probe = redis.call('SET', probe_key, probe_owner, 'PX', probe_ttl_ms, 'NX')
+  if not acquired_probe then return cjson.encode({ probeRejected = true }) end
+end
 local active_key = KEYS[1] .. ':active:' .. best.key
 redis.call('ZADD', active_key, tonumber(ARGV[6]) + ttl_ms, lease_id)
 redis.call('PEXPIRE', active_key, ttl_ms * 2)
 local lease_key = KEYS[1] .. ':lease:' .. lease_id
 redis.call('HSET', lease_key, 'epoch', epoch, 'providerKey', best.key, 'workerId', worker_id)
+if best.probeHash and best.probeHash ~= '' then
+  redis.call('HSET', lease_key, 'probeHash', best.probeHash, 'probeOwner', probe_owner)
+end
 redis.call('PEXPIRE', lease_key, ttl_ms)
 if affinity_key then
   if not affinity_provider_key or not affinity_candidate then
@@ -92,16 +115,22 @@ if affinity_key then
     redis.call('PEXPIRE', affinity_key, tonumber(ARGV[9]))
   end
 end
-return cjson.encode({ leaseId = lease_id, providerType = best.providerType, uuid = best.uuid })
+return cjson.encode({ leaseId = lease_id, providerType = best.providerType, uuid = best.uuid, probe = best.probeHash and best.probeHash ~= '' })
 `;
 
 const RELEASE_SCRIPT = `
 local lease_key = KEYS[1] .. ':lease:' .. ARGV[1]
 local provider_key = redis.call('HGET', lease_key, 'providerKey')
 if not provider_key then return 0 end
+local probe_hash = redis.call('HGET', lease_key, 'probeHash')
+local probe_owner = redis.call('HGET', lease_key, 'probeOwner')
 if redis.call('DEL', lease_key) == 0 then return 0 end
 local active_key = KEYS[1] .. ':active:' .. provider_key
 redis.call('ZREM', active_key, ARGV[1])
+if probe_hash and probe_owner then
+  local probe_key = KEYS[1] .. ':model-probe:' .. probe_hash
+  if redis.call('GET', probe_key) == probe_owner then redis.call('DEL', probe_key) end
+end
 return 1
 `;
 
@@ -114,6 +143,14 @@ if provider_key then
   local active_key = KEYS[1] .. ':active:' .. provider_key
   redis.call('ZADD', active_key, tonumber(ARGV[3]) + tonumber(ARGV[2]), ARGV[1])
   redis.call('PEXPIRE', active_key, tonumber(ARGV[2]) * 2)
+end
+local probe_hash = ARGV[4] or ''
+local probe_owner = ARGV[5] or ''
+if probe_hash ~= '' and probe_owner ~= '' then
+  local probe_key = KEYS[1] .. ':model-probe:' .. probe_hash
+  if redis.call('GET', probe_key) == probe_owner then
+    redis.call('PEXPIRE', probe_key, tonumber(ARGV[2]))
+  end
 end
 return 1
 `;
@@ -159,6 +196,10 @@ local leases = cjson.decode(ARGV[6])
 for _, lease in ipairs(leases) do
   local lease_key = KEYS[1] .. ':lease:' .. lease.leaseId
   redis.call('HSET', lease_key, 'epoch', lease.epoch or '', 'providerKey', lease.providerKey or '', 'workerId', ARGV[1])
+  if lease.probeHash and lease.probeHash ~= '' and lease.probeOwner and lease.probeOwner ~= '' then
+    redis.call('HSET', lease_key, 'probeHash', lease.probeHash, 'probeOwner', lease.probeOwner)
+    redis.call('SET', KEYS[1] .. ':model-probe:' .. lease.probeHash, lease.probeOwner, 'PX', tonumber(ARGV[4]))
+  end
   redis.call('PEXPIRE', lease_key, tonumber(ARGV[4]))
   local active_key = KEYS[1] .. ':active:' .. lease.providerKey
   redis.call('ZADD', active_key, tonumber(ARGV[4]) + tonumber(redis.call('TIME')[1]) * 1000, lease.leaseId)
@@ -203,6 +244,25 @@ if resolved then redis.call('PEXPIRE', cache_key, ttl_ms) end
 return resolved
 `;
 
+const SET_PROVIDER_MODEL_COOLDOWN_SCRIPT = `
+local key = KEYS[1] .. ':model-cooldown:' .. ARGV[1]
+redis.call('SET', key, ARGV[2], 'PX', tonumber(ARGV[3]))
+return 1
+`;
+
+const ACQUIRE_PROVIDER_MODEL_PROBE_SCRIPT = `
+local key = KEYS[1] .. ':model-probe:' .. ARGV[1]
+local acquired = redis.call('SET', key, ARGV[2], 'PX', tonumber(ARGV[3]), 'NX')
+if not acquired then return nil end
+return ARGV[2]
+`;
+
+const RELEASE_PROVIDER_MODEL_PROBE_SCRIPT = `
+local key = KEYS[1] .. ':model-probe:' .. ARGV[1]
+if redis.call('GET', key) ~= ARGV[2] then return 0 end
+return redis.call('DEL', key)
+`;
+
 function normalizeCandidate(candidate, priority) {
     const providerType = String(candidate.providerType || '');
     const uuid = String(candidate.uuid || '');
@@ -213,6 +273,7 @@ function normalizeCandidate(candidate, priority) {
         key: `${providerType}:${uuid}`,
         concurrencyLimit: Number.isFinite(concurrencyLimit) && concurrencyLimit > 0 ? concurrencyLimit : 0,
         preferred: candidate.preferred === true,
+        probeRequired: candidate.probeRequired === true,
         priority
     };
 }
@@ -238,6 +299,15 @@ export class RedisLeaseCoordinator {
         this.renewIntervalMs = Math.min(20000, Math.max(1000, Math.floor(this.leaseTtlMs / 3)));
         this.renewTimers = new Map();
         this.activeLeases = new Map();
+        this.modelSchedulingMetrics = {
+            cooldownWrites: 0,
+            probeAcquired: 0,
+            probeRejected: 0,
+            rateLimited: 0,
+            retryAttempts: 0,
+            fallbacks: 0,
+            byModel: {}
+        };
     }
 
     async _eval(name, script, args) {
@@ -248,12 +318,21 @@ export class RedisLeaseCoordinator {
         }
     }
 
-    async acquire(candidates, { affinityKey = '', routedProviderKey = '' } = {}) {
+    async acquire(candidates, { affinityKey = '', routedProviderKey = '', requestedModel = '' } = {}) {
         if (!this.bootId || !this.ready || this.recovering) await this.synchronize();
         if (!this.ready || this.recovering) throw new CoordinationUnavailableError('Runtime coordination is recovering');
         const normalized = (candidates || []).map(normalizeCandidate).filter(item => item.providerType && item.uuid);
+        if (requestedModel) {
+            for (const candidate of normalized) {
+                candidate.cooldownHash = hashAffinityKey(`${candidate.providerType}:${candidate.uuid}:${requestedModel}`);
+                if (candidate.probeRequired) {
+                    candidate.probeHash = hashAffinityKey(`${candidate.providerType}:${candidate.uuid}:${requestedModel}`);
+                }
+            }
+        }
         if (normalized.length === 0) return null;
         const leaseId = randomUUID();
+        const probeOwner = `${this.workerId}:${leaseId}`;
         const result = await this._eval('acquire-provider-lease', ACQUIRE_SCRIPT, [
             this.epoch,
             leaseId,
@@ -264,24 +343,38 @@ export class RedisLeaseCoordinator {
             this.bootId || '',
             hashAffinityKey(affinityKey),
             String(this.affinityTtlMs),
-            String(routedProviderKey || '')
+            String(routedProviderKey || ''),
+            probeOwner,
+            '30000'
         ]);
         if (!result) return null;
         const lease = typeof result === 'string' ? JSON.parse(result) : result;
+        if (lease.probeRejected) {
+            this.modelSchedulingMetrics.probeRejected += 1;
+            return null;
+        }
         if (lease.coordinationRestarted) {
             this.ready = false;
             this.recovering = true;
             throw new CoordinationUnavailableError('Runtime coordination restarted and is recovering');
         }
+        if (lease.probe) this.modelSchedulingMetrics.probeAcquired += 1;
         const timer = setInterval(() => {
             this.renew(lease.leaseId).catch(() => {});
         }, this.renewIntervalMs);
         timer.unref?.();
         this.renewTimers.set(lease.leaseId, timer);
+        const selectedCandidate = normalized.find(candidate => (
+            candidate.providerType === lease.providerType && candidate.uuid === lease.uuid
+        ));
         this.activeLeases.set(lease.leaseId, {
             leaseId: lease.leaseId,
             epoch: this.epoch,
-            providerKey: `${lease.providerType}:${lease.uuid}`
+            providerKey: `${lease.providerType}:${lease.uuid}`,
+            ...(lease.probe && selectedCandidate?.probeHash ? {
+                probeHash: selectedCandidate.probeHash,
+                probeOwner
+            } : {})
         });
         return lease;
     }
@@ -317,6 +410,56 @@ export class RedisLeaseCoordinator {
         return String(result);
     }
 
+    async setProviderModelCooldown(providerType, uuid, model, { retryAfterMs = 30_000, reason = 'upstream_429' } = {}) {
+        const scopeHash = hashAffinityKey(`${providerType}:${uuid}:${model}`);
+        const ttlMs = Math.max(1000, Number(retryAfterMs) || 30_000);
+        const updated = Number(await this._eval('set-provider-model-cooldown', SET_PROVIDER_MODEL_COOLDOWN_SCRIPT, [
+            scopeHash,
+            String(reason || 'upstream_429'),
+            String(ttlMs)
+        ])) === 1;
+        if (updated) this.modelSchedulingMetrics.cooldownWrites += 1;
+        return updated;
+    }
+
+    async acquireProviderModelProbe(providerType, uuid, model, { ttlMs = 30_000 } = {}) {
+        const scopeHash = hashAffinityKey(`${providerType}:${uuid}:${model}`);
+        const owner = `${this.workerId}:${randomUUID()}`;
+        const result = await this._eval('acquire-provider-model-probe', ACQUIRE_PROVIDER_MODEL_PROBE_SCRIPT, [
+            scopeHash,
+            owner,
+            String(Math.max(1000, Number(ttlMs) || 30_000))
+        ]);
+        if (result) this.modelSchedulingMetrics.probeAcquired += 1;
+        else this.modelSchedulingMetrics.probeRejected += 1;
+        return result ? owner : null;
+    }
+
+    async releaseProviderModelProbe(providerType, uuid, model, owner) {
+        if (!owner) return false;
+        const scopeHash = hashAffinityKey(`${providerType}:${uuid}:${model}`);
+        return Number(await this._eval('release-provider-model-probe', RELEASE_PROVIDER_MODEL_PROBE_SCRIPT, [
+            scopeHash,
+            String(owner)
+        ])) === 1;
+    }
+
+    updateGeminiSchedulingGauge(model, snapshot = {}) {
+        const normalizedModel = String(model || '').trim();
+        if (!normalizedModel) return;
+        this.modelSchedulingMetrics.byModel[normalizedModel] = {
+            schedulable: Math.max(0, Number(snapshot.schedulable) || 0),
+            cooling: Math.max(0, Number(snapshot.cooling) || 0),
+            quotaUnknown: Math.max(0, Number(snapshot.quotaUnknown) || 0)
+        };
+    }
+
+    recordGeminiSchedulingEvent(field) {
+        if (!['rateLimited', 'retryAttempts', 'fallbacks'].includes(field)) return false;
+        this.modelSchedulingMetrics[field] += 1;
+        return true;
+    }
+
     async release(leaseId) {
         if (!leaseId) return false;
         const timer = this.renewTimers.get(leaseId);
@@ -328,7 +471,14 @@ export class RedisLeaseCoordinator {
 
     async renew(leaseId) {
         if (!leaseId) return false;
-        return Number(await this._eval('renew-provider-lease', RENEW_SCRIPT, [leaseId, String(this.leaseTtlMs), String(Date.now())])) === 1;
+        const lease = this.activeLeases.get(leaseId);
+        return Number(await this._eval('renew-provider-lease', RENEW_SCRIPT, [
+            leaseId,
+            String(this.leaseTtlMs),
+            String(Date.now()),
+            lease?.probeHash || '',
+            lease?.probeOwner || ''
+        ])) === 1;
     }
 
     async synchronize(activeLeases = [...this.activeLeases.values()]) {
@@ -391,7 +541,11 @@ export class RedisLeaseCoordinator {
             ready: this.ready,
             recovering: this.recovering,
             bootId: this.bootId,
-            activeLeases: this.activeLeases.size
+            activeLeases: this.activeLeases.size,
+            geminiScheduling: {
+                ...this.modelSchedulingMetrics,
+                byModel: { ...this.modelSchedulingMetrics.byModel }
+            }
         };
     }
 }

@@ -29,7 +29,7 @@ describe('Codex fingerprint provider pool file migration', () => {
         expect(result.backupPath).toBeTruthy();
         expect(backups).toHaveLength(1);
         expect(persisted['openai-codex-oauth'][0]).toEqual(expect.objectContaining({
-            codexFingerprintMode: 'session',
+            codexFingerprintMode: 'off',
             codexFingerprintVersion: 1,
             codexFingerprintMigrated: true
         }));

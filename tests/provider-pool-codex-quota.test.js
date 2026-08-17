@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
 import fs from 'fs';
 import path from 'path';
-import { ProviderPoolManager } from '../src/providers/provider-pool-manager.js';
+import { getCodexModelFallbackTarget, ProviderPoolManager } from '../src/providers/provider-pool-manager.js';
 
 jest.mock('../src/providers/adapter.js', () => ({
     getServiceAdapter: jest.fn(),
@@ -93,6 +93,13 @@ afterEach(() => {
 });
 
 describe('provider pool Codex token quota', () => {
+    test.each(['gpt-5.3', 'gpt-5.3-fast', 'gpt-5.4', 'gpt-5.4-fast', 'gpt-5.4-mini-fast'])(
+        'uses the shared Luna fallback for unavailable Codex family member %s',
+        (model) => {
+            expect(getCodexModelFallbackTarget(model)).toBe('gpt-5.6-luna');
+        }
+    );
+
     test('only selects Codex providers with Pro or Plus plan from usage cache', async () => {
         writeCodexUsageCache([
             {

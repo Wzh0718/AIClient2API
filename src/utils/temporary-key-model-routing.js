@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { matchesModelFamily } from '../providers/openai/codex-model-routing.js';
 
 const FULL_SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/i;
 
@@ -13,6 +14,13 @@ function safelyEqualHash(expected, actual) {
     const actualBuffer = Buffer.from(String(actual || '').toLowerCase());
     return expectedBuffer.length === actualBuffer.length
         && crypto.timingSafeEqual(expectedBuffer, actualBuffer);
+}
+
+function matchesConfiguredModel(rule, model) {
+    const exactModels = Array.isArray(rule?.models) ? rule.models : [];
+    if (exactModels.includes(model)) return true;
+    const modelFamilies = Array.isArray(rule?.modelFamilies) ? rule.modelFamilies : [];
+    return modelFamilies.some(family => matchesModelFamily(model, family));
 }
 
 export function resolveTemporaryKeyModelRoute({
@@ -32,7 +40,7 @@ export function resolveTemporaryKeyModelRoute({
         if (!rule || rule.enabled !== true) continue;
         if (!safelyEqualHash(rule.keyHash, keyHash)) continue;
         if (!Array.isArray(rule.paths) || !rule.paths.includes(requestPath)) continue;
-        if (!Array.isArray(rule.models) || !rule.models.includes(model)) continue;
+        if (!matchesConfiguredModel(rule, model)) continue;
         if (!rule.targetProviderType || !rule.targetModel) continue;
 
         return {

@@ -2,7 +2,7 @@ import { describe, expect, test } from '@jest/globals';
 import { migrateCodexFingerprintProviderPools } from '../src/utils/codex-fingerprint-migration.js';
 
 describe('Codex fingerprint provider migration', () => {
-    test('defaults missing and invalid Codex OAuth modes to session without touching other providers', () => {
+    test('defaults missing and invalid Codex OAuth modes to off without touching other providers', () => {
         const pools = {
             'openai-codex-oauth': [
                 { uuid: 'missing' },
@@ -18,9 +18,9 @@ describe('Codex fingerprint provider migration', () => {
         expect(result.migratedCount).toBe(2);
         expect(result.invalidCount).toBe(1);
         expect(result.providerPools['openai-codex-oauth']).toEqual([
-            expect.objectContaining({ uuid: 'missing', codexFingerprintMode: 'session', codexFingerprintVersion: 1 }),
+            expect.objectContaining({ uuid: 'missing', codexFingerprintMode: 'off', codexFingerprintVersion: 1 }),
             expect.objectContaining({ uuid: 'off', codexFingerprintMode: 'off' }),
-            expect.objectContaining({ uuid: 'invalid', codexFingerprintMode: 'session', codexFingerprintVersion: 1 })
+            expect.objectContaining({ uuid: 'invalid', codexFingerprintMode: 'off', codexFingerprintVersion: 1 })
         ]);
         expect(result.providerPools['openai-custom']).toEqual([{ uuid: 'custom' }]);
         expect(pools['openai-codex-oauth'][0].codexFingerprintMode).toBeUndefined();

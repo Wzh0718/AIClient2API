@@ -12,6 +12,39 @@ jest.mock('../src/ui-modules/event-broadcast.js', () => ({
 }));
 
 describe('provider pool Redis coordination', () => {
+    test('publishes Antigravity schedulable, cooling, and unknown-quota gauges during selection', async () => {
+        const coordinator = {
+            updateGeminiSchedulingGauge: jest.fn(),
+            acquire: jest.fn(async candidates => ({
+                leaseId: 'gemini-lease',
+                providerType: candidates[0].providerType,
+                uuid: candidates[0].uuid
+            })),
+            release: jest.fn(async () => true)
+        };
+        const manager = new ProviderPoolManager({
+            'gemini-antigravity': [{
+                uuid: 'gemini-unknown-quota',
+                isHealthy: true,
+                concurrencyLimit: 1,
+                lastKnownAntigravityPlan: 'pro',
+                supportedModels: ['gemini-2.5-flash']
+            }]
+        }, { coordination: coordinator, persistenceEnabled: false });
+
+        await requestContext.run({}, async () => {
+            const selected = await manager.acquireSlot('gemini-antigravity', 'gemini-2.5-flash');
+            expect(selected.uuid).toBe('gemini-unknown-quota');
+            await manager.releaseSlot('gemini-antigravity', selected.uuid);
+        });
+
+        expect(coordinator.updateGeminiSchedulingGauge).toHaveBeenCalledWith('gemini-2.5-flash', {
+            schedulable: 1,
+            cooling: 0,
+            quotaUnknown: 1
+        });
+    });
+
     test('acquires from eligible local candidates and releases the request-bound lease', async () => {
         const coordinator = {
             acquire: jest.fn(async candidates => ({
@@ -33,7 +66,7 @@ describe('provider pool Redis coordination', () => {
             expect(selected.uuid).toBe('healthy');
             expect(coordinator.acquire).toHaveBeenCalledWith([
                 expect.objectContaining({ providerType: 'test', uuid: 'healthy', concurrencyLimit: 0 })
-            ]);
+            ], { requestedModel: 'model' });
             await manager.releaseSlot('test', 'healthy');
         });
 

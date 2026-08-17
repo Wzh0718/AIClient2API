@@ -64,6 +64,7 @@ export function createRequestHandler(config, providerPoolManager) {
                 // Deep copy the config for each request to allow dynamic modification
                 const currentConfig = deepmerge({}, config);
                 currentConfig._monitorRequestId = requestId;
+                currentConfig._originalRequestPath = originalPath;
                 currentConfig._requestAuditLifecycle = true;
                 const auditLifecycle = instrumentResponseForAudit(res, async ({ normalizedPath, response, errorClass }) => {
                     const pluginManager = getPluginManager();

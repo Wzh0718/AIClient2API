@@ -19,6 +19,7 @@ import {
     CODEX_FINGERPRINT_CONTEXT_KEY,
     extractOriginalCodexSessionId
 } from '../providers/openai/codex-fingerprint.js';
+import { DEFAULT_CODEX_FALLBACK_MODEL, matchesModelFamily } from '../providers/openai/codex-model-routing.js';
 import requestContext from './context.js';
 import { assertCodexRoutingIntegrity } from '../services/codex-routing-integrity.js';
 import {
@@ -71,10 +72,13 @@ function getTemporaryRouteRetryConfig(retryContext) {
     return route && typeof route === 'object' ? route : null;
 }
 
-function preserveTemporaryRouteModel(value, retryContext) {
+function preserveClientResponseModel(value, retryContext) {
     const route = getTemporaryRouteRetryConfig(retryContext);
-    if (!route?.preserveResponseModel) return value;
-    return preserveTemporaryRouteResponseModel(value, route.requestedModel);
+    const requestedModel = route?.preserveResponseModel
+        ? route.requestedModel
+        : retryContext?.clientResponseModel;
+    if (!requestedModel) return value;
+    return preserveTemporaryRouteResponseModel(value, requestedModel);
 }
 
 function recordTemporaryRouteResult(retryContext, {
@@ -1402,6 +1406,12 @@ function isCodexProvider(provider) {
     return provider === MODEL_PROVIDER.CODEX_API || provider?.startsWith(`${MODEL_PROVIDER.CODEX_API}-`);
 }
 
+function shouldForceCodexFamilyFallback(error, provider, model) {
+    return isCodexProvider(provider)
+        && getErrorStatusCode(error) === 429
+        && (matchesModelFamily(model, 'gpt-5.3') || matchesModelFamily(model, 'gpt-5.4'));
+}
+
 function getUsageTrackingModel(model, requestBody, toProvider) {
     const normalizedModel = String(model || requestBody?.model || '').trim();
     if (!normalizedModel) return model;
@@ -1505,7 +1515,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             let chunkToSend = needsConversion
                 ? convertData(nativeChunk, 'streamChunk', toProvider, fromProvider, model, streamRequestId)
                 : nativeChunk;
-            chunkToSend = preserveTemporaryRouteModel(chunkToSend, retryContext);
+            chunkToSend = preserveClientResponseModel(chunkToSend, retryContext);
 
             // 监控钩子：流式响应分块
             const hookRequestId = getPluginHookRequestId(CONFIG);
@@ -1729,6 +1739,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         if (credentialMarkedUnhealthy && currentRetry < maxRetries && providerPoolManager && CONFIG) {
             const isCodexTransient = isCodexTransientCredentialError(error);
             const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity;
+            if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
             const failedCredentialUuids = [
                 ...(retryContext?.failedCredentialUuids || []),
                 pooluuid
@@ -1753,7 +1764,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                     excludeProviderUuids: failedCredentialUuids,
                     deprioritizeProviderTypes: failedProviderTypes,
                     allowExcludedProviderFallback: isCodexTransient,
-                    ...(isCodexProviderType(toProvider) && getErrorStatusCode(error) === 429 && /^gpt-5\.[34]-mini(?:-fast)?$|^gpt-5\.3-codex-spark(?:-fast)?$/i.test(String(model))
+                    ...(shouldForceCodexFamilyFallback(error, toProvider, model)
                         ? { forceCodexModelFallback: true, modelFallbackReason: 'UPSTREAM_429' }
                         : {}),
                     selectionDiagnostics
@@ -1833,6 +1844,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             try {
                 const fallback = await tryTemporaryRouteFallback(retryContext);
                 if (fallback?.service) {
+                    providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
                     logger.warn(`[Temporary Route] Falling back before stream start: ${toProvider}/${model} -> ${fallback.toProvider}/${fallback.model}`);
                     return await handleStreamRequest(
                         res,
@@ -1968,7 +1980,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             logger.info(`[Response Convert] Converting response from ${toProvider} to ${fromProvider}`);
             clientResponse = convertData(nativeResponse, 'response', toProvider, fromProvider, model);
         }
-        clientResponse = preserveTemporaryRouteModel(clientResponse, retryContext);
+        clientResponse = preserveClientResponseModel(clientResponse, retryContext);
 
         // 监控钩子：非流式响应
         const hookRequestId = getPluginHookRequestId(CONFIG);
@@ -2075,6 +2087,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         if (credentialMarkedUnhealthy && currentRetry < maxRetries && providerPoolManager && CONFIG) {
             const isCodexTransient = isCodexTransientCredentialError(error);
             const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity;
+            if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
             const failedCredentialUuids = [
                 ...(retryContext?.failedCredentialUuids || []),
                 pooluuid
@@ -2099,7 +2112,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                     excludeProviderUuids: failedCredentialUuids,
                     deprioritizeProviderTypes: failedProviderTypes,
                     allowExcludedProviderFallback: isCodexTransient,
-                    ...(isCodexProviderType(toProvider) && getErrorStatusCode(error) === 429 && /^gpt-5\.[34]-mini(?:-fast)?$|^gpt-5\.3-codex-spark(?:-fast)?$/i.test(String(model))
+                    ...(shouldForceCodexFamilyFallback(error, toProvider, model)
                         ? { forceCodexModelFallback: true, modelFallbackReason: 'UPSTREAM_429' }
                         : {}),
                     selectionDiagnostics
@@ -2176,6 +2189,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         try {
             const fallback = await tryTemporaryRouteFallback(retryContext);
             if (fallback?.service) {
+                providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
                 logger.warn(`[Temporary Route] Falling back before unary response: ${toProvider}/${model} -> ${fallback.toProvider}/${fallback.model}`);
                 return await handleUnaryRequest(
                     res,
@@ -2407,11 +2421,12 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     if (!model) {
         throw new Error("Could not determine the model from the request.");
     }
+    const clientRequestedModel = model;
 
     const temporaryRoute = resolveTemporaryKeyModelRoute({
         config: CONFIG,
         apiKey: CONFIG.potluckApiKey,
-        requestPath,
+        requestPath: CONFIG._originalRequestPath || requestPath,
         model,
         originalProviderType
     });
@@ -2431,10 +2446,20 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             CONFIG.MODEL_PROVIDER = temporaryRoute.originalProviderType;
             delete CONFIG.actualProviderType;
             const { getApiServiceWithFallback } = await import('../services/service-manager.js');
-            const result = await getApiServiceWithFallback(CONFIG, temporaryRoute.requestedModel, {
+            const selectionOptions = {
                 acquireSlot: Boolean(providerPoolManager && CONFIG.providerPools),
                 disableProviderFallback: true
-            });
+            };
+            let result;
+            try {
+                result = await getApiServiceWithFallback(CONFIG, temporaryRoute.requestedModel, {
+                    ...selectionOptions,
+                    preserveRequestedCodexModel: true
+                });
+            } catch (originalSelectionError) {
+                logger.warn(`[Temporary Route] Original Codex model unavailable; using ${DEFAULT_CODEX_FALLBACK_MODEL}: ${originalSelectionError.message}`);
+                result = await getApiServiceWithFallback(CONFIG, DEFAULT_CODEX_FALLBACK_MODEL, selectionOptions);
+            }
             let fallbackRequestBody = { ...originalRequestBody };
             if (isCodexProvider(result.actualProviderType)) {
                 fallbackRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY] = inboundCodexFingerprintContext;
@@ -2521,6 +2546,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             if (!buildTemporaryOriginalFallback) throw selectionError;
             logger.warn(`[Temporary Route] Target selection failed; using original route: ${selectionError.message}`);
             const fallback = await buildTemporaryOriginalFallback();
+            providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
             temporaryRouteFallbackUsed = true;
             result = {
                 service: fallback.service,
@@ -2623,6 +2649,9 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         CONFIG,
         currentRetry: 0,
         maxRetries: credentialSwitchMaxRetries,
+        ...(!temporaryRoute && isCodexProvider(toProvider) && model !== clientRequestedModel
+            ? { clientResponseModel: clientRequestedModel }
+            : {}),
         ...(temporaryRoute ? {
             temporaryRoute,
             temporaryRouteFallback: buildTemporaryOriginalFallback,

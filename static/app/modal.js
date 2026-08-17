@@ -1323,8 +1323,8 @@ function renderProviderConfig(provider) {
 
     // Codex 指纹配置之外的运行时状态只读展示；不渲染原始 ID/token。
     if (currentProviderType === 'openai-codex-oauth') {
-        const mode = provider.codexFingerprintMode || 'session';
-        const globalEnabled = window.currentSafeConfig?.CODEX_FINGERPRINT_ENABLED !== false;
+        const mode = provider.codexFingerprintMode || 'off';
+        const globalEnabled = window.currentSafeConfig?.CODEX_FINGERPRINT_ENABLED === true;
         const migrated = provider.codexFingerprintMigrated === true;
         const audit = provider.codexFingerprintAudit && typeof provider.codexFingerprintAudit === 'object'
             ? provider.codexFingerprintAudit : {};

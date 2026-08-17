@@ -18,7 +18,19 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         output: { bytes: 0, backpressureMs: 0 },
         hooks: { pending: 0, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 0, consumerLag: 0, oldestPendingAgeMs: 0, available: true, unavailableWorkers: [], byWorker: {} },
         inFlight: 0,
-        process: { rss: 0, heapUsed: 0, maxEventLoopUtilization: 0, eventLoopDelay: { p95: 0, p99: 0, max: 0 } }
+        process: { rss: 0, heapUsed: 0, maxEventLoopUtilization: 0, eventLoopDelay: { p95: 0, p99: 0, max: 0 } },
+        providerCoordination: {
+            byWorker: {},
+            geminiScheduling: {
+                cooldownWrites: 0,
+                probeAcquired: 0,
+                probeRejected: 0,
+                rateLimited: 0,
+                retryAttempts: 0,
+                fallbacks: 0,
+                byModel: {}
+            }
+        }
     };
     for (const [workerId, snapshot] of workerSnapshots.entries()) {
         result.requests.total += Number(snapshot?.requests?.total || 0);
@@ -46,6 +58,23 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         result.process.eventLoopDelay.p95 = Math.max(result.process.eventLoopDelay.p95, Number(snapshot?.process?.eventLoopDelay?.p95 || 0));
         result.process.eventLoopDelay.p99 = Math.max(result.process.eventLoopDelay.p99, Number(snapshot?.process?.eventLoopDelay?.p99 || 0));
         result.process.eventLoopDelay.max = Math.max(result.process.eventLoopDelay.max, Number(snapshot?.process?.eventLoopDelay?.max || 0));
+        if (snapshot?.providerCoordination) {
+            result.providerCoordination.byWorker[workerId] = snapshot.providerCoordination;
+            for (const field of ['cooldownWrites', 'probeAcquired', 'probeRejected', 'rateLimited', 'retryAttempts', 'fallbacks']) {
+                result.providerCoordination.geminiScheduling[field] += Number(snapshot.providerCoordination?.geminiScheduling?.[field] || 0);
+            }
+            for (const [model, modelSnapshot] of Object.entries(snapshot.providerCoordination?.geminiScheduling?.byModel || {})) {
+                const aggregate = result.providerCoordination.geminiScheduling.byModel[model] || {
+                    schedulable: 0,
+                    cooling: 0,
+                    quotaUnknown: 0
+                };
+                for (const field of ['schedulable', 'cooling', 'quotaUnknown']) {
+                    aggregate[field] = Math.max(aggregate[field], Number(modelSnapshot?.[field] || 0));
+                }
+                result.providerCoordination.geminiScheduling.byModel[model] = aggregate;
+            }
+        }
     }
     return result;
 }

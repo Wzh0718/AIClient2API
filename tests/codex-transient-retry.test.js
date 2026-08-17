@@ -137,7 +137,10 @@ describe('Codex transient credential retry', () => {
         expect(mockGetApiServiceWithFallback.mock.calls[0][2]).not.toHaveProperty('forceCodexModelFallback');
     });
 
-    test('requests a one-time Luna fallback after an upstream 429 for 5.4 mini', async () => {
+    test.each(['gpt-5.4-mini', 'gpt-5.4-fast', 'gpt-5.3-fast'])(
+        'requests a one-time Luna fallback after an upstream 429 for %s',
+        async (requestedModel) => {
+        mockGetApiServiceWithFallback.mockReset();
         const firstError = createCapacityError();
         const firstService = { generateContent: jest.fn().mockRejectedValue(firstError) };
         const lunaService = { generateContent: jest.fn().mockResolvedValue({ id: 'resp_luna_success' }) };
@@ -155,7 +158,7 @@ describe('Codex transient credential retry', () => {
         await handleUnaryRequest(
             res,
             firstService,
-            'gpt-5.4-mini',
+            requestedModel,
             { input: [] },
             'openai-codex-oauth',
             'openai-codex-oauth',
@@ -167,7 +170,7 @@ describe('Codex transient credential retry', () => {
             { CONFIG: config, maxRetries: 1 }
         );
 
-        expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(config, 'gpt-5.4-mini', expect.objectContaining({
+        expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(config, requestedModel, expect.objectContaining({
             forceCodexModelFallback: true,
             modelFallbackReason: 'UPSTREAM_429'
         }));

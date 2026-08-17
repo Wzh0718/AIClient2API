@@ -17,7 +17,7 @@ function createConfig(overrides = {}) {
                 enabled: true,
                 keyHash: KEY_HASH,
                 paths: ['/v1/responses'],
-                models: ['gpt-5.4-mini', 'gpt-5.3-codex-spark'],
+                modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
                 fallbackToOriginal: true,
@@ -29,7 +29,15 @@ function createConfig(overrides = {}) {
 }
 
 describe('temporary per-key model routing', () => {
-    test.each(['gpt-5.4-mini', 'gpt-5.3-codex-spark'])(
+    test.each([
+        'gpt-5.3',
+        'gpt-5.3-codex-spark',
+        'gpt-5.3-codex-spark-fast',
+        'gpt-5.4',
+        'gpt-5.4-fast',
+        'gpt-5.4-mini',
+        'gpt-5.4-mini-fast'
+    ])(
         'routes matching %s responses requests to Antigravity',
         model => {
             const route = resolveTemporaryKeyModelRoute({
@@ -58,7 +66,9 @@ describe('temporary per-key model routing', () => {
         { apiKey: 'maki_other', requestPath: '/v1/responses', model: 'gpt-5.4-mini' },
         { apiKey: API_KEY, requestPath: '/v1/chat/completions', model: 'gpt-5.4-mini' },
         { apiKey: API_KEY, requestPath: '/v1/responses', model: 'gpt-5.5' },
-        { apiKey: API_KEY, requestPath: '/v1/responses', model: 'gpt-5.4-mini-fast' }
+        { apiKey: API_KEY, requestPath: '/v1/responses', model: 'gpt-5.30' },
+        { apiKey: API_KEY, requestPath: '/v1/responses', model: 'gpt-5.4foo' },
+        { apiKey: API_KEY, requestPath: '/v1/responses', model: 'my-gpt-5.4' }
     ])('does not route non-matching request %#', request => {
         expect(resolveTemporaryKeyModelRoute({
             config: createConfig(),
@@ -76,6 +86,27 @@ describe('temporary per-key model routing', () => {
             apiKey: API_KEY,
             requestPath: '/v1/responses',
             model: 'gpt-5.4-mini',
+            originalProviderType: 'openai-codex-oauth'
+        })).toBeNull();
+    });
+
+    test('keeps exact model matching backward compatible', () => {
+        const config = createConfig();
+        delete config.temporaryKeyModelRoutes[0].modelFamilies;
+        config.temporaryKeyModelRoutes[0].models = ['gpt-5.4-mini'];
+
+        expect(resolveTemporaryKeyModelRoute({
+            config,
+            apiKey: API_KEY,
+            requestPath: '/v1/responses',
+            model: 'gpt-5.4-mini',
+            originalProviderType: 'openai-codex-oauth'
+        })).not.toBeNull();
+        expect(resolveTemporaryKeyModelRoute({
+            config,
+            apiKey: API_KEY,
+            requestPath: '/v1/responses',
+            model: 'gpt-5.4-mini-fast',
             originalProviderType: 'openai-codex-oauth'
         })).toBeNull();
     });

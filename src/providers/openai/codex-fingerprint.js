@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 
 export const CODEX_FINGERPRINT_MODES = Object.freeze(['off', 'device', 'session', 'full']);
-export const DEFAULT_CODEX_FINGERPRINT_MODE = 'session';
+export const DEFAULT_CODEX_FINGERPRINT_MODE = 'off';
 export const CODEX_FINGERPRINT_VERSION = 1;
 export const CODEX_FINGERPRINT_CONTEXT_KEY = '_codexFingerprintContext';
 
@@ -10,8 +10,8 @@ function isCodexOAuthProvider(providerConfig = {}) {
     return providerType === 'openai-codex-oauth' || String(providerType || '').startsWith('openai-codex-oauth-');
 }
 
-function isExplicitlyDisabled(value) {
-    return value === false || value === 0 || value === '0' || value === 'false';
+function isExplicitlyEnabled(value) {
+    return value === true || value === 1 || value === '1' || value === 'true';
 }
 
 function stableUuid(seed) {
@@ -49,7 +49,7 @@ function deleteHeaderCaseInsensitive(headers, name) {
 
 export function resolveCodexFingerprintMode(providerConfig = {}, globalConfig = providerConfig) {
     if (!isCodexOAuthProvider(providerConfig)) return 'off';
-    if (isExplicitlyDisabled(globalConfig?.CODEX_FINGERPRINT_ENABLED)) return 'off';
+    if (!isExplicitlyEnabled(globalConfig?.CODEX_FINGERPRINT_ENABLED)) return 'off';
     const configured = String(providerConfig.codexFingerprintMode || '').trim().toLowerCase();
     return CODEX_FINGERPRINT_MODES.includes(configured) ? configured : DEFAULT_CODEX_FINGERPRINT_MODE;
 }

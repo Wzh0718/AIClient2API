@@ -12,7 +12,10 @@ class InMemoryRedisExecutor {
         this.affinity = new Map();
         this.hotRequests = new Map();
         this.promptCacheKeys = new Map();
+        this.modelCooldowns = new Map();
+        this.modelProbeLeases = new Map();
         this.scriptCalls = [];
+        this.now = 0;
     }
 
     async evalScript(name, _script, keys, args) {
@@ -38,15 +41,46 @@ class InMemoryRedisExecutor {
             this.hotRequests.set(key, observations);
             return JSON.stringify({ count: observations.size, ttlMs: Number(ttlMs) });
         }
+        if (name === 'set-provider-model-cooldown') {
+            const [cooldownHash, value, ttlMs] = args;
+            this.modelCooldowns.set(cooldownHash, { value, expiresAt: Date.now() + Number(ttlMs) });
+            return 1;
+        }
+        if (name === 'acquire-provider-model-probe') {
+            const [probeHash, owner] = args;
+            if (this.modelProbeLeases.has(probeHash)) return null;
+            this.modelProbeLeases.set(probeHash, owner);
+            return owner;
+        }
+        if (name === 'release-provider-model-probe') {
+            const [probeHash, owner] = args;
+            if (this.modelProbeLeases.get(probeHash) !== owner) return 0;
+            this.modelProbeLeases.delete(probeHash);
+            return 1;
+        }
         if (name === 'acquire-provider-lease') {
-            const [epoch, leaseId, ttlMs, workerId, candidatesJson, _nowMs, observedBootId, affinityKey = '', _affinityTtlMs, routedProviderKey = ''] = args;
+            const [epoch, leaseId, ttlMs, workerId, candidatesJson, _nowMs, observedBootId, affinityKey = '', _affinityTtlMs, routedProviderKey = '', probeOwner = '', probeTtlMs = '30000'] = args;
             if (observedBootId !== this.bootId) return JSON.stringify({ coordinationRestarted: true, bootId: this.bootId });
-            const candidates = JSON.parse(candidatesJson);
+            const candidates = JSON.parse(candidatesJson).filter(candidate => {
+                if (!candidate.cooldownHash) return true;
+                const state = this.modelCooldowns.get(candidate.cooldownHash);
+                if (!state) return true;
+                if (state.expiresAt <= Date.now()) {
+                    this.modelCooldowns.delete(candidate.cooldownHash);
+                    return true;
+                }
+                return false;
+            });
+            for (const [probeHash, lease] of this.modelProbeLeases.entries()) {
+                if (lease.expiresAt <= this.now) this.modelProbeLeases.delete(probeHash);
+            }
+            const probeBlocked = candidates.some(candidate => candidate.probeHash && this.modelProbeLeases.has(candidate.probeHash));
+            const probeEligibleCandidates = candidates.filter(candidate => !candidate.probeHash || !this.modelProbeLeases.has(candidate.probeHash));
             const mappedKey = affinityKey ? this.affinity.get(affinityKey) : null;
-            const mapped = mappedKey && candidates.find(candidate => candidate.key === mappedKey);
+            const mapped = mappedKey && probeEligibleCandidates.find(candidate => candidate.key === mappedKey);
             const baseSelected = (mapped && (mapped.concurrencyLimit <= 0 || (this.active.get(mapped.key) || 0) < mapped.concurrencyLimit))
                 ? mapped
-                : candidates
+                : probeEligibleCandidates
                 .filter(candidate => candidate.concurrencyLimit <= 0 || (this.active.get(candidate.key) || 0) < candidate.concurrencyLimit)
                 .sort((a, b) => {
                     const preferredDiff = Number(b.preferred === true) - Number(a.preferred === true);
@@ -56,22 +90,34 @@ class InMemoryRedisExecutor {
                     return Number(a.priority || 0) - Number(b.priority || 0);
                 })[0];
             const routed = routedProviderKey
-                ? candidates.find(candidate => candidate.key === routedProviderKey)
+                ? probeEligibleCandidates.find(candidate => candidate.key === routedProviderKey)
                 : null;
             const selected = routed && (routed.concurrencyLimit <= 0 || (this.active.get(routed.key) || 0) < routed.concurrencyLimit)
                 ? routed
                 : baseSelected;
-            if (!selected) return null;
+            if (!selected) return probeBlocked ? JSON.stringify({ probeRejected: true }) : null;
+            if (selected.probeHash) {
+                this.modelProbeLeases.set(selected.probeHash, {
+                    owner: probeOwner,
+                    expiresAt: this.now + Number(probeTtlMs)
+                });
+            }
             this.active.set(selected.key, (this.active.get(selected.key) || 0) + 1);
             if (affinityKey && !mapped && baseSelected) this.affinity.set(affinityKey, baseSelected.key);
-            this.leases.set(leaseId, { epoch, providerKey: selected.key, workerId, ttlMs: Number(ttlMs) });
-            return JSON.stringify({ leaseId, providerType: selected.providerType, uuid: selected.uuid });
+            this.leases.set(leaseId, { epoch, providerKey: selected.key, workerId, ttlMs: Number(ttlMs), probeHash: selected.probeHash, probeOwner });
+            return JSON.stringify({ leaseId, providerType: selected.providerType, uuid: selected.uuid, probe: Boolean(selected.probeHash) });
         }
         if (name === 'recover-worker-leases') {
             const [workerId, expectedWorkers, observedBootId, _leaseTtlMs, proposedBootId, leasesJson] = args;
             if (!this.bootId) this.bootId = proposedBootId;
             for (const lease of JSON.parse(leasesJson)) {
                 this.leases.set(lease.leaseId, lease);
+                if (lease.probeHash && lease.probeOwner) {
+                    this.modelProbeLeases.set(lease.probeHash, {
+                        owner: lease.probeOwner,
+                        expiresAt: this.now + Number(_leaseTtlMs)
+                    });
+                }
             }
             this.readyWorkers.add(workerId);
             return JSON.stringify({ bootId: this.bootId, ready: this.readyWorkers.size >= Number(expectedWorkers), readyWorkers: this.readyWorkers.size });
@@ -82,9 +128,16 @@ class InMemoryRedisExecutor {
             if (!lease) return 0;
             this.leases.delete(leaseId);
             this.active.set(lease.providerKey, Math.max(0, (this.active.get(lease.providerKey) || 0) - 1));
+            if (lease.probeHash && this.modelProbeLeases.get(lease.probeHash)?.owner === lease.probeOwner) this.modelProbeLeases.delete(lease.probeHash);
             return 1;
         }
-        if (name === 'renew-provider-lease') return this.leases.has(args[0]) ? 1 : 0;
+        if (name === 'renew-provider-lease') {
+            const [leaseId, ttlMs, _nowMs, probeHash, probeOwner] = args;
+            if (!this.leases.has(leaseId)) return 0;
+            const probe = probeHash ? this.modelProbeLeases.get(probeHash) : null;
+            if (probe && probe.owner === probeOwner) probe.expiresAt = this.now + Number(ttlMs);
+            return 1;
+        }
         if (name === 'renew-refresh-fence') {
             const lock = this.refreshLocks.get(args[0]);
             return lock && lock.owner === args[1] && String(lock.fence) === String(args[2]) ? 1 : 0;
@@ -109,6 +162,123 @@ class InMemoryRedisExecutor {
 }
 
 describe('RedisLeaseCoordinator', () => {
+    test('reports Gemini scheduling gauges and rate-limit, retry, and fallback counters', () => {
+        const coordinator = new RedisLeaseCoordinator({
+            redis: new InMemoryRedisExecutor(),
+            epoch: 'test',
+            workerId: 'w1'
+        });
+
+        coordinator.updateGeminiSchedulingGauge('gemini-2.5-flash', {
+            schedulable: 2,
+            cooling: 1,
+            quotaUnknown: 1
+        });
+        coordinator.recordGeminiSchedulingEvent('rateLimited');
+        coordinator.recordGeminiSchedulingEvent('retryAttempts');
+        coordinator.recordGeminiSchedulingEvent('fallbacks');
+
+        expect(coordinator.getStatus().geminiScheduling).toMatchObject({
+            rateLimited: 1,
+            retryAttempts: 1,
+            fallbacks: 1,
+            byModel: {
+                'gemini-2.5-flash': {
+                    schedulable: 2,
+                    cooling: 1,
+                    quotaUnknown: 1
+                }
+            }
+        });
+    });
+
+    test('shares Antigravity model cooldown and a single unknown-quota probe across workers', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const first = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+        const second = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w2' });
+        const candidates = [{ providerType: 'gemini-antigravity', uuid: 'gemini-1', concurrencyLimit: 0 }];
+
+        await first.setProviderModelCooldown('gemini-antigravity', 'gemini-1', 'gemini-2.5-flash', {
+            retryAfterMs: 60_000,
+            reason: 'upstream_429'
+        });
+        await expect(second.acquire(candidates, { requestedModel: 'gemini-2.5-flash' })).resolves.toBeNull();
+
+        const firstProbe = await first.acquireProviderModelProbe('gemini-antigravity', 'gemini-2', 'gemini-2.5-flash');
+        const secondProbe = await second.acquireProviderModelProbe('gemini-antigravity', 'gemini-2', 'gemini-2.5-flash');
+        expect(firstProbe).toBeTruthy();
+        expect(secondProbe).toBeNull();
+        await first.releaseProviderModelProbe('gemini-antigravity', 'gemini-2', 'gemini-2.5-flash', firstProbe);
+        await expect(second.acquireProviderModelProbe('gemini-antigravity', 'gemini-2', 'gemini-2.5-flash')).resolves.toBeTruthy();
+
+        expect(JSON.stringify(redis.scriptCalls)).not.toContain('gemini-2.5-flash');
+    });
+
+    test('allows only one in-flight request for an unknown Antigravity quota candidate', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const first = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+        const second = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w2' });
+        const candidates = [{
+            providerType: 'gemini-antigravity',
+            uuid: 'gemini-unknown',
+            concurrencyLimit: 10,
+            probeRequired: true
+        }];
+
+        const probe = await first.acquire(candidates, { requestedModel: 'gemini-2.5-flash' });
+        await expect(second.acquire(candidates, { requestedModel: 'gemini-2.5-flash' })).resolves.toBeNull();
+        expect(first.getStatus().geminiScheduling.probeAcquired).toBe(1);
+        expect(second.getStatus().geminiScheduling.probeRejected).toBe(1);
+        await first.release(probe.leaseId);
+        await expect(second.acquire(candidates, { requestedModel: 'gemini-2.5-flash' })).resolves.toMatchObject({ uuid: 'gemini-unknown' });
+    });
+
+    test('renews the unknown-quota probe lease together with a long-running provider lease', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const first = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1', leaseTtlMs: 60_000 });
+        const second = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w2', leaseTtlMs: 60_000 });
+        const candidates = [{
+            providerType: 'gemini-antigravity',
+            uuid: 'gemini-slow',
+            concurrencyLimit: 10,
+            probeRequired: true
+        }];
+
+        const lease = await first.acquire(candidates, { requestedModel: 'gemini-2.5-flash' });
+        redis.now = 25_000;
+        await first.renew(lease.leaseId);
+        redis.now = 35_000;
+
+        await expect(second.acquire(candidates, { requestedModel: 'gemini-2.5-flash' })).resolves.toBeNull();
+        await first.release(lease.leaseId);
+    });
+
+    test('restores an in-flight unknown-quota probe after Redis restarts', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const first = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1', expectedWorkers: 2 });
+        const second = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w2', expectedWorkers: 2 });
+        await first.synchronize();
+        await second.synchronize();
+        await first.synchronize();
+        const candidates = [{
+            providerType: 'gemini-antigravity',
+            uuid: 'gemini-restart',
+            concurrencyLimit: 10,
+            probeRequired: true
+        }];
+
+        await first.acquire(candidates, { requestedModel: 'gemini-2.5-flash' });
+        redis.bootId = 'boot-2';
+        redis.readyWorkers.clear();
+        redis.leases.clear();
+        redis.modelProbeLeases.clear();
+
+        await expect(first.synchronize()).resolves.toMatchObject({ ready: false, recovering: true });
+        await expect(second.synchronize()).resolves.toMatchObject({ ready: true });
+        await expect(first.synchronize()).resolves.toMatchObject({ ready: true });
+        await expect(second.acquire(candidates, { requestedModel: 'gemini-2.5-flash' })).resolves.toBeNull();
+    });
+
     test('shares prompt cache keys across workers without exposing the raw scope', async () => {
         const redis = new InMemoryRedisExecutor();
         const first = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });

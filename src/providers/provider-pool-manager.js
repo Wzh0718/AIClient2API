@@ -24,6 +24,7 @@ import {
 import { normalizeCodexRateLimitWindows } from '../utils/codex-rate-limit.js';
 import requestContext from '../utils/context.js';
 import { createProviderStateEvent, applyProviderStateEvent } from '../runtime/provider-state-event.js';
+import { DEFAULT_CODEX_FALLBACK_MODEL, matchesModelFamily } from './openai/codex-model-routing.js';
 
 function getCustomModelAliasesForProvider(config, providerType) {
     const customModels = Array.isArray(config?.customModels) ? config.customModels : [];
@@ -187,6 +188,18 @@ function getAntigravityFamilyQuotaStatus(providerType, provider, requestedModel,
     };
 }
 
+function isAntigravityQuotaProbeRequired(providerType, provider, requestedModel) {
+    if (!isAntigravityProviderType(providerType) || !requestedModel) return false;
+    const status = getAntigravityFamilyQuotaStatus(
+        providerType,
+        provider,
+        requestedModel,
+        readFreshUsageCacheSync(),
+        Date.now()
+    );
+    return !status.exceeded && /usage unavailable/i.test(String(status.reason || ''));
+}
+
 function getActiveAntigravityQuotaState(state, now = Date.now()) {
     if (state?.isHealthy !== false) return null;
     const recoveryMs = Date.parse(state.scheduledRecoveryTime || '');
@@ -276,7 +289,7 @@ const DEFAULT_CODEX_53_MODEL_PATTERNS = [
     '*codex_spark*'
 ];
 
-const DEFAULT_CODEX_53_QUOTA_FALLBACK_MODEL = 'gpt-5.6-luna';
+const DEFAULT_CODEX_53_QUOTA_FALLBACK_MODEL = DEFAULT_CODEX_FALLBACK_MODEL;
 const DEFAULT_CODEX_UNAVAILABLE_MODEL_FALLBACKS = Object.freeze({
     'gpt-5.3-codex-spark': 'gpt-5.6-luna',
     'gpt-5.3-codex-spark-fast': 'gpt-5.6-luna',
@@ -551,7 +564,11 @@ export function getCodexModelFallbackTarget(requestedModel, globalConfig = {}) {
         || globalConfig?.codexUnavailableModelFallbacks
         || {};
     const merged = { ...DEFAULT_CODEX_UNAVAILABLE_MODEL_FALLBACKS, ...configured };
-    const target = Object.prototype.hasOwnProperty.call(merged, model) ? merged[model] : null;
+    const target = Object.prototype.hasOwnProperty.call(merged, model)
+        ? merged[model]
+        : (matchesModelFamily(model, 'gpt-5.3') || matchesModelFamily(model, 'gpt-5.4')
+            ? DEFAULT_CODEX_FALLBACK_MODEL
+            : null);
     if (!target || target === false || target === model) return null;
     return String(target);
 }
@@ -1689,6 +1706,12 @@ export class ProviderPoolManager {
         }
         if (isAntigravityProviderType(providerType) && candidates.length > 0) {
             candidates = this._filterAntigravityProvidersByPlan(providerType, candidates, options.selectionDiagnostics);
+            candidates = this._filterAntigravityProvidersByQuota(
+                providerType,
+                candidates,
+                requestedModel,
+                options.selectionDiagnostics
+            );
         }
 
         return candidates;
@@ -1827,13 +1850,15 @@ export class ProviderPoolManager {
                 providerType: provider.type,
                 uuid: provider.uuid || provider.config?.uuid,
                 concurrencyLimit: parseInt(provider.config?.concurrencyLimit || 0),
-                preferred: hasStickyAffinity && index === 0
+                preferred: hasStickyAffinity && index === 0,
+                probeRequired: isAntigravityQuotaProbeRequired(provider.type, provider, requestedModel)
             }));
             const lease = hasStickyAffinity
                 ? await this.coordination.acquire(coordinatedCandidates, {
-                    affinityKey: `mixed:${providerType}:${requestedModel || ''}:${options.stickyProviderKey}`
+                    affinityKey: `mixed:${providerType}:${requestedModel || ''}:${options.stickyProviderKey}`,
+                    requestedModel
                 })
-                : await this.coordination.acquire(coordinatedCandidates);
+                : await this.coordination.acquire(coordinatedCandidates, { requestedModel });
             if (!lease) return null;
             const selected = this._findProvider(lease.providerType, lease.uuid);
             if (!selected) {
@@ -2200,16 +2225,18 @@ export class ProviderPoolManager {
                     providerType,
                     uuid: provider.uuid || provider.config?.uuid,
                     concurrencyLimit: parseInt(provider.config?.concurrencyLimit || 0),
-                    preferred: hasStickyAffinity && index === 0
+                    preferred: hasStickyAffinity && index === 0,
+                    probeRequired: isAntigravityQuotaProbeRequired(providerType, provider, requestedModel)
                 }));
             const lease = hasStickyAffinity
                 ? await this.coordination.acquire(candidates, {
                     affinityKey: `${providerType}:${requestedModel || ''}:${options.stickyProviderKey}`,
+                    requestedModel,
                     routedProviderKey: hotShardProvider
                         ? `${providerType}:${hotShardProvider.uuid || hotShardProvider.config?.uuid}`
                         : ''
                 })
-                : await this.coordination.acquire(candidates);
+                : await this.coordination.acquire(candidates, { requestedModel });
             if (!lease) return null;
             const selected = this._findProvider(lease.providerType, lease.uuid);
             if (!selected) {
@@ -2787,6 +2814,14 @@ export class ProviderPoolManager {
             allowed.push(provider);
         }
 
+        this.coordination?.updateGeminiSchedulingGauge?.(canonicalModel, {
+            schedulable: allowed.length,
+            cooling: Number(filterReasons.model_cooldown || 0),
+            quotaUnknown: allowed.filter(provider => (
+                isAntigravityQuotaProbeRequired(providerType, provider, canonicalModel)
+            )).length
+        });
+
         if (updated) this._debouncedSave(providerType);
         if (selectionDiagnostics && Object.keys(filterReasons).length > 0) {
             selectionDiagnostics.filterReasons = {
@@ -2814,6 +2849,10 @@ export class ProviderPoolManager {
         }
 
         return allowed;
+    }
+
+    recordGeminiSchedulingEvent(field) {
+        return this.coordination?.recordGeminiSchedulingEvent?.(field) === true;
     }
 
     /**
@@ -3595,8 +3634,19 @@ export class ProviderPoolManager {
             scheduledRecoveryTime: recoveryTime ? new Date(recoveryTime).toISOString() : null,
             source: 'upstream_429'
         };
+        this.recordGeminiSchedulingEvent('rateLimited');
         provider.config.lastUsed = new Date().toISOString();
         this._log('warn', `Marked Antigravity model ${canonicalModel} as cooling down for ${this._getDisplayName(provider.config)} until ${provider.config.antigravityQuotaHealth.models[canonicalModel].scheduledRecoveryTime || 'manual recovery'}`);
+        if (this.coordination?.setProviderModelCooldown) {
+            const recoveryMs = Date.parse(provider.config.antigravityQuotaHealth.models[canonicalModel].scheduledRecoveryTime || '');
+            const retryAfterMs = Number.isFinite(recoveryMs)
+                ? Math.max(1000, recoveryMs - Date.now())
+                : 30_000;
+            this.coordination.setProviderModelCooldown(providerType, provider.config.uuid, canonicalModel, {
+                retryAfterMs,
+                reason: errorMessage || 'upstream_429'
+            }).catch(error => this._log('warn', `Failed to publish Antigravity cooldown: ${error.message}`));
+        }
         this._debouncedSave(providerType);
     }
 

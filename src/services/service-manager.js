@@ -24,10 +24,13 @@ import { readGeminiCredentialEmail } from '../utils/gemini-account.js';
 import { normalizeCodexFingerprintProviderConfig } from '../utils/codex-fingerprint-migration.js';
 import { CredentialGroupService, routeKeyToCredentialCandidates } from './codex-credential-group-service.js';
 import { getCodexRoutingConsistencyStatus } from './codex-routing-integrity.js';
+import {
+    DEFAULT_CODEX_FALLBACK_MODEL,
+    resolveCodexEntryModel
+} from '../providers/openai/codex-model-routing.js';
 
 // 存储 ProviderPoolManager 实例
 let providerPoolManager = null;
-const DEFAULT_CODEX_FALLBACK_MODEL = 'gpt-5.4-mini';
 
 function isCodexModelFallbackEligibleError(error) {
     if (!error) return false;
@@ -1197,7 +1200,7 @@ export async function initApiService(config, isReady = false, runtimeOptions = {
  * @private
  * @returns {Promise<Object>} { effectiveProvider, actualModelName }
  */
-async function _resolveEffectiveRouting(config, requestedModel) {
+async function _resolveEffectiveRouting(config, requestedModel, options = {}) {
     let effectiveProvider = config.MODEL_PROVIDER;
     let actualModelName = requestedModel;
 
@@ -1213,9 +1216,17 @@ async function _resolveEffectiveRouting(config, requestedModel) {
         }
     }
 
-    if (isCodexProviderType(effectiveProvider) && actualModelName && !isSupportedCodexModel(effectiveProvider, actualModelName)) {
-        logger.warn(`[Routing] Unsupported Codex model '${actualModelName}'. Falling back to '${DEFAULT_CODEX_FALLBACK_MODEL}'`);
-        actualModelName = DEFAULT_CODEX_FALLBACK_MODEL;
+    if (isCodexProviderType(effectiveProvider) && actualModelName) {
+        const resolved = resolveCodexEntryModel({
+            model: actualModelName,
+            supported: isSupportedCodexModel(effectiveProvider, actualModelName),
+            preserveRequestedModel: options.preserveRequestedCodexModel === true
+        });
+        if (resolved.actualModel !== actualModelName) {
+            const log = resolved.reason === 'UNSUPPORTED_MODEL' ? logger.warn.bind(logger) : logger.info.bind(logger);
+            log(`[Routing] Codex model '${actualModelName}' routed to '${resolved.actualModel}' (${resolved.reason})`);
+            actualModelName = resolved.actualModel;
+        }
     }
 
     // 2. 严格性检查：在 AUTO 模式下，如果到这里还没解析出具体提供商，则报错 (除非是列出模型场景)
@@ -1236,7 +1247,7 @@ async function _resolveEffectiveRouting(config, requestedModel) {
  */
 export async function getApiService(config, requestedModel = null, options = {}) {
     // 1. 前置路由解析
-    const { effectiveProvider, actualModelName } = await _resolveEffectiveRouting(config, requestedModel);
+    const { effectiveProvider, actualModelName } = await _resolveEffectiveRouting(config, requestedModel, options);
     config.MODEL_PROVIDER = effectiveProvider;
 
     // 模型列表特殊场景：AUTO 且无模型名
@@ -1299,7 +1310,7 @@ export async function getApiService(config, requestedModel = null, options = {})
  */
 export async function getApiServiceWithFallback(config, requestedModel = null, options = {}) {
     // 1. 前置路由解析
-    const { effectiveProvider, actualModelName } = await _resolveEffectiveRouting(config, requestedModel);
+    const { effectiveProvider, actualModelName } = await _resolveEffectiveRouting(config, requestedModel, options);
     config.MODEL_PROVIDER = effectiveProvider;
 
     const codexFallbackTarget = isCodexProviderType(effectiveProvider)

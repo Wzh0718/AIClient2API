@@ -127,9 +127,54 @@ describe('runtime observability baseline', () => {
             output: { bytes: 300, backpressureMs: 10 },
             hooks: { pending: 0, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 0, consumerLag: 0, oldestPendingAgeMs: 0, available: true, unavailableWorkers: [], byWorker: {} },
             inFlight: 3,
-            process: { rss: 2200, heapUsed: 1100, maxEventLoopUtilization: 0.3, eventLoopDelay: { p95: 15, p99: 22, max: 30 } }
+            process: { rss: 2200, heapUsed: 1100, maxEventLoopUtilization: 0.3, eventLoopDelay: { p95: 15, p99: 22, max: 30 } },
+            providerCoordination: {
+                byWorker: {},
+                geminiScheduling: {
+                    cooldownWrites: 0,
+                    probeAcquired: 0,
+                    probeRejected: 0,
+                    rateLimited: 0,
+                    retryAttempts: 0,
+                    fallbacks: 0,
+                    byModel: {}
+                }
+            }
         });
         expect(JSON.stringify(aggregateWorkerMetrics(snapshots))).not.toMatch(/prompt|imageData|credential/i);
+    });
+
+    test('sums Gemini scheduling counters while taking the maximum shared-state gauges', () => {
+        const snapshots = new Map([
+            ['execution-1', { providerCoordination: { geminiScheduling: {
+                cooldownWrites: 1,
+                probeAcquired: 1,
+                probeRejected: 0,
+                rateLimited: 1,
+                retryAttempts: 2,
+                fallbacks: 1,
+                byModel: { 'gemini-2.5-flash': { schedulable: 2, cooling: 1, quotaUnknown: 1 } }
+            } } }],
+            ['execution-2', { providerCoordination: { geminiScheduling: {
+                cooldownWrites: 0,
+                probeAcquired: 0,
+                probeRejected: 1,
+                rateLimited: 0,
+                retryAttempts: 1,
+                fallbacks: 0,
+                byModel: { 'gemini-2.5-flash': { schedulable: 2, cooling: 1, quotaUnknown: 1 } }
+            } } }]
+        ]);
+
+        expect(aggregateWorkerMetrics(snapshots).providerCoordination.geminiScheduling).toEqual({
+            cooldownWrites: 1,
+            probeAcquired: 1,
+            probeRejected: 1,
+            rateLimited: 1,
+            retryAttempts: 3,
+            fallbacks: 1,
+            byModel: { 'gemini-2.5-flash': { schedulable: 2, cooling: 1, quotaUnknown: 1 } }
+        });
     });
 
     test('aggregates durable hook backlog and dropped counters', () => {

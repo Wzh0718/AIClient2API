@@ -32,6 +32,7 @@ function createService(overrides = {}) {
         MODEL_PROVIDER: 'openai-codex-oauth',
         uuid: 'account-a',
         codexAccountKey: 'stable-account-a',
+        codexFingerprintMode: 'session',
         CODEX_FINGERPRINT_ENABLED: true,
         CODEX_OVERLOAD_RETRY_DELAY_MS: 0,
         ...overrides

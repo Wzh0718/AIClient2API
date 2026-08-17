@@ -26,11 +26,11 @@ import {
 } from './codex-fingerprint.js';
 import { recordCodexFingerprintAudit } from './codex-fingerprint-audit.js';
 import { codexPromptCacheObservability } from './codex-prompt-cache-observability.js';
+import { DEFAULT_CODEX_FALLBACK_MODEL } from './codex-model-routing.js';
 
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
 const fastModels = baseModels.map(m => `${m}-fast`);
 const CODEX_MODELS = [...new Set([...baseModels, ...fastModels])];
-const DEFAULT_CODEX_FALLBACK_MODEL = 'gpt-5.4-mini';
 const CODEX_VERSION = '0.144.1';
 export const IMAGE_MODELS = new Set(['gpt-image-2']);
 const IMAGE_GENERATION_FUNCTION_NAMES = new Set(['image_gen.imagegen', 'image_gen__imagegen']);

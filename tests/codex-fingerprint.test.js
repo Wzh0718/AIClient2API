@@ -16,9 +16,12 @@ function provider(overrides = {}) {
 }
 
 describe('Codex OAuth fingerprint convergence', () => {
-    test('defaults eligible Codex OAuth providers to session mode', () => {
-        expect(resolveCodexFingerprintMode(provider(), {})).toBe('session');
-        expect(resolveCodexFingerprintMode(provider({ codexFingerprintMode: 'device' }), {})).toBe('device');
+    test('defaults eligible Codex OAuth providers to off and requires explicit global opt-in', () => {
+        expect(resolveCodexFingerprintMode(provider(), {})).toBe('off');
+        expect(resolveCodexFingerprintMode(provider({ codexFingerprintMode: 'device' }), {})).toBe('off');
+        expect(resolveCodexFingerprintMode(provider({ codexFingerprintMode: 'device' }), { CODEX_FINGERPRINT_ENABLED: true })).toBe('device');
+        expect(resolveCodexFingerprintMode(provider({ codexFingerprintMode: 'session' }), { CODEX_FINGERPRINT_ENABLED: true })).toBe('session');
+        expect(resolveCodexFingerprintMode(provider({ codexFingerprintMode: 'full' }), { CODEX_FINGERPRINT_ENABLED: true })).toBe('full');
         expect(resolveCodexFingerprintMode(provider({ codexFingerprintMode: 'off' }), {})).toBe('off');
         expect(resolveCodexFingerprintMode({ MODEL_PROVIDER: 'openai-custom' }, {})).toBe('off');
         expect(resolveCodexFingerprintMode(provider(), { CODEX_FINGERPRINT_ENABLED: false })).toBe('off');
@@ -26,23 +29,23 @@ describe('Codex OAuth fingerprint convergence', () => {
 
     test('derives stable account ids and session-scoped threads', () => {
         const first = resolveCodexFingerprintIds({
-            providerConfig: provider(),
-            globalConfig: {},
+            providerConfig: provider({ codexFingerprintMode: 'session' }),
+            globalConfig: { CODEX_FINGERPRINT_ENABLED: true },
             originalClientSessionId: 'client-session-a'
         });
         const repeated = resolveCodexFingerprintIds({
-            providerConfig: provider(),
-            globalConfig: {},
+            providerConfig: provider({ codexFingerprintMode: 'session' }),
+            globalConfig: { CODEX_FINGERPRINT_ENABLED: true },
             originalClientSessionId: 'client-session-a'
         });
         const otherClient = resolveCodexFingerprintIds({
-            providerConfig: provider(),
-            globalConfig: {},
+            providerConfig: provider({ codexFingerprintMode: 'session' }),
+            globalConfig: { CODEX_FINGERPRINT_ENABLED: true },
             originalClientSessionId: 'client-session-b'
         });
         const otherAccount = resolveCodexFingerprintIds({
-            providerConfig: provider({ uuid: 'provider-b', codexAccountKey: 'account-b' }),
-            globalConfig: {},
+            providerConfig: provider({ uuid: 'provider-b', codexAccountKey: 'account-b', codexFingerprintMode: 'session' }),
+            globalConfig: { CODEX_FINGERPRINT_ENABLED: true },
             originalClientSessionId: 'client-session-a'
         });
 
@@ -58,14 +61,17 @@ describe('Codex OAuth fingerprint convergence', () => {
     test('full mode converges threads while device mode only changes installation identity', () => {
         const fullA = resolveCodexFingerprintIds({
             providerConfig: provider({ codexFingerprintMode: 'full' }),
+            globalConfig: { CODEX_FINGERPRINT_ENABLED: true },
             originalClientSessionId: 'client-a'
         });
         const fullB = resolveCodexFingerprintIds({
             providerConfig: provider({ codexFingerprintMode: 'full' }),
+            globalConfig: { CODEX_FINGERPRINT_ENABLED: true },
             originalClientSessionId: 'client-b'
         });
         const device = resolveCodexFingerprintIds({
             providerConfig: provider({ codexFingerprintMode: 'device' }),
+            globalConfig: { CODEX_FINGERPRINT_ENABLED: true },
             originalClientSessionId: 'client-a'
         });
 
@@ -90,7 +96,8 @@ describe('Codex OAuth fingerprint convergence', () => {
 
     test('rewrites headers and client metadata with one shared id set', () => {
         const ids = resolveCodexFingerprintIds({
-            providerConfig: provider(),
+            providerConfig: provider({ codexFingerprintMode: 'session' }),
+            globalConfig: { CODEX_FINGERPRINT_ENABLED: true },
             originalClientSessionId: 'client-session-a'
         });
         const headers = {
@@ -132,7 +139,11 @@ describe('Codex OAuth fingerprint convergence', () => {
         expect(headers).toEqual(originalHeaders);
         expect(body).toEqual(originalBody);
 
-        const ids = resolveCodexFingerprintIds({ providerConfig: provider(), originalClientSessionId: 'client' });
+        const ids = resolveCodexFingerprintIds({
+            providerConfig: provider({ codexFingerprintMode: 'session' }),
+            globalConfig: { CODEX_FINGERPRINT_ENABLED: true },
+            originalClientSessionId: 'client'
+        });
         expect(() => applyCodexFingerprintHeaders(headers, ids)).not.toThrow();
         expect(() => applyCodexFingerprintClientMetadata(body, ids)).not.toThrow();
         expect(headers['x-codex-turn-metadata']).toBe('{bad-json');
@@ -140,7 +151,11 @@ describe('Codex OAuth fingerprint convergence', () => {
     });
 
     test('removes case-insensitive header collisions before applying converged IDs', () => {
-        const ids = resolveCodexFingerprintIds({ providerConfig: provider(), originalClientSessionId: 'client' });
+        const ids = resolveCodexFingerprintIds({
+            providerConfig: provider({ codexFingerprintMode: 'session' }),
+            globalConfig: { CODEX_FINGERPRINT_ENABLED: true },
+            originalClientSessionId: 'client'
+        });
         const headers = {
             Session_id: 'cache-session',
             SESSION_ID: 'legacy-session',

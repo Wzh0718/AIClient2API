@@ -39,7 +39,7 @@ function provider(uuid, overrides = {}) {
         customName: uuid,
         codexAccountKey: `account-${uuid}`,
         lastKnownCodexPlan: 'pro',
-        supportedModels: ['gpt-5.4-mini'],
+        supportedModels: ['gpt-5.3-codex-spark', 'gpt-5.4-mini', 'gpt-5.6-luna'],
         ...overrides
     };
 }
@@ -129,8 +129,8 @@ describe('Service Manager Codex credential-group routing', () => {
         const manager = await initialize(config);
         const selectSpy = jest.spyOn(manager, 'selectProviderWithFallback');
 
-        const basicService = await getApiService(config, 'gpt-5.4-mini');
-        const detailed = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
+        const basicService = await getApiService(config, 'gpt-5.3-codex-spark');
+        const detailed = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark');
 
         expect(basicService.providerUuid).toBe('codex-b');
         expect(detailed.uuid).toBe('codex-b');
@@ -374,7 +374,7 @@ describe('Service Manager Codex credential-group routing', () => {
         });
     });
 
-    test('pool routing falls back unavailable 5.4 mini requests to Luna', async () => {
+    test('pool routing sends the 5.4 family directly to Luna', async () => {
         writeGroupConfig({ groups: [], keyAssignments: [{ keyId: 'key-1', routingMode: 'pool' }] });
         const config = createConfig({
             providers: [
@@ -389,23 +389,18 @@ describe('Service Manager Codex credential-group routing', () => {
 
         expect(result).toMatchObject({
             actualModel: 'gpt-5.6-luna',
-            isFallback: true,
-            modelFallbackFrom: 'gpt-5.4-mini',
-            modelFallbackTo: 'gpt-5.6-luna'
+            isFallback: false
         });
         expect(config._codexRouting).toMatchObject({ routingMode: 'pool', selectedGroupId: null });
         expect(config._codexRouteResult).toMatchObject({
             routingMode: 'pool',
             selectedProviderUuid: result.uuid,
             actualModel: 'gpt-5.6-luna',
-            modelFallbackFrom: 'gpt-5.4-mini',
-            modelFallbackTo: 'gpt-5.6-luna',
-            modelFallbackReason: 'SOURCE_MODEL_UNAVAILABLE',
             consistencyStatus: 'consistent'
         });
     });
 
-    test('fixed routing falls back only when the same credential supports Luna', async () => {
+    test('fixed routing sends 5.4 directly to Luna only when the same credential supports Luna', async () => {
         writeGroupConfig({
             groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
             keyAssignments: [{
@@ -425,10 +420,10 @@ describe('Service Manager Codex credential-group routing', () => {
 
         const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
 
-        expect(result).toMatchObject({ uuid: 'codex-a', actualModel: 'gpt-5.6-luna', isFallback: true });
+        expect(result).toMatchObject({ uuid: 'codex-a', actualModel: 'gpt-5.6-luna', isFallback: false });
     });
 
-    test('fixed routing fails closed when a 429 source credential does not support Luna', async () => {
+    test('fixed routing fails closed when the credential does not support the direct Luna target', async () => {
         writeGroupConfig({
             groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
             keyAssignments: [{
@@ -444,8 +439,7 @@ describe('Service Manager Codex credential-group routing', () => {
                 fixedCredential: { providerType, uuid: 'codex-a' }
             }
         });
-        const manager = await initialize(config);
-        jest.spyOn(manager, 'selectProviderWithFallback').mockRejectedValueOnce(Object.assign(new Error('rate limited'), { status: 429, code: 429 }));
+        await initialize(config);
 
         await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toMatchObject({
             code: 'FIXED_CREDENTIAL_UNAVAILABLE'
@@ -476,10 +470,8 @@ describe('Service Manager Codex credential-group routing', () => {
         const selectSpy = jest.spyOn(manager, 'selectProviderWithFallback');
 
         await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toThrow('No healthy provider found');
-        expect(selectSpy).toHaveBeenCalledTimes(2);
-        expect(selectSpy.mock.calls[0]).toEqual(expect.arrayContaining([providerType, 'gpt-5.4-mini']));
+        expect(selectSpy).toHaveBeenCalledTimes(1);
+        expect(selectSpy.mock.calls[0]).toEqual(expect.arrayContaining([providerType, 'gpt-5.6-luna']));
         expect(selectSpy.mock.calls[0][2]).toMatchObject({ disableProviderFallback: true });
-        expect(selectSpy.mock.calls[1]).toEqual(expect.arrayContaining([providerType, 'gpt-5.6-luna']));
-        expect(selectSpy.mock.calls[1][2]).toMatchObject({ disableProviderFallback: true });
     });
 });
