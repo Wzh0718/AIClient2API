@@ -26,6 +26,24 @@ describe('RuntimeHookBridge', () => {
         expect(messages).toHaveLength(0);
     });
 
+    test('does not resurrect an outbound event when its durable ACK arrives before publish resolves', async () => {
+        let bridge;
+        const durableTransport = {
+            publish: jest.fn(async event => {
+                await bridge.ack(event.eventId);
+                return { persisted: true, streamId: '1-0' };
+            }),
+            acknowledge: jest.fn().mockResolvedValue(undefined),
+            snapshot: () => ({ spooled: 0, spoolBytes: 0 })
+        };
+        bridge = new RuntimeHookBridge({ send: jest.fn(), durableTransport });
+
+        await bridge.handle('onRequestCompleted', { requestId: 'fast-ack' });
+
+        expect(bridge.snapshot()).toMatchObject({ pending: 0 });
+        expect(durableTransport.acknowledge).toHaveBeenCalledTimes(1);
+    });
+
     test('persists only a key hash in durable runtime events', async () => {
         const published = [];
         const bridge = new RuntimeHookBridge({

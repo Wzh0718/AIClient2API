@@ -126,19 +126,25 @@ export class RuntimeHookBridge {
             sourceWorkerId: process.env.RUNTIME_WORKER_ID || null,
             createdAt: new Date().toISOString()
         };
-        if (this.durableTransport) {
-            const durableEvent = JSON.parse(JSON.stringify(outbound));
-            for (const arg of durableEvent.args || []) {
-                if (arg?.potluckApiKey) {
-                    arg.potluckKeyHash = hashSecret(arg.potluckApiKey, 16);
-                    delete arg.potluckApiKey;
-                }
-            }
-            const durableResult = await this.durableTransport.publish(durableEvent);
-            if (durableResult?.streamId) outbound.streamId = durableResult.streamId;
-        }
-        if (this.outbound.size < this.maxPending) this.outbound.set(eventId, outbound);
+        const tracked = this.outbound.size < this.maxPending;
+        if (tracked) this.outbound.set(eventId, outbound);
         else this.backpressured += 1;
+        try {
+            if (this.durableTransport) {
+                const durableEvent = JSON.parse(JSON.stringify(outbound));
+                for (const arg of durableEvent.args || []) {
+                    if (arg?.potluckApiKey) {
+                        arg.potluckKeyHash = hashSecret(arg.potluckApiKey, 16);
+                        delete arg.potluckApiKey;
+                    }
+                }
+                const durableResult = await this.durableTransport.publish(durableEvent);
+                if (durableResult?.streamId) outbound.streamId = durableResult.streamId;
+            }
+        } catch (error) {
+            if (tracked) this.outbound.delete(eventId);
+            throw error;
+        }
         if (!this.durableTransport) this.send?.(outbound);
         return true;
     }
