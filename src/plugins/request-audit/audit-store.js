@@ -21,17 +21,24 @@ function archiveTimestamp(value = new Date()) {
     return value.toISOString().replace(/[-:]/g, '').replace('.', '');
 }
 
+const DEFAULT_RECENT_EVENT_ID_LIMIT = 20_000;
+const DEFAULT_EVENT_ID_TAIL_BYTES = 8 * 1024 * 1024;
+
 export class RequestAuditStore {
     constructor({
         dir = path.join(process.cwd(), 'configs', 'request-audit'),
         archiveDir,
         retentionHours = 24,
-        maxFileBytes = 100 * 1024 * 1024
+        maxFileBytes = 100 * 1024 * 1024,
+        recentEventIdLimit = DEFAULT_RECENT_EVENT_ID_LIMIT,
+        eventIdTailBytes = DEFAULT_EVENT_ID_TAIL_BYTES
     } = {}) {
         this.dir = dir;
         this.archiveDir = archiveDir || path.join(this.dir, 'archived-large');
         this.retentionHours = Number(retentionHours) || 24;
         this.maxFileBytes = Number(maxFileBytes) || 100 * 1024 * 1024;
+        this.recentEventIdLimit = Math.max(1, Number(recentEventIdLimit) || DEFAULT_RECENT_EVENT_ID_LIMIT);
+        this.eventIdTailBytes = Math.max(1024, Number(eventIdTailBytes) || DEFAULT_EVENT_ID_TAIL_BYTES);
         this.eventIdsByFile = new Map();
     }
 
@@ -40,33 +47,83 @@ export class RequestAuditStore {
     }
 
     async append(event) {
+        const result = await this.appendBatch([event]);
+        return result.results[0] || { appended: false, duplicate: false };
+    }
+
+    async appendBatch(events = []) {
         await fsp.mkdir(this.dir, { recursive: true });
-        const filePath = this.getFilePath(event?.timestamp);
-        const eventId = event?.eventId || null;
-        if (eventId) {
-            const eventIds = await this.loadEventIds(filePath);
-            if (eventIds.has(eventId)) return { appended: false, duplicate: true };
+        const grouped = new Map();
+        const results = new Array(events.length);
+        for (const [index, event] of events.entries()) {
+            const filePath = this.getFilePath(event?.timestamp);
+            if (!grouped.has(filePath)) grouped.set(filePath, []);
+            grouped.get(filePath).push({ event, index });
         }
-        const line = `${JSON.stringify(event)}\n`;
-        await this.rotateIfNeeded(filePath, Buffer.byteLength(line, 'utf8'));
-        await fsp.appendFile(filePath, line, { encoding: 'utf8', mode: 0o600 });
-        if (eventId) {
+
+        for (const [filePath, entries] of grouped.entries()) {
             const eventIds = await this.loadEventIds(filePath);
-            eventIds.add(eventId);
+            const accepted = [];
+            const batchIds = new Set();
+            for (const entry of entries) {
+                const eventId = entry.event?.eventId || null;
+                if (eventId && (eventIds.has(eventId) || batchIds.has(eventId))) {
+                    results[entry.index] = { appended: false, duplicate: true };
+                    continue;
+                }
+                accepted.push(entry);
+                if (eventId) batchIds.add(eventId);
+            }
+            if (accepted.length === 0) continue;
+            const content = accepted.map(({ event }) => JSON.stringify(event)).join('\n') + '\n';
+            await this.rotateIfNeeded(filePath, Buffer.byteLength(content, 'utf8'));
+            await fsp.appendFile(filePath, content, { encoding: 'utf8', mode: 0o600 });
+            for (const { event, index } of accepted) {
+                if (event?.eventId) this.rememberEventId(eventIds, event.eventId);
+                results[index] = { appended: true, duplicate: false };
+            }
         }
-        return { appended: true, duplicate: false };
+        return {
+            appended: results.filter(result => result?.appended).length,
+            duplicates: results.filter(result => result?.duplicate).length,
+            results
+        };
     }
 
     async loadEventIds(filePath) {
         if (this.eventIdsByFile.has(filePath)) return this.eventIdsByFile.get(filePath);
         const eventIds = new Set();
         if (fs.existsSync(filePath)) {
-            for await (const event of this.readEvents(filePath)) {
-                if (event?.eventId) eventIds.add(event.eventId);
+            const handle = await fsp.open(filePath, 'r');
+            try {
+                const stat = await handle.stat();
+                const readBytes = Math.min(stat.size, this.eventIdTailBytes);
+                const buffer = Buffer.alloc(readBytes);
+                await handle.read(buffer, 0, readBytes, Math.max(0, stat.size - readBytes));
+                const lines = buffer.toString('utf8').split('\n');
+                if (stat.size > readBytes) lines.shift();
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    try {
+                        const event = JSON.parse(line);
+                        if (event?.eventId) this.rememberEventId(eventIds, event.eventId);
+                    } catch {}
+                }
+            } finally {
+                await handle.close();
             }
         }
         this.eventIdsByFile.set(filePath, eventIds);
         return eventIds;
+    }
+
+    rememberEventId(eventIds, eventId) {
+        if (!eventId) return;
+        if (eventIds.has(eventId)) eventIds.delete(eventId);
+        eventIds.add(eventId);
+        while (eventIds.size > this.recentEventIdLimit) {
+            eventIds.delete(eventIds.values().next().value);
+        }
     }
 
     async query(filters = {}) {

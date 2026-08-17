@@ -629,6 +629,35 @@ class PluginManager {
         );
     }
 
+    async executeUsageProjectionBatch(pluginName, items = []) {
+        const plugin = this.plugins.get(pluginName);
+        if (!plugin || plugin._enabled !== true) {
+            return { completed: items, failed: [] };
+        }
+        const completed = [];
+        const failed = [];
+        try {
+            await plugin.beginUsageProjectionBatch?.();
+            for (const item of items) {
+                try {
+                    await this.executeUsageProjection(pluginName, item.hookName, item.args, item.eventId);
+                    completed.push(item);
+                } catch (error) {
+                    failed.push({ ...item, error: error?.message || String(error) });
+                }
+            }
+            await plugin.commitUsageProjectionBatch?.();
+            return { completed, failed };
+        } catch (error) {
+            await plugin.rollbackUsageProjectionBatch?.();
+            return {
+                completed: [],
+                failed: items.map(item => ({ ...item, error: error?.message || String(error) })),
+                requiresRestart: true
+            };
+        }
+    }
+
     executePluginOperation(plugin, operationName, fn, operationTimeoutMs = PLUGIN_OPERATION_TIMEOUT_MS) {
         const operationPromise = Promise.resolve().then(fn);
         if (operationTimeoutMs === null) {

@@ -66,8 +66,16 @@ export class UsageEventStore {
         return this._call('completeProjection', { eventId, projectionName });
     }
 
+    completeProjections(items) {
+        return this._call('completeProjections', { items });
+    }
+
     failProjection({ eventId, projectionName, error, retryDelayMs = 1000 }) {
         return this._call('failProjection', { eventId, projectionName, error, retryDelayMs });
+    }
+
+    failProjections(items) {
+        return this._call('failProjections', { items });
     }
 
     snapshot() {

@@ -104,6 +104,55 @@ describe('runtime usage event store', () => {
         expect(snapshot.projections['request-audit'].lag).toBe(1);
     });
 
+    test('completes and fails projection batches with one durable store call', async () => {
+        store = createUsageEventStore({ dbPath: path.join(dir, 'usage.sqlite') });
+        await store.appendBatch([event('batch-a'), event('batch-b')]);
+
+        await store.completeProjections([
+            { eventId: 'batch-a', projectionName: 'api-potluck' },
+            { eventId: 'batch-b', projectionName: 'api-potluck' }
+        ]);
+        await store.failProjections([
+            {
+                eventId: 'batch-a',
+                projectionName: 'model-usage-stats',
+                error: 'temporary batch failure',
+                retryDelayMs: 0
+            },
+            {
+                eventId: 'batch-b',
+                projectionName: 'model-usage-stats',
+                error: 'temporary batch failure',
+                retryDelayMs: 0
+            }
+        ]);
+
+        const remaining = await store.listPendingProjections({ limit: 20 });
+        expect(remaining.filter(item => item.projectionName === 'api-potluck')).toHaveLength(0);
+        expect(remaining.filter(item => item.projectionName === 'model-usage-stats')).toHaveLength(2);
+        const snapshot = await store.snapshot();
+        expect(snapshot.projections['api-potluck'].lag).toBe(0);
+        expect(snapshot.projections['model-usage-stats']).toMatchObject({
+            lag: 2,
+            lastError: 'temporary batch failure'
+        });
+    });
+
+    test('compacts completed payloads while retaining lightweight eventId deduplication', async () => {
+        store = createUsageEventStore({ dbPath: path.join(dir, 'usage.sqlite') });
+        await store.appendBatch([event('compact-after-projection')]);
+        const pending = await store.listPendingProjections({ limit: 10 });
+
+        await store.completeProjections(pending);
+
+        const snapshot = await store.snapshot();
+        expect(snapshot).toMatchObject({ events: 1, rawEvents: 0, pending: 0 });
+        expect(Object.values(snapshot.projections).every(projection => projection.lag === 0)).toBe(true);
+        const replay = await store.appendBatch([event('compact-after-projection')]);
+        expect(replay).toMatchObject({ inserted: 0, duplicates: 1, pendingEventIds: [] });
+        expect(await store.countEvents()).toBe(1);
+    });
+
     test('records bounded batch and persistence metrics without serializing a key store', async () => {
         store = createUsageEventStore({ dbPath: path.join(dir, 'usage.sqlite') });
         const events = Array.from({ length: 1000 }, (_, index) => event(`event-${index}`));
@@ -116,12 +165,17 @@ describe('runtime usage event store', () => {
         expect(snapshot.lastCommitMs).toBeGreaterThanOrEqual(0);
     });
 
-    test('prunes only events older than the configured retention window', async () => {
+    test('prunes only compacted dedupe rows older than retention and never drops pending payloads', async () => {
         store = createUsageEventStore({ dbPath: path.join(dir, 'usage.sqlite') });
         await store.appendBatch([
             { ...event('old'), createdAt: '2026-06-01T00:00:00.000Z' },
             { ...event('recent'), createdAt: '2026-08-16T00:00:00.000Z' }
         ]);
+        const pendingResult = await store.prune({ before: '2026-07-01T00:00:00.000Z' });
+        expect(pendingResult.deleted).toBe(0);
+        expect(await store.countEvents()).toBe(2);
+
+        await store.markProjected(['old']);
         const result = await store.prune({ before: '2026-07-01T00:00:00.000Z' });
         expect(result.deleted).toBe(1);
         expect(await store.countEvents()).toBe(1);

@@ -31,6 +31,7 @@ let acceptingAuditContext = false;
 let destroyPromise = null;
 let auditLossCounts = new Map();
 let backgroundFailureCounts = new Map();
+let runtimeProjectionBatch = null;
 
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_AUDIT_QUEUE_EVENTS = 1000;
@@ -177,6 +178,10 @@ async function enqueueFinalAudit(context = {}) {
         }
     }
     if (context._runtimeEventId) {
+        if (runtimeProjectionBatch) {
+            runtimeProjectionBatch.push({ event, rawCaptureEvent, requestId });
+            return;
+        }
         await store.append(event);
         if (rawCaptureEvent && rawCaptureStore) {
             const result = await rawCaptureStore.capture(rawCaptureEvent);
@@ -464,6 +469,36 @@ const requestAuditPlugin = {
     type: 'middleware',
     _builtin: true,
     _priority: 8990,
+
+    beginUsageProjectionBatch() {
+        if (runtimeProjectionBatch) throw new Error('Request audit projection batch is already active');
+        runtimeProjectionBatch = [];
+    },
+
+    async commitUsageProjectionBatch() {
+        const batch = runtimeProjectionBatch || [];
+        runtimeProjectionBatch = null;
+        if (batch.length === 0) return;
+        await store.appendBatch(batch.map(item => item.event));
+        for (const item of batch) {
+            if (item.rawCaptureEvent && rawCaptureStore) {
+                const result = await rawCaptureStore.capture(item.rawCaptureEvent);
+                if (result?.stopReason) await disableRawCapture(result.stopReason);
+            }
+            rememberFinalizedRequest(item.requestId);
+            pendingUsage.delete(item.requestId);
+            pendingAuditContexts.delete(item.requestId);
+        }
+    },
+
+    rollbackUsageProjectionBatch() {
+        const batch = runtimeProjectionBatch || [];
+        runtimeProjectionBatch = null;
+        for (const item of batch) {
+            pendingUsage.delete(item.requestId);
+            pendingAuditContexts.delete(item.requestId);
+        }
+    },
     staticPaths: ['request-audit.html'],
     routes: [
         {

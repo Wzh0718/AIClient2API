@@ -4,6 +4,8 @@ import Database from 'better-sqlite3';
 
 let database = null;
 let databasePath = null;
+let modelEventStatements = null;
+let modelEventBatchActive = false;
 
 function getDatabase() {
     const target = process.env.USAGE_EVENT_DB_PATH
@@ -14,7 +16,7 @@ function getDatabase() {
     database = new Database(target);
     databasePath = target;
     database.pragma('journal_mode = WAL');
-    database.pragma('synchronous = FULL');
+    database.pragma('synchronous = NORMAL');
     database.pragma('busy_timeout = 5000');
     database.exec(`
         CREATE TABLE IF NOT EXISTS model_usage_state (
@@ -66,19 +68,95 @@ function getDatabase() {
     return database;
 }
 
+function getModelEventStatements() {
+    const db = getDatabase();
+    if (modelEventStatements?.db === db) return modelEventStatements;
+    const statements = {
+        db,
+        hasApplied: db.prepare('SELECT 1 FROM model_usage_applied_events WHERE event_id = ?'),
+        recordEvent: db.prepare('INSERT INTO model_usage_applied_events (event_id) VALUES (?)'),
+        upsertMeta: db.prepare(`
+            INSERT INTO model_usage_meta (singleton, updated_at_value, summary_json)
+            VALUES (1, ?, ?)
+            ON CONFLICT(singleton) DO UPDATE SET
+                updated_at_value = excluded.updated_at_value,
+                summary_json = excluded.summary_json
+        `),
+        upsertProvider: db.prepare(`
+            INSERT INTO model_usage_providers (provider_name, state_json) VALUES (?, ?)
+            ON CONFLICT(provider_name) DO UPDATE SET state_json = excluded.state_json
+        `),
+        upsertAccount: db.prepare(`
+            INSERT INTO model_usage_accounts (account_key, state_json) VALUES (?, ?)
+            ON CONFLICT(account_key) DO UPDATE SET state_json = excluded.state_json
+        `),
+        insertAccountEvent: db.prepare(`
+            INSERT OR IGNORE INTO model_usage_account_event_rows (
+                account_key, event_id, event_timestamp, total_tokens
+            ) VALUES (?, ?, ?, ?)
+        `),
+        upsertDaily: db.prepare(`
+            INSERT INTO model_usage_daily (usage_date, state_json) VALUES (?, ?)
+            ON CONFLICT(usage_date) DO UPDATE SET state_json = excluded.state_json
+        `),
+        recordMetrics: db.prepare(`
+            UPDATE model_usage_write_metrics
+            SET event_writes = event_writes + 1,
+                event_bytes = event_bytes + ?
+            WHERE singleton = 1
+        `)
+    };
+    statements.applyOne = ({ eventId, state, provider, accountKey, dateKey, accountEvent, parts, eventBytes }) => {
+        statements.upsertMeta.run(state.updatedAt || null, parts[0]);
+        if (provider) statements.upsertProvider.run(provider, parts[1]);
+        if (accountKey) {
+            statements.upsertAccount.run(accountKey, parts[2]);
+            const latestEvent = accountEvent || (state.accountUsageEvents?.[accountKey] || []).at(-1);
+            if (latestEvent) {
+                statements.insertAccountEvent.run(
+                    accountKey,
+                    eventId,
+                    latestEvent.timestamp,
+                    Number(latestEvent.totalTokens || 0)
+                );
+            }
+        }
+        if (dateKey) statements.upsertDaily.run(dateKey, parts[3]);
+        statements.recordEvent.run(eventId);
+        statements.recordMetrics.run(eventBytes);
+    };
+    statements.apply = db.transaction(statements.applyOne);
+    modelEventStatements = statements;
+    return statements;
+}
+
+export function loadModelAccountUsageEvents(accountKey, { since = null, until = null } = {}) {
+    if (!accountKey) return [];
+    const clauses = ['account_key = ?'];
+    const parameters = [accountKey];
+    if (since) {
+        clauses.push('event_timestamp >= ?');
+        parameters.push(since instanceof Date ? since.toISOString() : String(since));
+    }
+    if (until) {
+        clauses.push('event_timestamp <= ?');
+        parameters.push(until instanceof Date ? until.toISOString() : String(until));
+    }
+    return getDatabase().prepare(`
+        SELECT event_timestamp AS timestamp, total_tokens AS totalTokens
+        FROM model_usage_account_event_rows
+        WHERE ${clauses.join(' AND ')}
+        ORDER BY event_timestamp
+    `).all(...parameters).map(row => ({
+        timestamp: row.timestamp,
+        totalTokens: Number(row.totalTokens || 0)
+    }));
+}
+
 export function loadModelUsageState() {
     const db = getDatabase();
     const meta = db.prepare('SELECT updated_at_value, summary_json FROM model_usage_meta WHERE singleton = 1').get();
     if (meta) {
-        const rowEvents = {};
-        for (const row of db.prepare(`
-            SELECT account_key, event_timestamp, total_tokens
-            FROM model_usage_account_event_rows
-            ORDER BY account_key, event_timestamp
-        `).all()) {
-            if (!rowEvents[row.account_key]) rowEvents[row.account_key] = [];
-            rowEvents[row.account_key].push({ timestamp: row.event_timestamp, totalTokens: row.total_tokens });
-        }
         const legacyEvents = Object.fromEntries(db.prepare('SELECT account_key, events_json FROM model_usage_account_events').all()
             .map(row => [row.account_key, JSON.parse(row.events_json)]));
         return {
@@ -90,7 +168,7 @@ export function loadModelUsageState() {
                 .map(row => [row.account_key, JSON.parse(row.state_json)])),
             daily: Object.fromEntries(db.prepare('SELECT usage_date, state_json FROM model_usage_daily').all()
                 .map(row => [row.usage_date, JSON.parse(row.state_json)])),
-            accountUsageEvents: Object.keys(rowEvents).length > 0 ? rowEvents : legacyEvents
+            accountUsageEvents: legacyEvents
         };
     }
     const row = db.prepare('SELECT state_json FROM model_usage_state WHERE singleton = 1').get();
@@ -102,7 +180,7 @@ export function loadModelUsageState() {
 
 export function hasAppliedModelUsageEvent(eventId) {
     if (!eventId) return false;
-    return Boolean(getDatabase().prepare('SELECT 1 FROM model_usage_applied_events WHERE event_id = ?').get(eventId));
+    return Boolean(getModelEventStatements().hasApplied.get(eventId));
 }
 
 export function persistModelUsageState(state) {
@@ -150,14 +228,13 @@ export function persistModelUsageState(state) {
     })();
 }
 
-export function persistModelUsageEvent(eventId, state, { provider, accountKey, dateKey } = {}) {
+export function persistModelUsageEvent(eventId, state, { provider, accountKey, dateKey, accountEvent = null } = {}) {
     if (!eventId) {
         persistModelUsageState(state);
         return { applied: true, duplicate: false };
     }
-    const db = getDatabase();
-    if (hasAppliedModelUsageEvent(eventId)) return { applied: false, duplicate: true };
-    const recordEvent = db.prepare('INSERT INTO model_usage_applied_events (event_id) VALUES (?)');
+    const statements = getModelEventStatements();
+    if (statements.hasApplied.get(eventId)) return { applied: false, duplicate: true };
     const parts = [
         JSON.stringify(state.summary || {}),
         provider ? JSON.stringify(state.providers?.[provider] || {}) : '',
@@ -165,47 +242,55 @@ export function persistModelUsageEvent(eventId, state, { provider, accountKey, d
         dateKey ? JSON.stringify(state.daily?.[dateKey] || {}) : '',
         accountKey ? JSON.stringify((state.accountUsageEvents?.[accountKey] || []).at(-1) || {}) : ''
     ];
-    db.transaction(() => {
-        db.prepare(`
-            INSERT INTO model_usage_meta (singleton, updated_at_value, summary_json)
-            VALUES (1, ?, ?)
-            ON CONFLICT(singleton) DO UPDATE SET
-                updated_at_value = excluded.updated_at_value,
-                summary_json = excluded.summary_json
-        `).run(state.updatedAt || null, parts[0]);
-        if (provider) db.prepare(`
-            INSERT INTO model_usage_providers (provider_name, state_json) VALUES (?, ?)
-            ON CONFLICT(provider_name) DO UPDATE SET state_json = excluded.state_json
-        `).run(provider, parts[1]);
-        if (accountKey) {
-            db.prepare(`
-                INSERT INTO model_usage_accounts (account_key, state_json) VALUES (?, ?)
-                ON CONFLICT(account_key) DO UPDATE SET state_json = excluded.state_json
-            `).run(accountKey, parts[2]);
-            const latestEvent = (state.accountUsageEvents?.[accountKey] || []).at(-1);
-            if (latestEvent) db.prepare(`
-                INSERT OR IGNORE INTO model_usage_account_event_rows (
-                    account_key, event_id, event_timestamp, total_tokens
-                ) VALUES (?, ?, ?, ?)
-            `).run(accountKey, eventId, latestEvent.timestamp, Number(latestEvent.totalTokens || 0));
-        }
-        if (dateKey) db.prepare(`
-            INSERT INTO model_usage_daily (usage_date, state_json) VALUES (?, ?)
-            ON CONFLICT(usage_date) DO UPDATE SET state_json = excluded.state_json
-        `).run(dateKey, parts[3]);
-        recordEvent.run(eventId);
-        db.prepare(`
-            UPDATE model_usage_write_metrics
-            SET event_writes = event_writes + 1,
-                event_bytes = event_bytes + ?
-            WHERE singleton = 1
-        `).run(parts.reduce((total, part) => total + Buffer.byteLength(part, 'utf8'), 0));
-    })();
+    const event = {
+        eventId,
+        state,
+        provider,
+        accountKey,
+        dateKey,
+        accountEvent,
+        parts,
+        eventBytes: parts.reduce((total, part) => total + Buffer.byteLength(part, 'utf8'), 0)
+    };
+    if (modelEventBatchActive) statements.applyOne(event);
+    else statements.apply(event);
     return { applied: true, duplicate: false };
 }
 
+export function beginModelUsageEventBatch() {
+    if (modelEventBatchActive) throw new Error('Model usage event batch is already active');
+    getDatabase().exec('BEGIN IMMEDIATE');
+    modelEventBatchActive = true;
+}
+
+export function commitModelUsageEventBatch() {
+    if (!modelEventBatchActive) return;
+    try {
+        getDatabase().exec('COMMIT');
+        modelEventBatchActive = false;
+    } catch (error) {
+        try {
+            getDatabase().exec('ROLLBACK');
+        } finally {
+            modelEventBatchActive = false;
+        }
+        throw error;
+    }
+}
+
+export function rollbackModelUsageEventBatch() {
+    if (!modelEventBatchActive) return;
+    try {
+        getDatabase().exec('ROLLBACK');
+    } finally {
+        modelEventBatchActive = false;
+    }
+}
+
 export function closeModelUsageStore() {
+    if (modelEventBatchActive) rollbackModelUsageEventBatch();
     database?.close();
     database = null;
     databasePath = null;
+    modelEventStatements = null;
 }

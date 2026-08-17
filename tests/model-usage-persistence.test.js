@@ -138,6 +138,17 @@ describe('model usage stats persistence', () => {
         } finally {
             database.close();
         }
+        const stats = await statsManager.getStats();
+        expect(stats.accountUsageEvents).toEqual({});
+        expect(statsManager.getAccountTokenUsageSummary(
+            'openai-codex-oauth',
+            'codex-account-a',
+            { accountEmail: 'user@example.com', now: new Date('2026-07-22T02:00:00.000Z') }
+        )).toMatchObject({
+            rolling5hTokens: 1000,
+            weeklyTokens: 1000,
+            totalTokens: 1000
+        });
     });
 
     test('resetStats replaces the durable SQLite state used after restart', async () => {

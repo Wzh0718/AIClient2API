@@ -5,6 +5,8 @@ import Database from 'better-sqlite3';
 
 let database = null;
 let databasePath = null;
+let usageEventStatements = null;
+let usageEventBatchActive = false;
 
 function keyRef(apiKey) {
     return `sha256:${crypto.createHash('sha256').update(String(apiKey)).digest('hex').slice(0, 16)}`;
@@ -19,7 +21,7 @@ function getDatabase() {
     database = new Database(target);
     databasePath = target;
     database.pragma('journal_mode = WAL');
-    database.pragma('synchronous = FULL');
+    database.pragma('synchronous = NORMAL');
     database.pragma('busy_timeout = 5000');
     database.exec(`
         CREATE TABLE IF NOT EXISTS potluck_usage_history (
@@ -62,6 +64,55 @@ function getDatabase() {
         INSERT OR IGNORE INTO potluck_usage_write_metrics (singleton) VALUES (1);
     `);
     return database;
+}
+
+function getUsageEventStatements() {
+    const db = getDatabase();
+    if (usageEventStatements?.db === db) return usageEventStatements;
+    const statements = {
+        db,
+        hasApplied: db.prepare('SELECT 1 FROM potluck_applied_events WHERE event_id = ?'),
+        upsertDay: db.prepare(`
+            INSERT INTO potluck_usage_history (key_ref, usage_date, day_json, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key_ref, usage_date) DO UPDATE SET
+                day_json = excluded.day_json,
+                updated_at = CURRENT_TIMESTAMP
+        `),
+        recordEvent: db.prepare('INSERT INTO potluck_applied_events (event_id, key_ref) VALUES (?, ?)'),
+        upsertModel: db.prepare(`
+            INSERT INTO potluck_usage_model_totals (key_ref, model_name, usage_json, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key_ref, model_name) DO UPDATE SET
+                usage_json = excluded.usage_json,
+                updated_at = CURRENT_TIMESTAMP
+        `),
+        trimHistory: db.prepare(`
+            DELETE FROM potluck_usage_history
+            WHERE key_ref = ? AND usage_date NOT IN (
+                SELECT usage_date FROM potluck_usage_history
+                WHERE key_ref = ? ORDER BY usage_date DESC LIMIT ?
+            )
+        `),
+        recordMetrics: db.prepare(`
+            UPDATE potluck_usage_write_metrics
+            SET event_day_writes = event_day_writes + 1,
+                event_model_writes = event_model_writes + ?
+            WHERE singleton = 1
+        `)
+    };
+    statements.applyOne = (ref, change, eventId) => {
+        statements.upsertDay.run(ref, change.usageDate, JSON.stringify(change.day));
+        if (change.modelName) {
+            statements.upsertModel.run(ref, change.modelName, JSON.stringify(change.modelUsage || {}));
+        }
+        statements.trimHistory.run(ref, ref, Math.max(1, Number(change.retentionDays || 35)));
+        statements.recordEvent.run(eventId, ref);
+        statements.recordMetrics.run(change.modelName ? 1 : 0);
+    };
+    statements.apply = db.transaction(statements.applyOne);
+    usageEventStatements = statements;
+    return statements;
 }
 
 export function loadUsageHistory(apiKey) {
@@ -140,61 +191,50 @@ export function persistUsageHistory(apiKey, usageHistory = {}, totalModels = {})
 
 export function hasAppliedUsageEvent(eventId) {
     if (!eventId) return false;
-    return Boolean(getDatabase().prepare(`
-        SELECT 1 FROM potluck_applied_events WHERE event_id = ?
-    `).get(eventId));
+    return Boolean(getUsageEventStatements().hasApplied.get(eventId));
 }
 
 export function persistUsageHistoryEvent(apiKey, change = {}, eventId) {
     if (!eventId) {
         return persistUsageHistory(apiKey, change.usageHistory || {}, change.totalModels || {});
     }
-    const db = getDatabase();
     const ref = keyRef(apiKey);
-    const alreadyApplied = db.prepare(`
-        SELECT 1 FROM potluck_applied_events WHERE event_id = ?
-    `).get(eventId);
+    const statements = getUsageEventStatements();
+    const alreadyApplied = statements.hasApplied.get(eventId);
     if (alreadyApplied) return { applied: false, duplicate: true };
-
-    const upsert = db.prepare(`
-        INSERT INTO potluck_usage_history (key_ref, usage_date, day_json, updated_at)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(key_ref, usage_date) DO UPDATE SET
-            day_json = excluded.day_json,
-            updated_at = CURRENT_TIMESTAMP
-    `);
-    const recordEvent = db.prepare(`
-        INSERT INTO potluck_applied_events (event_id, key_ref) VALUES (?, ?)
-    `);
-    const upsertModel = db.prepare(`
-        INSERT INTO potluck_usage_model_totals (key_ref, model_name, usage_json, updated_at)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(key_ref, model_name) DO UPDATE SET
-            usage_json = excluded.usage_json,
-            updated_at = CURRENT_TIMESTAMP
-    `);
-    db.transaction(() => {
-        upsert.run(ref, change.usageDate, JSON.stringify(change.day));
-        if (change.modelName) {
-            upsertModel.run(ref, change.modelName, JSON.stringify(change.modelUsage || {}));
-        }
-        const retentionDays = Math.max(1, Number(change.retentionDays || 35));
-        db.prepare(`
-            DELETE FROM potluck_usage_history
-            WHERE key_ref = ? AND usage_date NOT IN (
-                SELECT usage_date FROM potluck_usage_history
-                WHERE key_ref = ? ORDER BY usage_date DESC LIMIT ?
-            )
-        `).run(ref, ref, retentionDays);
-        recordEvent.run(eventId, ref);
-        db.prepare(`
-            UPDATE potluck_usage_write_metrics
-            SET event_day_writes = event_day_writes + 1,
-                event_model_writes = event_model_writes + ?
-            WHERE singleton = 1
-        `).run(change.modelName ? 1 : 0);
-    })();
+    if (usageEventBatchActive) statements.applyOne(ref, change, eventId);
+    else statements.apply(ref, change, eventId);
     return { applied: true, duplicate: false };
+}
+
+export function beginUsageHistoryEventBatch() {
+    if (usageEventBatchActive) throw new Error('Potluck usage event batch is already active');
+    getDatabase().exec('BEGIN IMMEDIATE');
+    usageEventBatchActive = true;
+}
+
+export function commitUsageHistoryEventBatch() {
+    if (!usageEventBatchActive) return;
+    try {
+        getDatabase().exec('COMMIT');
+        usageEventBatchActive = false;
+    } catch (error) {
+        try {
+            getDatabase().exec('ROLLBACK');
+        } finally {
+            usageEventBatchActive = false;
+        }
+        throw error;
+    }
+}
+
+export function rollbackUsageHistoryEventBatch() {
+    if (!usageEventBatchActive) return;
+    try {
+        getDatabase().exec('ROLLBACK');
+    } finally {
+        usageEventBatchActive = false;
+    }
 }
 
 export function importLegacyUsageHistories({ sourceSha256, sourcePath, histories = [] }) {
@@ -242,7 +282,9 @@ export function deleteUsageHistory(apiKey) {
 }
 
 export function closeUsageHistoryStore() {
+    if (usageEventBatchActive) rollbackUsageHistoryEventBatch();
     database?.close();
     database = null;
     databasePath = null;
+    usageEventStatements = null;
 }

@@ -119,6 +119,7 @@ function isAllowedDirectoryPath(logicalDir, physicalDir, resolvedTarget, physica
 function isPathAllowed(targetPath, stack) {
     const resolvedTarget = path.resolve(normalizeFsPath(targetPath));
     const physicalParent = resolvePhysicalParent(resolvedTarget);
+    const pluginContext = getPluginContext(stack);
     
     // 1. Allow the global configs directory
     const configsDir = path.resolve(process.cwd(), 'configs');
@@ -135,8 +136,19 @@ function isPathAllowed(targetPath, stack) {
         return true;
     }
     
-    // 3. Allow the plugin's own directory
-    const pluginContext = getPluginContext(stack);
+    // 3. Built-in plugins are trusted application code and may load installed
+    // runtime dependencies. User plugins remain confined to their own folder.
+    if (pluginContext && !pluginContext.isUserPlugin) {
+        const nodeModulesDir = path.resolve(process.cwd(), 'node_modules');
+        const physicalNodeModulesDir = origExistsSync(nodeModulesDir)
+            ? origRealpathSync(nodeModulesDir)
+            : nodeModulesDir;
+        if (isAllowedDirectoryPath(nodeModulesDir, physicalNodeModulesDir, resolvedTarget, physicalParent)) {
+            return true;
+        }
+    }
+
+    // 4. Allow the plugin's own directory
     if (pluginContext) {
         const physicalPluginDir = origExistsSync(pluginContext.baseDir) ? origRealpathSync(pluginContext.baseDir) : pluginContext.baseDir;
         if (isInsidePath(pluginContext.baseDir, resolvedTarget) && isInsidePath(physicalPluginDir, physicalParent)) {

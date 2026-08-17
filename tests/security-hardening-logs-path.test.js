@@ -52,6 +52,41 @@ describe('security hardening allowed paths', () => {
             fs.rmSync(tempDir, { recursive: true, force: true });
         }
     });
+
+    test('allows built-in plugins to load installed runtime dependencies', () => {
+        const repoRoot = process.cwd();
+        const tempDir = fs.mkdtempSync(path.join(repoRoot, 'configs', '.security-sqlite-'));
+        try {
+            const hardeningUrl = pathToFileUrl(path.join(repoRoot, 'src', 'core', 'security-hardening.js'));
+            const storeUrl = pathToFileUrl(path.join(repoRoot, 'src', 'plugins', 'api-potluck', 'usage-history-store.js'));
+            const databasePath = path.join(tempDir, 'usage-events.sqlite');
+            const script = `
+                process.env.USAGE_EVENT_DB_PATH = ${JSON.stringify(databasePath)};
+                await import(${JSON.stringify(hardeningUrl)});
+                const store = await import(${JSON.stringify(storeUrl)});
+                store.persistUsageHistoryEvent('maki_security_test', {
+                    usageDate: '2026-08-16',
+                    day: { summary: { requests: 1, totalTokens: 10 } },
+                    modelName: 'gpt-5.4-mini',
+                    modelUsage: { requests: 1, totalTokens: 10 }
+                }, 'security-sqlite-event');
+                store.closeUsageHistoryStore();
+                console.log('sqlite-ok');
+            `;
+
+            const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+                cwd: repoRoot,
+                encoding: 'utf8'
+            });
+            const output = `${result.stdout}\n${result.stderr}`;
+
+            expect(result.status).toBe(0);
+            expect(output).toContain('sqlite-ok');
+            expect(output).not.toContain('Permission Denied');
+        } finally {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+    });
 });
 
 function pathToFileUrl(filePath) {

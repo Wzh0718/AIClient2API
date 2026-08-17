@@ -10,6 +10,11 @@ import {
     setConfigGetter,
     shutdownStatsPersistence
 } from './stats-manager.js';
+import {
+    beginModelUsageEventBatch,
+    commitModelUsageEventBatch,
+    rollbackModelUsageEventBatch
+} from './sqlite-store.js';
 
 const modelUsageStatsPlugin = {
     name: 'model-usage-stats',
@@ -18,6 +23,18 @@ const modelUsageStatsPlugin = {
     type: 'middleware',
     _builtin: true,
     _priority: 9000,
+
+    beginUsageProjectionBatch() {
+        beginModelUsageEventBatch();
+    },
+
+    commitUsageProjectionBatch() {
+        commitModelUsageEventBatch();
+    },
+
+    rollbackUsageProjectionBatch() {
+        rollbackModelUsageEventBatch();
+    },
 
     async init(config) {
         setConfigGetter(() => ({

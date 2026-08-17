@@ -153,6 +153,8 @@ let runtimeHookStream = null;
 let usageEventStore = null;
 let usageEventStoreSnapshot = null;
 let runtimeUsageProjector = null;
+let usageProjectionRefreshPromise = null;
+let usageProjectionRefreshRequested = false;
 let usageEventMaintenanceTimerId = null;
 let runtimeHookPollPromise = null;
 let runtimeHookPollStopped = false;
@@ -162,6 +164,23 @@ const requestActivityTracker = createAsyncActivityTracker();
 const heartbeatActivityTracker = createAsyncActivityTracker();
 const healthCheckActivityTracker = createAsyncActivityTracker();
 const startupShutdownGate = createStartupShutdownGate({ logger });
+
+function scheduleUsageProjectionRefresh() {
+    usageProjectionRefreshRequested = true;
+    if (usageProjectionRefreshPromise) return usageProjectionRefreshPromise;
+
+    usageProjectionRefreshPromise = (async () => {
+        do {
+            usageProjectionRefreshRequested = false;
+            await runtimeUsageProjector?.schedule?.();
+            if (usageEventStore) usageEventStoreSnapshot = await usageEventStore.snapshot();
+        } while (usageProjectionRefreshRequested);
+    })().finally(() => {
+        usageProjectionRefreshPromise = null;
+    });
+    return usageProjectionRefreshPromise;
+}
+
 const runtimeHookConsumer = new RuntimeEventConsumer({
     apply: createDurableRuntimeHookApply({
         executeHook: (hookName, ...args) => getPluginManager()?.executeHook?.(hookName, ...args)
@@ -184,7 +203,7 @@ const runtimeHookConsumer = new RuntimeEventConsumer({
             sendToMaster({ type: 'runtime_hook_ack', sourceWorkerId: message.sourceWorkerId, eventId: message.eventId });
         }
     },
-    scheduleProjections: () => runtimeUsageProjector?.schedule(),
+    scheduleProjections: scheduleUsageProjectionRefresh,
     durableState: {
         hasApplied: message => runtimeHookStream?.hasApplied?.(message) || false,
         commit: message => runtimeHookStream?.commit?.(message)
@@ -441,6 +460,17 @@ async function startServer() {
             runtimeUsageProjector = new RuntimeUsageProjector({
                 store: usageEventStore,
                 batchSize: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_SIZE || process.env.USAGE_EVENT_BATCH_SIZE || 100)),
+                executeProjectionBatch: (projectionName, items) => getPluginManager()?.executeUsageProjectionBatch?.(
+                    projectionName,
+                    items
+                ),
+                onFatalProjectionError: error => {
+                    logger.error('[Usage Projection] Fatal batch failure; restarting control worker:', error.message);
+                    setImmediate(() => process.exit(1));
+                },
+                onProgress: async () => {
+                    usageEventStoreSnapshot = await usageEventStore?.snapshot?.();
+                },
                 executeProjection: async (projectionName, hookName, ...argsAndEventId) => {
                     const eventId = argsAndEventId.pop();
                     return getPluginManager()?.executeUsageProjection?.(
@@ -456,17 +486,16 @@ async function startServer() {
                 const retentionDays = Math.max(1, Number(CONFIG.USAGE_EVENT_RETENTION_DAYS || process.env.USAGE_EVENT_RETENTION_DAYS || 45));
                 const before = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
                 await usageEventStore?.prune({ before });
-                await runtimeUsageProjector?.schedule?.();
                 usageEventStoreSnapshot = await usageEventStore?.snapshot();
             };
             await pruneUsageEvents();
+            scheduleUsageProjectionRefresh().catch(error => logger.error('[Usage Projection] Startup drain failed:', error.message));
             usageEventMaintenanceTimerId = setInterval(() => {
-                pruneUsageEvents().catch(error => logger.error('[Usage Ledger] Retention cleanup failed:', error.message));
+                pruneUsageEvents()
+                    .then(() => scheduleUsageProjectionRefresh())
+                    .catch(error => logger.error('[Usage Ledger] Retention cleanup failed:', error.message));
             }, 24 * 60 * 60 * 1000);
             usageEventMaintenanceTimerId.unref?.();
-            runtimeUsageProjector.schedule().catch(error => {
-                logger.error('[Usage Projection] Startup drain failed:', error.message);
-            });
             startRuntimeHookPolling();
         }
     } else if (!IS_WORKER_PROCESS) {
@@ -476,6 +505,17 @@ async function startServer() {
         runtimeUsageProjector = new RuntimeUsageProjector({
             store: usageEventStore,
             batchSize: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_SIZE || process.env.USAGE_EVENT_BATCH_SIZE || 100)),
+            executeProjectionBatch: (projectionName, items) => getPluginManager()?.executeUsageProjectionBatch?.(
+                projectionName,
+                items
+            ),
+            onFatalProjectionError: error => {
+                logger.error('[Usage Projection] Fatal batch failure; restarting standalone worker:', error.message);
+                setImmediate(() => process.exit(1));
+            },
+            onProgress: async () => {
+                usageEventStoreSnapshot = await usageEventStore?.snapshot?.();
+            },
             executeProjection: async (projectionName, hookName, ...argsAndEventId) => {
                 const eventId = argsAndEventId.pop();
                 return getPluginManager()?.executeUsageProjection?.(projectionName, hookName, argsAndEventId, eventId);
@@ -497,14 +537,14 @@ async function startServer() {
                 })
             }
         });
-        await runtimeUsageProjector.schedule();
+        scheduleUsageProjectionRefresh().catch(error => logger.error('[Usage Projection] Startup drain failed:', error.message));
         usageEventMaintenanceTimerId = setInterval(() => {
             const retentionDays = Math.max(1, Number(CONFIG.USAGE_EVENT_RETENTION_DAYS || process.env.USAGE_EVENT_RETENTION_DAYS || 45));
             const before = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
             usageEventStore?.prune({ before })
-                .then(() => runtimeUsageProjector?.schedule?.())
                 .then(() => usageEventStore?.snapshot?.())
                 .then(snapshot => { usageEventStoreSnapshot = snapshot; })
+                .then(() => scheduleUsageProjectionRefresh())
                 .catch(error => logger.error('[Usage Ledger] Standalone retention cleanup failed:', error.message));
         }, 24 * 60 * 60 * 1000);
         usageEventMaintenanceTimerId.unref?.();

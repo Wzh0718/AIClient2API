@@ -13,6 +13,7 @@ import {
 } from '../../utils/usage-normalizer.js';
 import {
     hasAppliedModelUsageEvent,
+    loadModelAccountUsageEvents,
     loadModelUsageState,
     persistModelUsageEvent,
     persistModelUsageState,
@@ -883,11 +884,20 @@ function cleanupAccountUsageEvents(nowMs = Date.now(), onlyAccountKey = null) {
     const cutoff = nowMs - ACCOUNT_EVENT_RETENTION_MS;
     for (const [accountKey, events] of Object.entries(statsStore.accountUsageEvents)) {
         if (onlyAccountKey && accountKey !== onlyAccountKey) continue;
-        const retained = Array.isArray(events)
-            ? events.filter(event => Date.parse(event.timestamp) >= cutoff)
-            : [];
-        if (retained.length > 0) {
-            statsStore.accountUsageEvents[accountKey] = retained;
+        if (!Array.isArray(events)) {
+            delete statsStore.accountUsageEvents[accountKey];
+            continue;
+        }
+        let firstRetainedIndex = 0;
+        while (
+            firstRetainedIndex < events.length
+            && Date.parse(events[firstRetainedIndex]?.timestamp) < cutoff
+        ) {
+            firstRetainedIndex += 1;
+        }
+        if (firstRetainedIndex > 0) events.splice(0, firstRetainedIndex);
+        if (events.length > 0) {
+            statsStore.accountUsageEvents[accountKey] = events;
         } else {
             delete statsStore.accountUsageEvents[accountKey];
         }
@@ -896,16 +906,30 @@ function cleanupAccountUsageEvents(nowMs = Date.now(), onlyAccountKey = null) {
 
 function recordAccountUsageEvent(provider, providerUuid, usage, timestamp, accountIdentity = null, accountEmail = null, providerName = null) {
     const accountKey = getAccountKey(provider, providerUuid, accountIdentity, accountEmail, providerName);
-    if (!accountKey) return;
+    if (!accountKey) return null;
     statsStore.accountUsageEvents = statsStore.accountUsageEvents || {};
+    const existed = Array.isArray(statsStore.accountUsageEvents[accountKey]);
     if (!statsStore.accountUsageEvents[accountKey]) {
         statsStore.accountUsageEvents[accountKey] = [];
     }
-    statsStore.accountUsageEvents[accountKey].push({
+    const events = statsStore.accountUsageEvents[accountKey];
+    const cutoff = Date.parse(timestamp) - ACCOUNT_EVENT_RETENTION_MS;
+    let firstRetainedIndex = 0;
+    while (
+        firstRetainedIndex < events.length
+        && Date.parse(events[firstRetainedIndex]?.timestamp) < cutoff
+    ) {
+        firstRetainedIndex += 1;
+    }
+    const removedEvents = firstRetainedIndex > 0
+        ? events.splice(0, firstRetainedIndex)
+        : [];
+    const previousLength = events.length;
+    events.push({
         timestamp,
         totalTokens: usage.totalTokens || (usage.promptTokens + usage.completionTokens)
     });
-    cleanupAccountUsageEvents(Date.parse(timestamp), accountKey);
+    return { accountKey, existed, previousLength, removedEvents };
 }
 
 function addCacheHitRatio(block) {
@@ -1037,7 +1061,7 @@ export async function finalizeRequest({ requestId, model, provider, providerUuid
         provider: snapshotEntry(statsStore.providers, normalizedProvider),
         account: snapshotEntry(statsStore.accounts, normalizedAccountKey),
         daily: snapshotEntry(statsStore.daily, dateKey),
-        accountEvents: snapshotEntry(statsStore.accountUsageEvents, normalizedAccountKey)
+        accountEvents: null
     } : null;
     
     const usage = {
@@ -1053,10 +1077,19 @@ export async function finalizeRequest({ requestId, model, provider, providerUuid
     applyUsage(ensureModelStore(normalizedProvider, normalizedModel), usage, timestamp);
 
     const accountStore = ensureAccountStore(normalizedProvider, normalizedProviderUuid, normalizedProviderName, normalizedAccountIdentity, normalizedAccountEmail);
+    let accountEventMutation = null;
+    let durableAccountEvent = null;
     if (accountStore) {
         applyUsage(accountStore.summary, usage, timestamp);
         applyUsage(ensureAccountModelStore(normalizedProvider, normalizedProviderUuid, normalizedProviderName, normalizedModel, normalizedAccountIdentity, normalizedAccountEmail), usage, timestamp);
-        recordAccountUsageEvent(normalizedProvider, normalizedProviderUuid, usage, timestamp, normalizedAccountIdentity, normalizedAccountEmail, normalizedProviderName);
+        if (runtimeEventId) {
+            durableAccountEvent = {
+                timestamp,
+                totalTokens: usage.totalTokens || (usage.promptTokens + usage.completionTokens)
+            };
+        } else {
+            accountEventMutation = recordAccountUsageEvent(normalizedProvider, normalizedProviderUuid, usage, timestamp, normalizedAccountIdentity, normalizedAccountEmail, normalizedProviderName);
+        }
     }
 
     // 记录速率统计
@@ -1105,7 +1138,8 @@ export async function finalizeRequest({ requestId, model, provider, providerUuid
             persistModelUsageEvent(runtimeEventId, statsStore, {
                 provider: normalizedProvider,
                 accountKey: normalizedAccountKey,
-                dateKey
+                dateKey,
+                accountEvent: durableAccountEvent
             });
         } catch (error) {
             const restoreEntry = (collection, key, snapshot) => {
@@ -1117,11 +1151,22 @@ export async function finalizeRequest({ requestId, model, provider, providerUuid
             restoreEntry(statsStore.providers, normalizedProvider, durableRollbackState.provider);
             restoreEntry(statsStore.accounts, normalizedAccountKey, durableRollbackState.account);
             restoreEntry(statsStore.daily, dateKey, durableRollbackState.daily);
-            restoreEntry(statsStore.accountUsageEvents, normalizedAccountKey, durableRollbackState.accountEvents);
+            if (accountEventMutation) {
+                const events = statsStore.accountUsageEvents[accountEventMutation.accountKey] || [];
+                events.length = Math.min(events.length, accountEventMutation.previousLength);
+                if (accountEventMutation.removedEvents.length > 0) {
+                    events.unshift(...accountEventMutation.removedEvents);
+                }
+                if (accountEventMutation.existed || events.length > 0) {
+                    statsStore.accountUsageEvents[accountEventMutation.accountKey] = events;
+                } else {
+                    delete statsStore.accountUsageEvents[accountEventMutation.accountKey];
+                }
+            }
             throw error;
         }
     }
-    markDirty();
+    if (!runtimeEventId) markDirty();
     return true;
 }
 
@@ -1188,7 +1233,15 @@ export function getAccountTokenUsageSummary(provider, providerUuid, options = {}
     const rollingWindowMs = toNumber(options.rollingWindowMs) || ROLLING_5H_MS;
     const rollingCutoff = nowMs - rollingWindowMs;
     const weekDateKeys = getCurrentBeijingWeekDateKeys(now);
-    const events = accountKey ? (statsStore.accountUsageEvents?.[accountKey] || []) : [];
+    const persistedEvents = accountKey
+        ? loadModelAccountUsageEvents(accountKey, {
+            since: new Date(nowMs - ACCOUNT_EVENT_RETENTION_MS),
+            until: now
+        })
+        : [];
+    const events = persistedEvents.length > 0
+        ? persistedEvents
+        : (accountKey ? (statsStore.accountUsageEvents?.[accountKey] || []) : []);
 
     let rolling5hTokens = 0;
     let weeklyTokens = 0;

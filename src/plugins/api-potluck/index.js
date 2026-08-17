@@ -28,7 +28,12 @@ import {
     flushPendingChanges,
     resolveKeyIdByHash
 } from './key-manager.js';
-import { closeUsageHistoryStore } from './usage-history-store.js';
+import {
+    beginUsageHistoryEventBatch,
+    closeUsageHistoryStore,
+    commitUsageHistoryEventBatch,
+    rollbackUsageHistoryEventBatch
+} from './usage-history-store.js';
 
 import {
     extractPotluckKey,
@@ -74,6 +79,18 @@ const apiPotluckPlugin = {
     
     // 优先级：数字越小越先执行，默认认证插件优先级为 9999
     _priority: 10,
+
+    beginUsageProjectionBatch() {
+        beginUsageHistoryEventBatch();
+    },
+
+    commitUsageProjectionBatch() {
+        commitUsageHistoryEventBatch();
+    },
+
+    rollbackUsageProjectionBatch() {
+        rollbackUsageHistoryEventBatch();
+    },
 
     /**
      * 初始化钩子
@@ -229,8 +246,8 @@ const apiPotluckPlugin = {
                     );
 
                 } catch (e) {
-                    // 静默失败，不影响主流程
                     logger.error('[API Potluck Plugin] Failed to record usage:', e.message);
+                    if (hookContext._runtimeEventId) throw e;
                 }
             }
 

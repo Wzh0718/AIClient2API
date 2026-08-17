@@ -19,6 +19,50 @@ describe('request audit store', () => {
     expect(await store.query({ requestId: 'request-audit-event' })).toHaveLength(1);
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  test('appends a same-day runtime batch with one filesystem append', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-batch-'));
+    const store = new RequestAuditStore({ dir });
+    const appendSpy = jest.spyOn(fs.promises, 'appendFile');
+    try {
+      const result = await store.appendBatch(Array.from({ length: 100 }, (_, index) => ({
+        eventId: `runtime-batch-${index}`,
+        timestamp: '2026-08-17T01:00:00.000Z',
+        requestId: `request-batch-${index}`
+      })));
+
+      expect(result).toMatchObject({ appended: 100, duplicates: 0 });
+      expect(appendSpy).toHaveBeenCalledTimes(1);
+      expect(await store.query({})).toHaveLength(100);
+    } finally {
+      appendSpy.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('restores recent durable event ids from the file tail without scanning the full jsonl', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-tail-dedupe-'));
+    const filePath = path.join(dir, 'audit-2026-08-17.jsonl');
+    fs.writeFileSync(filePath, Array.from({ length: 200 }, (_, index) => JSON.stringify({
+      eventId: `tail-event-${index}`,
+      timestamp: '2026-08-17T01:00:00.000Z',
+      requestId: `tail-request-${index}`
+    })).join('\n') + '\n');
+    const store = new RequestAuditStore({ dir, recentEventIdLimit: 50, eventIdTailBytes: 4096 });
+    const readEventsSpy = jest.spyOn(store, 'readEvents');
+    try {
+      const result = await store.append({
+        eventId: 'tail-event-199',
+        timestamp: '2026-08-17T01:00:00.000Z',
+        requestId: 'tail-request-199'
+      });
+      expect(result).toEqual({ appended: false, duplicate: true });
+      expect(readEventsSpy).not.toHaveBeenCalled();
+    } finally {
+      readEventsSpy.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
   test('persists and queries request audit jsonl by key hash and Beijing time window', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-'));
     const store = new RequestAuditStore({ dir, retentionHours: 24 });
