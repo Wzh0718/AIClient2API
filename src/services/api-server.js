@@ -575,6 +575,9 @@ async function startServer() {
             : null,
         configEventSink: !IS_EXECUTION_WORKER && process.send
             ? event => process.send(event)
+            : null,
+        identityEventSink: IS_EXECUTION_WORKER && process.send
+            ? event => process.send(event)
             : null
     });
     if (startupShutdownGate.shouldAbort('Codex prewarm service startup')) return null;
@@ -852,6 +855,14 @@ const shutdownHandlers = registerWorkerShutdownHandlers({
         }
         if (message.type === 'provider_config_sync_status' && RUNTIME_WORKER_ROLE === 'control') {
             globalThis.providerConfigSyncStatus = message;
+            return true;
+        }
+        if (message.type === 'provider_identity_discovered' && RUNTIME_WORKER_ROLE === 'control') {
+            getProviderPoolManager()?.reconcileProviderIdentity?.(
+                message.providerType,
+                message.providerUuid,
+                message.identity
+            ).catch(error => logger.error('[Provider Identity] Failed to reconcile discovered identity:', error.message));
             return true;
         }
         if (message.type === 'request_audit_raw_capture_sync' && IS_EXECUTION_WORKER) {

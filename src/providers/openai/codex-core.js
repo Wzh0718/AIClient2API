@@ -27,6 +27,8 @@ import {
 import { recordCodexFingerprintAudit } from './codex-fingerprint-audit.js';
 import { codexPromptCacheObservability } from './codex-prompt-cache-observability.js';
 import { DEFAULT_CODEX_FALLBACK_MODEL } from './codex-model-routing.js';
+import requestContext from '../../utils/context.js';
+import { performance } from 'node:perf_hooks';
 
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
 const fastModels = baseModels.map(m => `${m}-fast`);
@@ -474,9 +476,14 @@ export class CodexApiService {
                 };
                 this._applySidecar(axiosRequestConfig);
 
+                const upstreamStartedAt = performance.now();
                 const response = await axios.request(axiosRequestConfig);
-
-                return this.parseNonStreamResponse(response.data);
+                const upstreamReceivedAt = performance.now();
+                const runtimeRequest = requestContext.get('runtimeRequest');
+                runtimeRequest?.recordStage?.('upstreamFirstByteMs', upstreamReceivedAt - upstreamStartedAt);
+                const parsed = this.parseNonStreamResponse(response.data);
+                runtimeRequest?.recordStage?.('upstreamCompleteMs', performance.now() - upstreamStartedAt);
+                return parsed;
             } catch (error) {
                 error.origin = error.origin || 'upstream_codex';
                 codexPromptCacheObservability.recordUpstreamError({
@@ -588,7 +595,10 @@ export class CodexApiService {
                 };
                 this._applySidecar(axiosRequestConfig);
 
+                const upstreamStartedAt = performance.now();
                 const response = await axios.request(axiosRequestConfig);
+                const runtimeRequest = requestContext.get('runtimeRequest');
+                runtimeRequest?.recordStage?.('upstreamFirstByteMs', performance.now() - upstreamStartedAt);
 
                 for await (const event of this.parseSSEStream(response.data)) {
                     if (event?.response?.id) {
@@ -612,6 +622,7 @@ export class CodexApiService {
                 while (bufferedPrelude.length > 0) {
                     yield bufferedPrelude.shift();
                 }
+                runtimeRequest?.recordStage?.('upstreamCompleteMs', performance.now() - upstreamStartedAt);
                 return;
             } catch (error) {
                 error.origin = error.origin || 'upstream_codex';

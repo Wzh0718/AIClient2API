@@ -224,6 +224,10 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
                     if (worker.child !== child && worker.child.connected) worker.child.send(message);
                 }
             }
+            if (message?.type === 'provider_identity_discovered' && role === 'execution') {
+                const control = workers.get('control-1');
+                if (control?.child.connected) control.child.send(message);
+            }
             if (message?.type === 'provider_config_sync' && role === 'control') {
                 latestProviderConfigEvents.set(message.providerType, { ...message });
                 const executionIds = [...workers.values()]

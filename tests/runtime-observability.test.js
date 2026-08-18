@@ -66,6 +66,8 @@ describe('runtime observability baseline', () => {
             sampleProcess: () => ({ rss: 1000, heapUsed: 500, eventLoopUtilization: 0.25 })
         });
         const request = metrics.beginRequest({ workerId: 'execution-1', kind: 'image' });
+        request.recordStage('providerFilterMs', 8);
+        metrics.recordStage('redisLeaseMs', 3);
         now = 112;
         request.mark('bodyParsed');
         now = 127;
@@ -84,6 +86,9 @@ describe('runtime observability baseline', () => {
         expect(snapshot.stages.bodyParsed.p95).toBe(12);
         expect(snapshot.stages.leaseAcquired.p95).toBe(27);
         expect(snapshot.stages.firstByte.p95).toBe(60);
+        expect(snapshot.stages.providerFilterMs.p95).toBe(8);
+        expect(snapshot.stages.redisLeaseMs.p95).toBe(3);
+        expect(snapshot.stages.identityPersistLockWaitMs).toEqual({ count: 0, p50: 0, p95: 0, p99: 0, max: 0 });
         expect(snapshot.output.bytes).toBe(4096);
         expect(snapshot.output.backpressureMs).toBe(7);
         expect(snapshot.process.rss).toBe(1000);

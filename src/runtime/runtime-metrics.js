@@ -1,5 +1,18 @@
 import { monitorEventLoopDelay, performance } from 'perf_hooks';
 
+const REQUIRED_STAGE_NAMES = [
+    'providerFilterMs',
+    'redisLeaseMs',
+    'identityReadMs',
+    'identityPersistLockWaitMs',
+    'identityPersistIoMs',
+    'requestConvertMs',
+    'systemPromptPersistMs',
+    'upstreamFirstByteMs',
+    'upstreamCompleteMs',
+    'responseFinalizeMs'
+];
+
 function percentile(values, percentage) {
     if (values.length === 0) return 0;
     const sorted = [...values].sort((a, b) => a - b);
@@ -36,17 +49,22 @@ export class RuntimeMetrics {
         this.inFlight = 0;
     }
 
+    recordStage(name, elapsed) {
+        const value = Math.max(0, Number(elapsed) || 0);
+        const samples = this.stageSamples.get(name) || [];
+        samples.push(value);
+        if (samples.length > 10_000) samples.splice(0, samples.length - 10_000);
+        this.stageSamples.set(name, samples);
+    }
+
     beginRequest({ workerId = 'standalone', kind = 'model' } = {}) {
         const startedAt = this.now();
         let ended = false;
         this.inFlight++;
-        const recordStage = (name, elapsed) => {
-            const samples = this.stageSamples.get(name) || [];
-            samples.push(elapsed);
-            this.stageSamples.set(name, samples);
-        };
+        const recordStage = (name, elapsed) => this.recordStage(name, elapsed);
         return {
             mark: name => recordStage(name, this.now() - startedAt),
+            recordStage,
             addOutputBytes: bytes => { this.output.bytes += Math.max(0, Number(bytes) || 0); },
             addBackpressureMs: ms => { this.output.backpressureMs += Math.max(0, Number(ms) || 0); },
             end: ({ statusCode = 200 } = {}) => {
@@ -65,6 +83,7 @@ export class RuntimeMetrics {
 
     snapshot() {
         const stages = {};
+        for (const name of REQUIRED_STAGE_NAMES) stages[name] = summarize(this.stageSamples.get(name) || []);
         for (const [name, samples] of this.stageSamples.entries()) stages[name] = summarize(samples);
         const eventLoopDelay = {
             p95: Number(this.eventLoopDelay.percentile?.(95) || 0) / 1e6,

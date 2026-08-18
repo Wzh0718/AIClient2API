@@ -28,6 +28,8 @@ import {
     DEFAULT_CODEX_FALLBACK_MODEL,
     resolveCodexEntryModel
 } from '../providers/openai/codex-model-routing.js';
+import { performance } from 'node:perf_hooks';
+import { runtimeMetrics } from '../runtime/runtime-metrics.js';
 
 // 存储 ProviderPoolManager 实例
 let providerPoolManager = null;
@@ -839,8 +841,16 @@ function findProviderIndexByCodexIdentity(providers = [], identity = {}) {
     });
 }
 
-async function ensureCodexIdentityForServiceConfig(serviceConfig, providerType) {
+async function ensureCodexIdentityForServiceConfig(serviceConfig, providerType, providerUuid = null) {
     if (!isCodexProviderType(providerType) || serviceConfig?.codexAccountKey) {
+        return serviceConfig;
+    }
+
+    const cachedIdentity = providerUuid
+        ? providerPoolManager?.getProviderIdentity?.(providerType, providerUuid)
+        : null;
+    if (cachedIdentity?.codexAccountKey) {
+        applyCodexIdentityToProvider(serviceConfig, cachedIdentity);
         return serviceConfig;
     }
 
@@ -848,31 +858,21 @@ async function ensureCodexIdentityForServiceConfig(serviceConfig, providerType) 
     if (!credPath) return serviceConfig;
 
     const absolutePath = path.isAbsolute(credPath) ? credPath : path.join(process.cwd(), credPath);
+    const identityReadStartedAt = performance.now();
     const identity = await readCodexCredentialIdentity(absolutePath);
+    runtimeMetrics.recordStage('identityReadMs', performance.now() - identityReadStartedAt);
     applyCodexIdentityToProvider(serviceConfig, identity);
     return serviceConfig;
 }
 
 async function persistCodexIdentityToProviderPool(config, providerType, providerUuid, identity = {}) {
     if (!providerUuid || !identity?.codexAccountKey || !isCodexProviderType(providerType)) return;
-    const filePath = config.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
-    if (!fs.existsSync(filePath)) return;
-
-    await withFileLock(filePath, async () => {
-        const providerPools = JSON.parse(await pfs.readFile(filePath, 'utf8'));
-        const providers = providerPools[providerType] || [];
-        const index = providers.findIndex(provider => provider.uuid === providerUuid);
-        if (index === -1 || providers[index].codexAccountKey) return;
-        providerPools[providerType][index] = applyCodexIdentityToProvider({ ...providers[index] }, identity);
-        await atomicWriteFile(filePath, JSON.stringify(providerPools, null, 2), 'utf8');
-        if (config) config.providerPools = providerPools;
-        if (providerPoolManager) {
-            providerPoolManager.publishProviderConfig(providerType, providerPools[providerType], {
-                action: 'codex_identity',
-                changedUuids: [providerUuid]
-            });
-        }
-    });
+    const startedAt = performance.now();
+    try {
+        return await providerPoolManager?.reconcileProviderIdentity?.(providerType, providerUuid, identity);
+    } finally {
+        runtimeMetrics.recordStage('identityPersistIoMs', performance.now() - startedAt);
+    }
 }
 
 async function linkSingleCredential(config, credPath, providerDefaults = {}) {
@@ -1098,6 +1098,7 @@ export async function initApiService(config, isReady = false, runtimeOptions = {
         providerPoolManager.persistenceEnabled = runtimeOptions.persistenceEnabled ?? providerPoolManager.persistenceEnabled;
         providerPoolManager.stateEventSink = runtimeOptions.stateEventSink ?? providerPoolManager.stateEventSink;
         providerPoolManager.configEventSink = runtimeOptions.configEventSink ?? providerPoolManager.configEventSink;
+        providerPoolManager.identityEventSink = runtimeOptions.identityEventSink ?? providerPoolManager.identityEventSink;
         logger.info('[Initialization] ProviderPoolManager existing instance updated.');
     } else {
         providerPoolManager = new ProviderPoolManager(config.providerPools || {}, {
@@ -1108,6 +1109,7 @@ export async function initApiService(config, isReady = false, runtimeOptions = {
             persistenceEnabled: runtimeOptions.persistenceEnabled !== false,
             stateEventSink: runtimeOptions.stateEventSink || null,
             configEventSink: runtimeOptions.configEventSink || null,
+            identityEventSink: runtimeOptions.identityEventSink || null,
             providerConfigRevision: runtimeOptions.providerConfigRevision || 0,
         });
         logger.info('[Initialization] ProviderPoolManager initialized.');
@@ -1255,6 +1257,7 @@ export async function getApiService(config, requestedModel = null, options = {})
 
     let serviceConfig = config;
     const isPoolable = PROVIDER_MAPPINGS.some(m => m.providerType === config.MODEL_PROVIDER);
+    const providerFilterStartedAt = performance.now();
     if (providerPoolManager && ((config.providerPools && config.providerPools[config.MODEL_PROVIDER]) || isPoolable)) {
         const selectionDiagnostics = initializeSelectionDiagnostics(options.selectionDiagnostics || {});
         const groupSelection = await selectCodexCredentialGroupProvider(
@@ -1297,6 +1300,7 @@ export async function getApiService(config, requestedModel = null, options = {})
         // 如果在 AUTO 模式下依然没能解析出具体提供商，则报错
         throw new Error(`[API Service] Auto-routing failed: Model name must include a provider prefix (e.g., 'provider:model'). Received: '${actualModelName}'`);
     }
+    runtimeMetrics.recordStage('providerFilterMs', performance.now() - providerFilterStartedAt);
     await ensureCodexIdentityForServiceConfig(serviceConfig, config.MODEL_PROVIDER);
     return getServiceAdapter(serviceConfig);
 }
@@ -1359,6 +1363,7 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         ...options,
         selectionDiagnostics
     };
+    const providerFilterStartedAt = performance.now();
     
     const isPoolable = PROVIDER_MAPPINGS.some(m => m.providerType === config.MODEL_PROVIDER);
     if (providerPoolManager && ((config.providerPools && config.providerPools[config.MODEL_PROVIDER]) || isPoolable)) {
@@ -1515,8 +1520,9 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         // 如果在 AUTO 模式下依然没能解析出具体提供商，则报错
         throw new Error(`[API Service] Auto-routing failed: Model name must include a provider prefix (e.g., 'provider:model'). Received: '${actualModelName}'`);
     }
+    runtimeMetrics.recordStage('providerFilterMs', performance.now() - providerFilterStartedAt);
 
-    await ensureCodexIdentityForServiceConfig(serviceConfig, actualProviderType);
+    await ensureCodexIdentityForServiceConfig(serviceConfig, actualProviderType, selectedUuid);
     if (selectedUuid && serviceConfig.codexAccountKey) {
         await persistCodexIdentityToProviderPool(config, actualProviderType, selectedUuid, {
             codexAccountKey: serviceConfig.codexAccountKey,

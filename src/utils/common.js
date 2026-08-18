@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as http from 'http'; // Add http for IncomingMessage and ServerResponse types
 import * as crypto from 'crypto'; // Import crypto for MD5 hashing
+import { performance } from 'node:perf_hooks';
 import { isIP } from 'net';
 import logger from './logger.js';
 import { writeWithBackpressure } from '../runtime/runtime-backpressure.js';
@@ -2602,6 +2603,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     }
 
     // fs.writeFile('originalRequestBody'+Date.now()+'.json', JSON.stringify(originalRequestBody));
+    const requestConvertStartedAt = performance.now();
     if (getProtocolPrefix(fromProvider) !== getProtocolPrefix(toProvider)) {
         logger.info(`[Request Convert] Converting request from ${fromProvider} to ${toProvider}`);
         const preConvertBody = processedRequestBody;
@@ -2616,6 +2618,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     } else {
         logger.info(`[Request Convert] Request format matches backend provider. No conversion needed.`);
     }
+    requestContext.get('runtimeRequest')?.recordStage?.('requestConvertMs', performance.now() - requestConvertStartedAt);
     
     // 为 forward provider 添加原始请求路径作为 endpoint
     if (requestPath && getProtocolPrefix(toProvider) === MODEL_PROTOCOL_PREFIX.FORWARD) {
@@ -2625,7 +2628,9 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
 
     // 3. Apply system prompt from file if configured.
     processedRequestBody = await _applySystemPromptFromFile(CONFIG, processedRequestBody, toProvider);
+    const systemPromptStartedAt = performance.now();
     await _manageSystemPrompt(processedRequestBody, toProvider);
+    requestContext.get('runtimeRequest')?.recordStage?.('systemPromptPersistMs', performance.now() - systemPromptStartedAt);
 
     // 4. Log the incoming prompt (after potential conversion to the backend's format).
     const promptText = extractPromptText(processedRequestBody, toProvider);

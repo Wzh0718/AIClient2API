@@ -23,6 +23,7 @@ import {
 } from '../utils/codex-plan.js';
 import { normalizeCodexRateLimitWindows } from '../utils/codex-rate-limit.js';
 import requestContext from '../utils/context.js';
+import { performance } from 'node:perf_hooks';
 import { createProviderStateEvent, applyProviderStateEvent } from '../runtime/provider-state-event.js';
 import { DEFAULT_CODEX_FALLBACK_MODEL, matchesModelFamily } from './openai/codex-model-routing.js';
 
@@ -625,10 +626,12 @@ export class ProviderPoolManager {
         this.persistenceEnabled = options.persistenceEnabled !== false;
         this.stateEventSink = options.stateEventSink || null;
         this.configEventSink = options.configEventSink || null;
+        this.identityEventSink = options.identityEventSink || null;
         this.providerConfigRevision = Number(options.providerConfigRevision || 0);
         this.serviceAdapterFactory = options.serviceAdapterFactory || getServiceAdapter;
         this.pendingStateEvents = new Set();
         this.stateEventTimer = null;
+        this.providerIdentityConflicts = 0;
         
         // Fallback 链配置
         this.fallbackChain = options.globalConfig?.providerFallbackChain || {};
@@ -1853,12 +1856,14 @@ export class ProviderPoolManager {
                 preferred: hasStickyAffinity && index === 0,
                 probeRequired: isAntigravityQuotaProbeRequired(provider.type, provider, requestedModel)
             }));
+            const leaseStartedAt = performance.now();
             const lease = hasStickyAffinity
                 ? await this.coordination.acquire(coordinatedCandidates, {
                     affinityKey: `mixed:${providerType}:${requestedModel || ''}:${options.stickyProviderKey}`,
                     requestedModel
                 })
                 : await this.coordination.acquire(coordinatedCandidates, { requestedModel });
+            requestContext.get('runtimeRequest')?.recordStage?.('redisLeaseMs', performance.now() - leaseStartedAt);
             if (!lease) return null;
             const selected = this._findProvider(lease.providerType, lease.uuid);
             if (!selected) {
@@ -2228,6 +2233,7 @@ export class ProviderPoolManager {
                     preferred: hasStickyAffinity && index === 0,
                     probeRequired: isAntigravityQuotaProbeRequired(providerType, provider, requestedModel)
                 }));
+            const leaseStartedAt = performance.now();
             const lease = hasStickyAffinity
                 ? await this.coordination.acquire(candidates, {
                     affinityKey: `${providerType}:${requestedModel || ''}:${options.stickyProviderKey}`,
@@ -2237,6 +2243,7 @@ export class ProviderPoolManager {
                         : ''
                 })
                 : await this.coordination.acquire(candidates, { requestedModel });
+            requestContext.get('runtimeRequest')?.recordStage?.('redisLeaseMs', performance.now() - leaseStartedAt);
             if (!lease) return null;
             const selected = this._findProvider(lease.providerType, lease.uuid);
             if (!selected) {
@@ -4550,6 +4557,67 @@ export class ProviderPoolManager {
         const result = this.applyProviderConfigSync(event);
         if (result.applied) this.configEventSink?.(event);
         return { ...result, event };
+    }
+
+    getProviderIdentity(providerType, uuid) {
+        const provider = this._findProvider(providerType, uuid);
+        const config = provider?.config || provider;
+        if (!config?.codexAccountKey) return null;
+        return {
+            codexAccountKey: String(config.codexAccountKey || ''),
+            codexAccountId: String(config.codexAccountId || ''),
+            codexEmail: String(config.codexEmail || '')
+        };
+    }
+
+    async reconcileProviderIdentity(providerType, uuid, observedIdentity = {}, options = {}) {
+        const provider = this._findProvider(providerType, uuid);
+        if (!provider) return { status: 'missing-provider' };
+
+        const observed = {
+            codexAccountKey: String(observedIdentity.codexAccountKey || ''),
+            codexAccountId: String(observedIdentity.codexAccountId || ''),
+            codexEmail: String(observedIdentity.codexEmail || '')
+        };
+        if (!observed.codexAccountKey) return { status: 'invalid' };
+
+        const current = this.getProviderIdentity(providerType, uuid);
+        if (current) {
+            const fields = ['codexAccountKey', 'codexAccountId', 'codexEmail'];
+            const conflict = fields.some(field => current[field] && observed[field] && current[field] !== observed[field]);
+            if (conflict && options.allowConflictUpdate !== true) {
+                this.providerIdentityConflicts++;
+                return { status: 'conflict' };
+            }
+            if (fields.every(field => current[field] === observed[field])) return { status: 'unchanged' };
+        }
+
+        const nextConfig = {
+            ...provider.config,
+            codexAccountKey: observed.codexAccountKey,
+            codexAccountId: observed.codexAccountId,
+            codexEmail: observed.codexEmail
+        };
+        if (!this.persistenceEnabled) {
+            provider.config = nextConfig;
+            const poolConfig = (this.providerPools[providerType] || []).find(item => String(item?.uuid || '') === String(uuid));
+            if (poolConfig) Object.assign(poolConfig, nextConfig);
+            this.identityEventSink?.({
+                type: 'provider_identity_discovered',
+                providerType,
+                providerUuid: uuid,
+                identity: observed
+            });
+            return { status: 'discovered' };
+        }
+        const providers = (this.providerStatus[providerType] || []).map(item =>
+            String(item.uuid || item.config?.uuid || '') === String(uuid) ? nextConfig : { ...item.config }
+        );
+        const result = this.publishProviderConfig(providerType, providers, {
+            action: 'codex_identity',
+            changedUuids: [uuid]
+        });
+        return { status: result.applied ? 'updated' : 'unchanged', revision: result.revision };
     }
 
 }
