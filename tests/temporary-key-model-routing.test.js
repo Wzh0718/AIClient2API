@@ -16,7 +16,8 @@ function createConfig(overrides = {}) {
                 id: 'temporary-antigravity-flash',
                 enabled: true,
                 keyHash: KEY_HASH,
-                paths: ['/v1/responses'],
+                paths: ['/v1/responses', '/v1/chat/completions'],
+                sourceProviderTypes: ['openai-codex-oauth'],
                 modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
@@ -63,8 +64,52 @@ describe('temporary per-key model routing', () => {
     );
 
     test.each([
+        '/v1/responses',
+        '/openai-codex-oauth/v1/responses',
+        '/v1/chat/completions',
+        '/openai-codex-oauth/v1/chat/completions'
+    ])('treats supported Codex endpoint path %s as the same routing surface', requestPath => {
+        const route = resolveTemporaryKeyModelRoute({
+            config: createConfig(),
+            apiKey: API_KEY,
+            requestPath,
+            model: 'gpt-5.4-mini',
+            originalProviderType: 'openai-codex-oauth'
+        });
+
+        expect(route).toMatchObject({
+            targetProviderType: 'gemini-antigravity',
+            targetModel: 'gemini-2.5-flash'
+        });
+    });
+
+    test.each([
+        '/other-provider/v1/chat/completions',
+        '/v1/chat/completions/extra',
+        '/prefix/v1/responses',
+        '/v1/responses-extra'
+    ])('does not fuzzy-match unsafe endpoint path %s', requestPath => {
+        expect(resolveTemporaryKeyModelRoute({
+            config: createConfig(),
+            apiKey: API_KEY,
+            requestPath,
+            model: 'gpt-5.4-mini',
+            originalProviderType: 'openai-codex-oauth'
+        })).toBeNull();
+    });
+
+    test('requires the configured source provider when present', () => {
+        expect(resolveTemporaryKeyModelRoute({
+            config: createConfig(),
+            apiKey: API_KEY,
+            requestPath: '/v1/responses',
+            model: 'gpt-5.4-mini',
+            originalProviderType: 'openai-custom'
+        })).toBeNull();
+    });
+
+    test.each([
         { apiKey: 'maki_other', requestPath: '/v1/responses', model: 'gpt-5.4-mini' },
-        { apiKey: API_KEY, requestPath: '/v1/chat/completions', model: 'gpt-5.4-mini' },
         { apiKey: API_KEY, requestPath: '/v1/responses', model: 'gpt-5.5' },
         { apiKey: API_KEY, requestPath: '/v1/responses', model: 'gpt-5.30' },
         { apiKey: API_KEY, requestPath: '/v1/responses', model: 'gpt-5.4foo' },
