@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { beforeEach, describe, expect, jest, test } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
 import { hashTemporaryRouteKey } from '../src/utils/temporary-key-model-routing.js';
 
 const mockGetApiServiceWithFallback = jest.fn();
@@ -62,6 +62,10 @@ class FakeResponse extends EventEmitter {
 describe('temporary key model content routing', () => {
     beforeEach(() => {
         jest.clearAllMocks();
+    });
+
+    afterEach(() => {
+        jest.useRealTimers();
     });
 
     test('keeps the requested response model while non-batch GPT-5.4 executes on Luna', async () => {
@@ -517,6 +521,208 @@ describe('temporary key model content routing', () => {
                 accountEmail: 'final.account@example.com'
             })
         );
+    });
+
+    test('bypasses Gemini selection and executes Luna once during a statutory workday blackout', async () => {
+        const apiKey = 'maki_scheduled_blackout_unary';
+        const lunaService = {
+            generateContent: jest.fn().mockResolvedValue({
+                type: 'response.completed',
+                response: {
+                    id: 'scheduled-luna-response',
+                    object: 'response',
+                    model: 'gpt-5.6-luna',
+                    status: 'completed',
+                    output: []
+                }
+            })
+        };
+        mockGetApiServiceWithFallback.mockResolvedValueOnce({
+            service: lunaService,
+            actualProviderType: 'openai-codex-oauth',
+            actualModel: 'gpt-5.6-luna',
+            uuid: 'scheduled-luna-unary',
+            serviceConfig: {
+                customName: 'Scheduled Luna unary',
+                codexAccountKey: 'scheduled-luna-account',
+                codexEmail: 'scheduled-luna@example.com'
+            },
+            isFallback: false
+        });
+        const config = {
+            MODEL_PROVIDER: 'openai-codex-oauth',
+            _originalRequestPath: '/openai-codex-oauth/v1/responses',
+            _monitorRequestId: 'scheduled-blackout-unary',
+            potluckApiKey: apiKey,
+            REQUEST_BODY_MAX_BYTES: 1024 * 1024,
+            CREDENTIAL_SWITCH_MAX_RETRIES: 0,
+            PROMPT_LOG_MODE: 'none',
+            workdayCalendars: {
+                'cn-statutory-workday': {
+                    timezone: 'Asia/Shanghai',
+                    years: { 2026: { holidays: [], makeupWorkdays: [] } }
+                }
+            },
+            temporaryKeyModelRoutes: [{
+                id: 'scheduled-blackout-route',
+                enabled: true,
+                keyHash: hashTemporaryRouteKey(apiKey),
+                paths: ['/openai-codex-oauth/v1/responses'],
+                modelFamilies: ['gpt-5.3', 'gpt-5.4'],
+                targetProviderType: 'gemini-antigravity',
+                targetModel: 'gemini-2.5-flash',
+                fallbackToOriginal: true,
+                preserveResponseModel: true,
+                targetBlackout: {
+                    timezone: 'Asia/Shanghai',
+                    calendar: 'cn-statutory-workday',
+                    start: '00:00',
+                    end: '23:59',
+                    modelFamilies: ['gpt-5.4', 'gpt-5.3-codex-spark'],
+                    fallbackProviderType: 'openai-codex-oauth',
+                    fallbackModel: 'gpt-5.6-luna'
+                }
+            }]
+        };
+        const request = new FakeRequest({ model: 'gpt-5.4-mini', stream: false, input: 'scheduled unary' });
+        const response = new FakeResponse();
+        const providerPoolManager = {
+            recordGeminiSchedulingEvent: jest.fn(),
+            releaseSlot: jest.fn(),
+            markProviderHealthy: jest.fn()
+        };
+        request.start();
+
+        await handleContentGenerationRequest(
+            request,
+            response,
+            null,
+            ENDPOINT_TYPE.OPENAI_RESPONSES,
+            config,
+            null,
+            providerPoolManager,
+            null,
+            '/openai-codex-oauth/v1/responses'
+        );
+
+        expect(mockGetApiServiceWithFallback).toHaveBeenCalledTimes(1);
+        expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(
+            expect.objectContaining({ MODEL_PROVIDER: 'openai-codex-oauth' }),
+            'gpt-5.6-luna',
+            expect.objectContaining({ disableProviderFallback: true })
+        );
+        expect(mockGetApiServiceWithFallback.mock.calls.some(([, model]) => model === 'gemini-2.5-flash')).toBe(false);
+        expect(providerPoolManager.recordGeminiSchedulingEvent).not.toHaveBeenCalled();
+        expect(lunaService.generateContent).toHaveBeenCalledWith('gpt-5.6-luna', expect.any(Object));
+        expect(JSON.parse(response.body).model).toBe('gpt-5.4-mini');
+        expect(config._temporaryKeyModelRouteResult).toMatchObject({
+            actualProviderType: 'openai-codex-oauth',
+            actualModel: 'gpt-5.6-luna',
+            fallbackUsed: true,
+            fallbackReason: 'scheduled_blackout',
+            targetAttempted: false
+        });
+        expect(mockExecuteHook.mock.calls.filter(([hookName]) => hookName === 'onContentGenerated')).toHaveLength(1);
+    });
+
+    test('bypasses Gemini selection for a scheduled Chat Completions stream without duplicate usage', async () => {
+        const apiKey = 'maki_scheduled_blackout_stream';
+        const lunaService = {
+            generateContentStream: jest.fn(async function* () {
+                yield {
+                    type: 'response.completed',
+                    response: {
+                        id: 'scheduled-luna-stream',
+                        object: 'response',
+                        model: 'gpt-5.6-luna',
+                        status: 'completed',
+                        output: []
+                    }
+                };
+            })
+        };
+        mockGetApiServiceWithFallback.mockResolvedValueOnce({
+            service: lunaService,
+            actualProviderType: 'openai-codex-oauth',
+            actualModel: 'gpt-5.6-luna',
+            uuid: 'scheduled-luna-stream',
+            serviceConfig: {
+                customName: 'Scheduled Luna stream',
+                codexAccountKey: 'scheduled-luna-stream-account',
+                codexEmail: 'scheduled-luna-stream@example.com'
+            },
+            isFallback: false
+        });
+        const config = {
+            MODEL_PROVIDER: 'openai-codex-oauth',
+            _originalRequestPath: '/openai-codex-oauth/v1/chat/completions',
+            _monitorRequestId: 'scheduled-blackout-stream',
+            potluckApiKey: apiKey,
+            REQUEST_BODY_MAX_BYTES: 1024 * 1024,
+            CREDENTIAL_SWITCH_MAX_RETRIES: 0,
+            PROMPT_LOG_MODE: 'none',
+            workdayCalendars: {
+                'cn-statutory-workday': {
+                    timezone: 'Asia/Shanghai',
+                    years: { 2026: { holidays: [], makeupWorkdays: [] } }
+                }
+            },
+            temporaryKeyModelRoutes: [{
+                id: 'scheduled-blackout-stream-route',
+                enabled: true,
+                keyHash: hashTemporaryRouteKey(apiKey),
+                paths: ['/openai-codex-oauth/v1/chat/completions'],
+                modelFamilies: ['gpt-5.3', 'gpt-5.4'],
+                targetProviderType: 'gemini-antigravity',
+                targetModel: 'gemini-2.5-flash',
+                fallbackToOriginal: true,
+                preserveResponseModel: true,
+                targetBlackout: {
+                    timezone: 'Asia/Shanghai',
+                    calendar: 'cn-statutory-workday',
+                    start: '00:00',
+                    end: '23:59',
+                    modelFamilies: ['gpt-5.4', 'gpt-5.3-codex-spark'],
+                    fallbackProviderType: 'openai-codex-oauth',
+                    fallbackModel: 'gpt-5.6-luna'
+                }
+            }]
+        };
+        const request = new FakeRequest({
+            model: 'gpt-5.3-codex-spark-fast',
+            stream: true,
+            messages: [{ role: 'user', content: 'scheduled stream' }]
+        });
+        const response = new FakeResponse();
+        request.start();
+
+        await handleContentGenerationRequest(
+            request,
+            response,
+            null,
+            ENDPOINT_TYPE.OPENAI_CHAT,
+            config,
+            null,
+            { releaseSlot: jest.fn(), markProviderHealthy: jest.fn() },
+            null,
+            '/openai-codex-oauth/v1/chat/completions'
+        );
+
+        expect(mockGetApiServiceWithFallback).toHaveBeenCalledTimes(1);
+        expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(
+            expect.objectContaining({ MODEL_PROVIDER: 'openai-codex-oauth' }),
+            'gpt-5.6-luna',
+            expect.objectContaining({ disableProviderFallback: true })
+        );
+        expect(lunaService.generateContentStream).toHaveBeenCalledWith('gpt-5.6-luna', expect.any(Object));
+        expect(response.body).toContain('gpt-5.3-codex-spark-fast');
+        expect(response.body).not.toContain('gemini-2.5-flash');
+        expect(config._temporaryKeyModelRouteResult).toMatchObject({
+            fallbackUsed: true,
+            fallbackReason: 'scheduled_blackout',
+            targetAttempted: false
+        });
+        expect(mockExecuteHook.mock.calls.filter(([hookName]) => hookName === 'onContentGenerated')).toHaveLength(1);
     });
 
     test.each([

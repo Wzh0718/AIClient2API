@@ -25,6 +25,7 @@ import requestContext from './context.js';
 import { assertCodexRoutingIntegrity } from '../services/codex-routing-integrity.js';
 import {
     preserveTemporaryRouteResponseModel,
+    recordTemporaryRouteScheduleBypass,
     resolveTemporaryKeyModelRoute
 } from './temporary-key-model-routing.js';
 
@@ -106,7 +107,9 @@ function recordTemporaryRouteResult(retryContext, {
         accountIdentity,
         accountEmail,
         credentialRetryUsed: Number(retryContext?.currentRetry || 0) > 0,
-        fallbackUsed: retryContext?.temporaryRouteFallbackAttempted === true
+        fallbackUsed: retryContext?.temporaryRouteFallbackAttempted === true,
+        fallbackReason: route.scheduleBypass?.reason || null,
+        targetAttempted: route.scheduleBypass?.targetAttempted !== false
     };
 }
 
@@ -2432,19 +2435,32 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         originalProviderType
     });
     if (temporaryRoute) {
+        const scheduleBypass = temporaryRoute.scheduleBypass || null;
         CONFIG._temporaryKeyModelRoute = temporaryRoute;
-        CONFIG.MODEL_PROVIDER = temporaryRoute.targetProviderType;
+        CONFIG.MODEL_PROVIDER = scheduleBypass?.fallbackProviderType || temporaryRoute.targetProviderType;
         delete CONFIG.actualProviderType;
-        toProvider = temporaryRoute.targetProviderType;
-        model = temporaryRoute.targetModel;
+        toProvider = CONFIG.MODEL_PROVIDER;
+        model = scheduleBypass?.fallbackModel || temporaryRoute.targetModel;
         service = null;
-        logger.info(`[Temporary Route] Matched rule '${temporaryRoute.id}': ${originalProviderType}/${temporaryRoute.requestedModel} -> ${toProvider}/${model} (key: ${temporaryRoute.keyHash})`);
+        if (scheduleBypass) {
+            recordTemporaryRouteScheduleBypass(scheduleBypass);
+            logger.info(`[Temporary Route] Rule '${temporaryRoute.id}' target suppressed by schedule: ${originalProviderType}/${temporaryRoute.requestedModel} -> ${toProvider}/${model}`);
+            if (scheduleBypass.calendarDegraded) {
+                logger.warn(`[Temporary Route] Workday calendar missing for ${scheduleBypass.calendarYear}; using weekday protection`);
+            }
+        } else {
+            logger.info(`[Temporary Route] Matched rule '${temporaryRoute.id}': ${originalProviderType}/${temporaryRoute.requestedModel} -> ${toProvider}/${model} (key: ${temporaryRoute.keyHash})`);
+        }
     }
 
-    let temporaryRouteFallbackUsed = false;
+    let temporaryRouteFallbackUsed = Boolean(temporaryRoute?.scheduleBypass);
     const buildTemporaryLunaFallback = temporaryRoute?.fallbackToOriginal
         ? async () => {
-            CONFIG.MODEL_PROVIDER = temporaryRoute.originalProviderType;
+            const fallbackProviderType = temporaryRoute.scheduleBypass?.fallbackProviderType
+                || temporaryRoute.originalProviderType;
+            const fallbackModel = temporaryRoute.scheduleBypass?.fallbackModel
+                || DEFAULT_CODEX_FALLBACK_MODEL;
+            CONFIG.MODEL_PROVIDER = fallbackProviderType;
             delete CONFIG.actualProviderType;
             const { getApiServiceWithFallback } = await import('../services/service-manager.js');
             const selectionOptions = {
@@ -2453,7 +2469,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             };
             const result = await getApiServiceWithFallback(
                 CONFIG,
-                DEFAULT_CODEX_FALLBACK_MODEL,
+                fallbackModel,
                 selectionOptions
             );
             let fallbackRequestBody = { ...originalRequestBody };
@@ -2480,7 +2496,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             await _manageSystemPrompt(fallbackRequestBody, result.actualProviderType);
             return {
                 service: result.service,
-                model: result.actualModel || DEFAULT_CODEX_FALLBACK_MODEL,
+                model: result.actualModel || fallbackModel,
                 requestBody: fallbackRequestBody,
                 toProvider: result.actualProviderType,
                 uuid: result.uuid,

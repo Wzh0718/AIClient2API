@@ -33,7 +33,8 @@ describe('runtime durable hook integration source', () => {
         expect(plugins).toContain('configureRuntimeHookBridge');
         expect(server).toContain('runtimeHookStreamStatus = { pending: 0, consumerLag: 0, available: false');
         expect(runtime).toContain('metrics.hooks.pending + metrics.hooks.spooled + metrics.hooks.consumerLag');
-        expect(runtime).toContain("metrics.hooks.available === false ? 'degraded'");
+        expect(runtime).toContain('resolveRuntimeHealthStatus({ topologyReady, metrics })');
+        expect(runtime).toContain("metrics?.temporaryRouting?.calendarDegraded === true");
         expect(ledgerStore).toContain("db.pragma('synchronous = FULL')");
         expect(potluckStore).toContain("database.pragma('synchronous = NORMAL')");
         expect(modelStore).toContain("database.pragma('synchronous = NORMAL')");

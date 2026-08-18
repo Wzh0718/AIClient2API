@@ -3,7 +3,11 @@ import {
     fingerprintCredentialManifest
 } from '../src/runtime/credential-manifest.js';
 import { RuntimeMetrics } from '../src/runtime/runtime-metrics.js';
-import { aggregateWorkerMetrics, shutdownWorkerStages } from '../src/runtime/multi-worker-runtime.js';
+import {
+    aggregateWorkerMetrics,
+    resolveRuntimeHealthStatus,
+    shutdownWorkerStages
+} from '../src/runtime/multi-worker-runtime.js';
 import { Readable } from 'stream';
 import requestContext from '../src/utils/context.js';
 import { getRequestBody } from '../src/utils/common.js';
@@ -154,6 +158,12 @@ describe('runtime observability baseline', () => {
                 lastMissingAt: null,
                 byWorker: {}
             },
+            temporaryRouting: {
+                scheduledBypasses: 0,
+                calendarDegraded: false,
+                missingCalendarYears: [],
+                byWorker: {}
+            },
             providerCoordination: {
                 byWorker: {},
                 geminiScheduling: {
@@ -168,6 +178,43 @@ describe('runtime observability baseline', () => {
             }
         });
         expect(JSON.stringify(aggregateWorkerMetrics(snapshots))).not.toMatch(/prompt|imageData|credential/i);
+    });
+
+    test('aggregates scheduled routing bypasses and missing workday calendar years', () => {
+        const snapshots = new Map([
+            ['execution-1', { temporaryRouting: {
+                scheduledBypasses: 3,
+                calendarDegraded: true,
+                missingCalendarYears: [2027]
+            } }],
+            ['execution-2', { temporaryRouting: {
+                scheduledBypasses: 2,
+                calendarDegraded: true,
+                missingCalendarYears: [2027, 2028]
+            } }]
+        ]);
+
+        expect(aggregateWorkerMetrics(snapshots).temporaryRouting).toEqual({
+            scheduledBypasses: 5,
+            calendarDegraded: true,
+            missingCalendarYears: [2027, 2028],
+            byWorker: {
+                'execution-1': expect.any(Object),
+                'execution-2': expect.any(Object)
+            }
+        });
+    });
+
+    test('marks runtime health degraded when the statutory calendar is missing', () => {
+        expect(resolveRuntimeHealthStatus({ topologyReady: false, metrics: {} })).toBe('starting');
+        expect(resolveRuntimeHealthStatus({
+            topologyReady: true,
+            metrics: { hooks: { available: true }, temporaryRouting: { calendarDegraded: true } }
+        })).toBe('degraded');
+        expect(resolveRuntimeHealthStatus({
+            topologyReady: true,
+            metrics: { hooks: { available: true }, temporaryRouting: { calendarDegraded: false } }
+        })).toBe('healthy');
     });
 
     test('exposes request stage latency by worker and as a conservative aggregate', () => {

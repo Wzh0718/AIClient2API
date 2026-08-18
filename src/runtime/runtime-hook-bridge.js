@@ -60,7 +60,9 @@ function compactTemporaryModelRoute(route) {
         actualProviderType: route.actualProviderType || null,
         actualModel: route.actualModel || null,
         credentialRetryUsed: route.credentialRetryUsed === true,
-        fallbackUsed: route.fallbackUsed === true
+        fallbackUsed: route.fallbackUsed === true,
+        fallbackReason: route.fallbackReason || null,
+        targetAttempted: route.targetAttempted !== false
     };
 }
 

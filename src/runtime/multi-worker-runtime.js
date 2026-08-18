@@ -38,6 +38,12 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             lastMissingAt: null,
             byWorker: {}
         },
+        temporaryRouting: {
+            scheduledBypasses: 0,
+            calendarDegraded: false,
+            missingCalendarYears: [],
+            byWorker: {}
+        },
         inFlight: 0,
         process: { rss: 0, heapUsed: 0, maxEventLoopUtilization: 0, eventLoopDelay: { p95: 0, p99: 0, max: 0 } },
         providerCoordination: {
@@ -117,6 +123,16 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
                 if (candidate && (!current || candidate > current)) result.pricingDiagnostics[field] = candidate;
             }
         }
+        if (snapshot?.temporaryRouting) {
+            result.temporaryRouting.byWorker[workerId] = snapshot.temporaryRouting;
+            result.temporaryRouting.scheduledBypasses += Number(snapshot.temporaryRouting.scheduledBypasses || 0);
+            result.temporaryRouting.calendarDegraded ||= snapshot.temporaryRouting.calendarDegraded === true;
+            result.temporaryRouting.missingCalendarYears.push(
+                ...(Array.isArray(snapshot.temporaryRouting.missingCalendarYears)
+                    ? snapshot.temporaryRouting.missingCalendarYears.map(Number).filter(Number.isInteger)
+                    : [])
+            );
+        }
         if (snapshot?.providerCoordination) {
             result.providerCoordination.byWorker[workerId] = snapshot.providerCoordination;
             for (const field of ['cooldownWrites', 'probeAcquired', 'probeRejected', 'rateLimited', 'retryAttempts', 'fallbacks']) {
@@ -135,7 +151,17 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             }
         }
     }
+    result.temporaryRouting.missingCalendarYears = [...new Set(result.temporaryRouting.missingCalendarYears)]
+        .sort((a, b) => a - b);
     return result;
+}
+
+export function resolveRuntimeHealthStatus({ topologyReady, metrics } = {}) {
+    if (!topologyReady) return 'starting';
+    if (metrics?.hooks?.available === false || metrics?.temporaryRouting?.calendarDegraded === true) {
+        return 'degraded';
+    }
+    return 'healthy';
 }
 
 export async function shutdownWorkerStages({
@@ -315,9 +341,7 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
         const metrics = aggregateWorkerMetrics(workerMetrics);
         const topologyReady = ready.size === topology.executionWorkers + 1;
         return {
-            status: !topologyReady
-                ? 'starting'
-                : (metrics.hooks.available === false ? 'degraded' : 'healthy'),
+            status: resolveRuntimeHealthStatus({ topologyReady, metrics }),
             epoch,
             controlWorkers: [...workers.values()].filter(worker => worker.role === 'control').length,
             executionWorkers: [...workers.values()].filter(worker => worker.role === 'execution').length,

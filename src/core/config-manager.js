@@ -202,6 +202,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         },
         providerFallbackChain: {}, // 跨类型 Fallback 链配置
         temporaryKeyModelRoutes: [], // 临时按 Key 哈希、入口和模型进行跨 Provider 路由；默认关闭
+        workdayCalendars: {}, // 可选的法定工作日历；缺失年份时路由层按周一至周五保护性降级
         LOG_ENABLED: true,
         LOG_OUTPUT_MODE: "all",
         LOG_LEVEL: "info",
