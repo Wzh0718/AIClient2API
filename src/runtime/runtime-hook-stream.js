@@ -5,20 +5,22 @@ import path from 'node:path';
 import { RedisRespClient } from './redis-resp-client.js';
 
 const COMMIT_SCRIPT = `
-local added = redis.call('SADD', KEYS[1], ARGV[1])
-redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
-redis.call('XACK', KEYS[2], ARGV[4], ARGV[2])
-return added
+local acknowledged = redis.call('XACK', KEYS[1], ARGV[2], ARGV[1])
+if acknowledged > 0 then
+    redis.call('XDEL', KEYS[1], ARGV[1])
+end
+return acknowledged
 `;
 
 const COMMIT_BATCH_SCRIPT = `
 local committed = 0
-for index = 1, #ARGV, 2 do
-    redis.call('SADD', KEYS[1], ARGV[index])
-    redis.call('XACK', KEYS[2], ARGV[2], ARGV[index + 1])
-    committed = committed + 1
+for index = 1, #ARGV do
+    local acknowledged = redis.call('XACK', KEYS[1], ARGV[1], ARGV[index])
+    if acknowledged > 0 then
+        redis.call('XDEL', KEYS[1], ARGV[index])
+        committed = committed + acknowledged
+    end
 end
-redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
 return committed
 `;
 
@@ -34,6 +36,17 @@ function fieldsToObject(fields = []) {
 
 function isMissingConsumerGroup(error) {
     return /NOGROUP/i.test(error?.message || '');
+}
+
+function parseRedisInfo(value = '') {
+    const result = {};
+    for (const line of String(value || '').split(/\r?\n/)) {
+        if (!line || line.startsWith('#')) continue;
+        const separator = line.indexOf(':');
+        if (separator <= 0) continue;
+        result[line.slice(0, separator)] = line.slice(separator + 1);
+    }
+    return result;
 }
 
 export function decodeRuntimeHookStreamResponse(response) {
@@ -88,6 +101,9 @@ export class RuntimeHookStream {
         this.lastPublishedAt = null;
         this.lastCommittedAt = null;
         this.lastError = null;
+        this.oomCommandErrors = 0;
+        this.memorySnapshot = null;
+        this.memorySnapshotAt = 0;
     }
 
     async _writeSpool(event) {
@@ -111,6 +127,12 @@ export class RuntimeHookStream {
     async publish(event) {
         const payload = JSON.stringify(event);
         try {
+            const memory = await this._getRedisMemorySnapshot();
+            if (memory.critical) {
+                const error = new Error(`Redis memory pressure is critical (${Math.round(memory.ratio * 100)}%)`);
+                error.code = 'REDIS_MEMORY_CRITICAL';
+                throw error;
+            }
             const streamId = await this.redis.command([
                 'XADD', this.streamKey, '*',
                 'eventId', event.eventId,
@@ -122,6 +144,7 @@ export class RuntimeHookStream {
             this.lastError = null;
             return { persisted: true, spooled: false, streamId };
         } catch (error) {
+            if (/\bOOM\b|maxmemory/i.test(error.message || '')) this.oomCommandErrors++;
             await this._writeSpool(event);
             this.lastError = error.message;
             return { persisted: true, spooled: true, streamId: null };
@@ -214,16 +237,13 @@ export class RuntimeHookStream {
     }
 
     async hasApplied(event) {
-        if (!event?.eventId) return false;
-        return Number(await this.redis.command(['SISMEMBER', this.processedKey, event.eventId], { timeoutMs: this.redisCommandTimeoutMs })) === 1;
+        return false;
     }
 
     async commit(event) {
         if (!event?.eventId || !event?.streamId) return;
-        await this.redis.evalScript('commit-runtime-hook', COMMIT_SCRIPT, [this.processedKey, this.streamKey], [
-            event.eventId,
+        await this.redis.evalScript('commit-runtime-hook', COMMIT_SCRIPT, [this.streamKey], [
             event.streamId,
-            String(this.retentionSeconds),
             this.group
         ]);
         this.lastCommittedAt = new Date().toISOString();
@@ -232,11 +252,9 @@ export class RuntimeHookStream {
     async commitBatch(events = []) {
         const committed = events.filter(event => event?.eventId && event?.streamId);
         if (committed.length === 0) return 0;
-        const args = committed.flatMap(event => [event.eventId, event.streamId]);
-        const script = COMMIT_BATCH_SCRIPT
-            .replace('tonumber(ARGV[1])', `tonumber('${this.retentionSeconds}')`)
-            .replace('ARGV[2]', `'${this.group}'`);
-        await this.redis.evalScript('commit-runtime-hook-batch', script, [this.processedKey, this.streamKey], args);
+        const args = committed.map(event => event.streamId);
+        const script = COMMIT_BATCH_SCRIPT.replace('ARGV[1]', `'${this.group}'`);
+        await this.redis.evalScript('commit-runtime-hook-batch', script, [this.streamKey], args);
         this.lastCommittedAt = new Date().toISOString();
         return committed.length;
     }
@@ -257,8 +275,24 @@ export class RuntimeHookStream {
                 } catch (error) {
                     if (isMissingConsumerGroup(error)) throw error;
                 }
+                const [streamLength, memory, statsText] = await Promise.all([
+                    this.redis.command(['XLEN', this.streamKey], { timeoutMs: this.redisCommandTimeoutMs }),
+                    this._getRedisMemorySnapshot(true),
+                    this.redis.command(['INFO', 'STATS'], { timeoutMs: this.redisCommandTimeoutMs })
+                ]);
+                const stats = parseRedisInfo(statsText);
                 this.lastError = null;
-                return { pending: pendingCount, consumerLag, available: true, error: null };
+                return {
+                    pending: pendingCount,
+                    consumerLag,
+                    streamLength: Number(streamLength || 0),
+                    memory,
+                    totalErrorReplies: Number(stats.total_error_replies || 0),
+                    oomCommandErrors: this.oomCommandErrors,
+                    available: memory.critical !== true,
+                    degraded: memory.degraded === true,
+                    error: null
+                };
             } catch (error) {
                 if (attempt === 0 && isMissingConsumerGroup(error)) {
                     this.groupReady = false;
@@ -273,6 +307,27 @@ export class RuntimeHookStream {
                 };
             }
         }
+    }
+
+    async _getRedisMemorySnapshot(force = false) {
+        const now = Date.now();
+        if (!force && this.memorySnapshot && now - this.memorySnapshotAt < 1000) return this.memorySnapshot;
+        const info = parseRedisInfo(await this.redis.command(['INFO', 'MEMORY'], { timeoutMs: this.redisCommandTimeoutMs }));
+        const usedBytes = Number(info.used_memory || 0);
+        const peakBytes = Number(info.used_memory_peak || 0);
+        const maxBytes = Number(info.maxmemory || 0);
+        const ratio = maxBytes > 0 ? usedBytes / maxBytes : 0;
+        this.memorySnapshot = {
+            usedBytes,
+            peakBytes,
+            maxBytes,
+            ratio,
+            fragmentationRatio: Number(info.mem_fragmentation_ratio || 0),
+            degraded: ratio >= 0.8,
+            critical: ratio >= 0.9
+        };
+        this.memorySnapshotAt = now;
+        return this.memorySnapshot;
     }
 
     snapshot() {
@@ -297,6 +352,7 @@ export class RuntimeHookStream {
             lastError: this.lastError,
             spoolMaxBytes: this.spoolMaxBytes,
             spoolFull: this.spoolFull
+            ,oomCommandErrors: this.oomCommandErrors
         };
     }
 

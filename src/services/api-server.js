@@ -224,6 +224,11 @@ function getRuntimeHookSnapshot() {
         spoolMaxBytes: Number(bridgeSnapshot.spoolMaxBytes || streamSnapshot.spoolMaxBytes || 0),
         spoolFull: bridgeSnapshot.spoolFull === true || streamSnapshot.spoolFull === true,
         consumerLag: Number(runtimeHookStreamStatus.consumerLag || 0),
+        streamLength: Number(runtimeHookStreamStatus.streamLength || 0),
+        redisMemory: runtimeHookStreamStatus.memory || null,
+        redisDegraded: runtimeHookStreamStatus.degraded === true,
+        redisOomCommandErrors: Number(runtimeHookStreamStatus.oomCommandErrors || streamSnapshot.oomCommandErrors || 0),
+        redisTotalErrorReplies: Number(runtimeHookStreamStatus.totalErrorReplies || 0),
         available: runtimeHookStreamStatus.available !== false
             && bridgeSnapshot.spoolFull !== true
             && streamSnapshot.spoolFull !== true,

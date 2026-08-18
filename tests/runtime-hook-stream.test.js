@@ -30,10 +30,7 @@ describe('RuntimeHookStream', () => {
             expect.arrayContaining(['XREADGROUP']),
             expect.any(Object)
         );
-        expect(redis.command).toHaveBeenCalledWith(
-            expect.arrayContaining(['SISMEMBER']),
-            expect.any(Object)
-        );
+        expect(redis.command.mock.calls.some(([parts]) => parts[0] === 'SISMEMBER')).toBe(false);
         expect(redis.command.mock.calls.some(([parts]) => parts[0] === 'XREADGROUP')).toBe(false);
     });
 
@@ -91,19 +88,18 @@ describe('RuntimeHookStream', () => {
         fs.rmSync(dir, { recursive: true, force: true });
     });
 
-    test('commits the durable dedupe marker and stream ack in one Redis script', async () => {
+    test('atomically acknowledges and deletes a committed stream entry', async () => {
         const redis = {
             command: jest.fn().mockResolvedValue(0),
             evalScript: jest.fn().mockResolvedValue(1)
         };
         const stream = new RuntimeHookStream({ redis, epoch: 'test', workerId: 'control-1' });
         await stream.commit({ eventId: 'evt-2', streamId: '2-0' });
-        expect(redis.evalScript).toHaveBeenCalledWith(
-            'commit-runtime-hook',
-            expect.stringContaining("redis.call('XACK'"),
-            expect.any(Array),
-            expect.arrayContaining(['evt-2', '2-0'])
-        );
+        const singleCall = redis.evalScript.mock.calls[0];
+        expect(singleCall).toEqual(['commit-runtime-hook', expect.any(String), [stream.streamKey], ['2-0', 'control']]);
+        expect(singleCall[1]).toContain("redis.call('XACK'");
+        expect(singleCall[1]).toContain("redis.call('XDEL'");
+        expect(singleCall[1]).not.toContain('SADD');
     });
 
     test('commits a batch of stream entries after the local ledger transaction', async () => {
@@ -116,12 +112,44 @@ describe('RuntimeHookStream', () => {
             { eventId: 'evt-a', streamId: '10-0' },
             { eventId: 'evt-b', streamId: '11-0' }
         ]);
-        expect(redis.evalScript).toHaveBeenCalledWith(
-            'commit-runtime-hook-batch',
-            expect.stringContaining("redis.call('XACK'"),
-            expect.any(Array),
-            ['evt-a', '10-0', 'evt-b', '11-0']
-        );
+        const batchCall = redis.evalScript.mock.calls[0];
+        expect(batchCall).toEqual(['commit-runtime-hook-batch', expect.any(String), [stream.streamKey], ['10-0', '11-0']]);
+        expect(batchCall[1]).toContain("redis.call('XACK'");
+        expect(batchCall[1]).toContain("redis.call('XDEL'");
+        expect(batchCall[1]).not.toContain('SADD');
+    });
+
+    test('reports Redis memory and stream length without retaining acknowledged entries', async () => {
+        const redis = {
+            command: jest.fn(async parts => {
+                if (parts[0] === 'XGROUP') return 'OK';
+                if (parts[0] === 'XPENDING') return [2, null, null, []];
+                if (parts[0] === 'XINFO') return [['name', 'control', 'lag', 3]];
+                if (parts[0] === 'XLEN') return 5;
+                if (parts[0] === 'INFO' && parts[1] === 'MEMORY') {
+                    return 'used_memory:629145600\r\nused_memory_peak:700000000\r\nmaxmemory:805306368\r\nmem_fragmentation_ratio:1.25\r\n';
+                }
+                if (parts[0] === 'INFO' && parts[1] === 'STATS') return 'total_error_replies:4\r\n';
+                return 0;
+            })
+        };
+        const stream = new RuntimeHookStream({ redis, epoch: 'test', workerId: 'control-1' });
+
+        await expect(stream.pendingSnapshot()).resolves.toMatchObject({
+            pending: 2,
+            consumerLag: 3,
+            streamLength: 5,
+            memory: {
+                usedBytes: 629145600,
+                peakBytes: 700000000,
+                maxBytes: 805306368,
+                ratio: expect.any(Number),
+                fragmentationRatio: 1.25,
+                degraded: false,
+                critical: false
+            },
+            totalErrorReplies: 4
+        });
     });
 
     test('closes the underlying Redis connection', async () => {

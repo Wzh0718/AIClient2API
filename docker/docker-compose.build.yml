@@ -2,7 +2,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "768mb", "--maxmemory-policy", "noeviction"]
+    mem_limit: 1g
     expose:
       - "6379"
     healthcheck:
@@ -34,6 +35,7 @@ services:
       - RUNTIME_EXECUTION_WORKERS=3
       - REDIS_URL=redis://redis:6379/0
       - RUNTIME_DEPLOYMENT_EPOCH=local
+      - RUNTIME_BIG_OBJECT_BUDGET_BYTES=2147483648
     depends_on:
       redis:
         condition: service_healthy

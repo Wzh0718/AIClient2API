@@ -198,6 +198,21 @@ class InMemoryRedisExecutor {
 }
 
 describe('RedisLeaseCoordinator', () => {
+    test('rejects new leases quickly when Redis memory exceeds the critical watermark', async () => {
+        const redis = {
+            evalScript: jest.fn(),
+            command: jest.fn(async () => 'used_memory:760000000\r\nmaxmemory:800000000\r\n')
+        };
+        const coordinator = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+        coordinator.ready = true;
+        coordinator.bootId = 'boot';
+
+        await expect(coordinator.acquire([
+            { providerType: 'openai-codex-oauth', uuid: 'one', concurrencyLimit: 1 }
+        ])).rejects.toMatchObject({ status: 503, code: 'COORDINATION_UNAVAILABLE' });
+        expect(redis.evalScript).not.toHaveBeenCalled();
+        expect(coordinator.getStatus().redisMemory).toMatchObject({ critical: true });
+    });
     test('reports Gemini scheduling gauges and rate-limit, retry, and fallback counters', () => {
         const coordinator = new RedisLeaseCoordinator({
             redis: new InMemoryRedisExecutor(),

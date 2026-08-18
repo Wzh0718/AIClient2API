@@ -365,6 +365,17 @@ function hashAffinityKey(value) {
     return createHash('sha256').update(String(value)).digest('hex');
 }
 
+function parseRedisInfo(value = '') {
+    const result = {};
+    for (const line of String(value || '').split(/\r?\n/)) {
+        if (!line || line.startsWith('#')) continue;
+        const separator = line.indexOf(':');
+        if (separator <= 0) continue;
+        result[line.slice(0, separator)] = line.slice(separator + 1);
+    }
+    return result;
+}
+
 export class RedisLeaseCoordinator {
     constructor({ redis, epoch = 'default', workerId = `worker-${process.pid}`, leaseTtlMs = 120000, affinityTtlMs = 24 * 60 * 60 * 1000, expectedWorkers = 1 } = {}) {
         if (!redis?.evalScript) throw new TypeError('Redis executor with evalScript() is required');
@@ -400,6 +411,8 @@ export class RedisLeaseCoordinator {
             fallbacks: 0,
             byModel: {}
         };
+        this.redisMemory = { usedBytes: 0, maxBytes: 0, ratio: 0, degraded: false, critical: false };
+        this.redisMemoryCheckedAt = 0;
     }
 
     async _eval(name, script, args) {
@@ -410,7 +423,35 @@ export class RedisLeaseCoordinator {
         }
     }
 
+    async _checkRedisMemoryPressure() {
+        if (!this.redis?.command) return this.redisMemory;
+        const now = Date.now();
+        if (now - this.redisMemoryCheckedAt < 1000) return this.redisMemory;
+        let info;
+        try {
+            info = parseRedisInfo(await this.redis.command(['INFO', 'MEMORY']));
+        } catch (error) {
+            throw new CoordinationUnavailableError('Redis memory status is unavailable', error);
+        }
+        const usedBytes = Number(info.used_memory || 0);
+        const maxBytes = Number(info.maxmemory || 0);
+        const ratio = maxBytes > 0 ? usedBytes / maxBytes : 0;
+        this.redisMemory = {
+            usedBytes,
+            maxBytes,
+            ratio,
+            degraded: ratio >= 0.8,
+            critical: ratio >= 0.9
+        };
+        this.redisMemoryCheckedAt = now;
+        if (this.redisMemory.critical) {
+            throw new CoordinationUnavailableError(`Redis memory pressure is critical (${Math.round(ratio * 100)}%)`);
+        }
+        return this.redisMemory;
+    }
+
     async acquire(candidates, { affinityKey = '', routedProviderKey = '', requestedModel = '' } = {}) {
+        await this._checkRedisMemoryPressure();
         if (!this.bootId || !this.ready || this.recovering) await this.synchronize();
         if (!this.ready || this.recovering) throw new CoordinationUnavailableError('Runtime coordination is recovering');
         const normalized = (candidates || []).map(normalizeCandidate).filter(item => item.providerType && item.uuid);
@@ -747,6 +788,7 @@ export class RedisLeaseCoordinator {
             ready: this.ready,
             recovering: this.recovering,
             bootId: this.bootId,
+            redisMemory: { ...this.redisMemory },
             activeLeases: this.activeLeases.size,
             imageCapacity: {
                 ...this.imageCapacityMetrics,
