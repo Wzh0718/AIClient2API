@@ -444,16 +444,11 @@
     margin-top: 0.35rem;
 }
 
-.account-usage-cost-missing {
-    flex: 0 0 auto;
-    border-radius: 0.25rem;
-    background: var(--warning-bg-light);
-    color: var(--warning-color);
-    font-family: inherit;
-    font-size: 0.56rem;
-    font-weight: 700;
-    padding: 0.08rem 0.2rem;
-    white-space: nowrap;
+.account-usage-period-cost > span {
+    display: block;
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
 }
 
 .usage-section .info-grid {

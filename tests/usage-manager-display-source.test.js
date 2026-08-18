@@ -82,17 +82,25 @@ describe('usage manager display source regressions', () => {
         expect(source).not.toContain('官方未返回重置时间');
     });
 
-    test('account usage summary renders total cost and labels average-price estimates', () => {
+    test('account usage summary renders total cost without pricing estimate badges', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
 
         expect(source).toContain('function renderAccountUsageCost(usage = {})');
         expect(source).toContain('account-usage-period-cost');
         expect(source).toContain('cost.usd ?? (Number(cost.actualUsd || 0) + Number(cost.estimatedUsd || 0))');
-        expect(source).toContain('estimatedPriceTokens > 0');
-        expect(source).toContain('均价估算');
-        expect(source).toContain('missingPriceTokens > 0');
-        expect(source).toContain('account-usage-cost-missing');
+        expect(source).not.toContain('estimatedPriceTokens > 0');
+        expect(source).not.toContain('均价估算');
+        expect(source).not.toContain('missingPriceTokens > 0');
+        expect(source).not.toContain('account-usage-cost-missing');
         expect(source).toContain('${renderAccountUsageCost(usage)}');
+    });
+
+    test('three-column account usage cards keep long dollar amounts inside the card', () => {
+        const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(css).toContain('.account-usage-period-cost > span');
+        expect(css).toContain('overflow-wrap: anywhere');
+        expect(css).toContain('max-width: 100%');
     });
 
     test('account usage summary labels use rolling week and month wording', () => {

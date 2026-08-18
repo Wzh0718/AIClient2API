@@ -27,6 +27,16 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             redisDegraded: false,
             byWorker: {}
         },
+        pricingDiagnostics: {
+            estimatedAverageCount: 0,
+            estimatedAverageTokens: 0,
+            estimatedAverageUsd: 0,
+            missingPriceCount: 0,
+            missingPriceTokens: 0,
+            lastEstimatedAt: null,
+            lastMissingAt: null,
+            byWorker: {}
+        },
         inFlight: 0,
         process: { rss: 0, heapUsed: 0, maxEventLoopUtilization: 0, eventLoopDelay: { p95: 0, p99: 0, max: 0 } },
         providerCoordination: {
@@ -77,6 +87,17 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             result.imageCapacity.overcommitted += Number(snapshot.imageCapacity.overcommitted || 0);
             result.imageCapacity.coordinationFailures += Number(snapshot.imageCapacity.coordinationFailures || 0);
             result.imageCapacity.redisDegraded ||= snapshot.imageCapacity.redisDegraded === true;
+        }
+        if (snapshot?.pricingDiagnostics) {
+            result.pricingDiagnostics.byWorker[workerId] = snapshot.pricingDiagnostics;
+            for (const field of ['estimatedAverageCount', 'estimatedAverageTokens', 'estimatedAverageUsd', 'missingPriceCount', 'missingPriceTokens']) {
+                result.pricingDiagnostics[field] += Number(snapshot.pricingDiagnostics[field] || 0);
+            }
+            for (const field of ['lastEstimatedAt', 'lastMissingAt']) {
+                const current = result.pricingDiagnostics[field];
+                const candidate = snapshot.pricingDiagnostics[field];
+                if (candidate && (!current || candidate > current)) result.pricingDiagnostics[field] = candidate;
+            }
         }
         if (snapshot?.providerCoordination) {
             result.providerCoordination.byWorker[workerId] = snapshot.providerCoordination;

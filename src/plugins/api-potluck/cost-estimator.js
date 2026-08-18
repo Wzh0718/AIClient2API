@@ -23,6 +23,26 @@ const GEMINI_CONVERSION_MODELS = [
     'gemini-3.5-flash'
 ];
 
+const pricingDiagnostics = {
+    estimatedAverageCount: 0,
+    estimatedAverageTokens: 0,
+    estimatedAverageUsd: 0,
+    missingPriceCount: 0,
+    missingPriceTokens: 0,
+    lastEstimatedAt: null,
+    lastMissingAt: null
+};
+
+export function getPricingDiagnostics() {
+    return { ...pricingDiagnostics };
+}
+
+export function resetPricingDiagnostics() {
+    for (const key of Object.keys(pricingDiagnostics)) {
+        pricingDiagnostics[key] = key.startsWith('last') ? null : 0;
+    }
+}
+
 function toNumber(value) {
     const num = Number(value);
     return Number.isFinite(num) ? num : 0;
@@ -166,6 +186,10 @@ export function estimateUsageCost(usage = {}, model = DEFAULT_CONVERSION_MODEL, 
         const average = estimateFromAverageProfile(usage, options.averageProfile);
         if (average) {
             const averageScope = options.averageScope || 'global-day';
+            pricingDiagnostics.estimatedAverageCount += 1;
+            pricingDiagnostics.estimatedAverageTokens += average.totalTokens;
+            pricingDiagnostics.estimatedAverageUsd += average.usd;
+            pricingDiagnostics.lastEstimatedAt = new Date().toISOString();
             return {
                 usd: average.usd,
                 actualUsd: 0,
@@ -181,6 +205,9 @@ export function estimateUsageCost(usage = {}, model = DEFAULT_CONVERSION_MODEL, 
                 averageSampleModelCount: toNumber(options.averageProfile?.sampleModelCount)
             };
         }
+        pricingDiagnostics.missingPriceCount += 1;
+        pricingDiagnostics.missingPriceTokens += parts.totalTokens;
+        pricingDiagnostics.lastMissingAt = new Date().toISOString();
         return {
             usd: 0,
             actualUsd: 0,

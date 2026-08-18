@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   classifyCleanupEvent,
   createUnknownUsageCleanupBundle,
+  discoverEstimatedAverageDates,
 } from '../../scripts/ops/cleanup-unknown-usage-2026-08-14-15.mjs';
 import { applyRepairBundle, hashSecret } from '../../scripts/usage-ledger/daily-usage-ledger.mjs';
 
@@ -84,6 +85,38 @@ test('classifyCleanupEvent keeps only fully attributable priced events', () => {
   }), options).reasons.includes('unknown-key'));
 });
 
+test('classifyCleanupEvent recovers a real requested model when actualModel is unknown', () => {
+  const result = classifyCleanupEvent(makeEvent({
+    request: { actualModel: 'unknown', model: 'gpt-5.4-mini' },
+  }), {
+    providerByEmail: new Map([['known@example.com', 'openai-codex-oauth']]),
+  });
+
+  assert.equal(result.keep, true);
+  assert.equal(result.model, 'gpt-5.4-mini');
+  assert.ok(result.cost.actualUsd > 0);
+});
+
+test('discovers every date containing estimated-average derived usage', async () => {
+  const base = makeCleanupBase([]);
+  const dailyDir = path.join(base, 'permanent-usage-ledger', 'daily');
+  fs.mkdirSync(dailyDir, { recursive: true });
+  fs.writeFileSync(path.join(dailyDir, 'usage-2026-08-12.jsonl'), `${JSON.stringify({
+    date: '2026-08-12',
+    cost: { pricingSource: 'official', estimatedPriceTokens: 0 },
+  })}\n`);
+  fs.writeFileSync(path.join(dailyDir, 'usage-2026-08-14.jsonl'), `${JSON.stringify({
+    date: '2026-08-14',
+    cost: { pricingSource: 'estimated-average', estimatedPriceTokens: 1100 },
+  })}\n`);
+  fs.writeFileSync(path.join(dailyDir, 'usage-2026-08-15.jsonl'), `${JSON.stringify({
+    date: '2026-08-15',
+    cost: { pricingSource: 'mixed', estimatedPriceTokens: 500 },
+  })}\n`);
+
+  assert.deepEqual(await discoverEstimatedAverageDates(base), ['2026-08-14', '2026-08-15']);
+});
+
 test('cleanup bundle blocks when estimated removed usage reaches $1,000', async () => {
   const known = makeEvent({
     requestId: 'known-priced',
@@ -150,6 +183,11 @@ test('cleanup bundle removes unresolved derived usage below the threshold withou
   assert.equal(bundle.report.cleanupMetadata.droppedTokens, 100_000_000);
   assert.ok(bundle.report.cleanupMetadata.estimatedRemovalUsd > 0);
   assert.ok(bundle.report.cleanupMetadata.estimatedRemovalUsd < 1_000);
+  assert.match(bundle.report.cleanupMetadata.batchId, /^estimated-average:/);
+  assert.ok(fs.existsSync(path.join(outDir, 'quarantine-events.jsonl')));
+  const quarantine = fs.readFileSync(path.join(outDir, 'quarantine-events.jsonl'), 'utf8');
+  assert.ok(quarantine.includes('unknown-small'));
+  assert.ok(!quarantine.includes('known@example.com'));
 
   const result = await applyRepairBundle({
     base,

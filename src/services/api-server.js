@@ -24,6 +24,7 @@ import { RuntimeUsageProjector } from '../runtime/runtime-usage-projector.js';
 import { migrateCodexFingerprintProviderPoolsFile } from '../utils/codex-fingerprint-migration.js';
 import { invalidateServiceAdapter } from '../providers/adapter.js';
 import { runtimeImageCapacity } from '../runtime/runtime-image-capacity.js';
+import { getPricingDiagnostics } from '../plugins/api-potluck/cost-estimator.js';
 
 /**
  * @license
@@ -244,6 +245,7 @@ function buildRuntimeMetricsSnapshot() {
         ...runtimeMetrics.snapshot(),
         workerId: process.env.RUNTIME_WORKER_ID || RUNTIME_WORKER_ROLE,
         imageCapacity: runtimeImageCapacity.snapshot(),
+        pricingDiagnostics: getPricingDiagnostics(),
         providerCoordination: getProviderPoolManager()?.coordination?.getStatus?.() || null,
         hooks: getRuntimeHookSnapshot()
     };

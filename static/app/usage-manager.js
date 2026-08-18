@@ -1116,19 +1116,9 @@ function renderAccountUsageCost(usage = {}) {
     const cost = usage.cost;
     if (!cost) return '';
     const amount = Number(cost.usd ?? (Number(cost.actualUsd || 0) + Number(cost.estimatedUsd || 0)));
-    const estimatedPriceTokens = Number(cost.estimatedPriceTokens || 0);
-    const missingPriceTokens = Number(cost.missingPriceTokens || 0);
-    const estimatedBadge = estimatedPriceTokens > 0
-        ? `<span class="account-usage-cost-missing" title="${formatTokenCompact(estimatedPriceTokens)} tokens 使用${cost.estimationScope === 'provider-day' ? '同 Provider 当日' : '当日全局'}加权均价估算；价格版本 ${cost.pricingVersion || 'unknown'}">均价估算</span>`
-        : '';
-    const missingBadge = missingPriceTokens > 0
-        ? `<span class="account-usage-cost-missing" title="有 ${formatTokenCompact(missingPriceTokens)} tokens 缺失模型价格">缺失价格</span>`
-        : '';
     return `
         <div class="account-usage-period-cost">
             <span>${formatUsd(amount)}</span>
-            ${estimatedBadge}
-            ${missingBadge}
         </div>
     `;
 }

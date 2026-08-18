@@ -2807,17 +2807,11 @@
                 const tokens = usageTokens(item);
                 const percent = Math.round((count / total) * 100);
                 const costHtml = item?.cost ? ` · ${formatDisplayCost(item.cost)}` : '';
-                const estimatedCostHtml = Number(item?.cost?.estimatedPriceTokens || 0) > 0
-                    ? ` <span class="cost-inline alt" title="${formatTokenCompact(item.cost.estimatedPriceTokens)} Tokens 使用${item.cost.estimationScope === 'provider-day' ? '同 Provider 当日' : '当日全局'}加权均价估算；价格版本 ${escapeHtml(item.cost.pricingVersion || 'unknown')}">均价估算</span>`
-                    : '';
-                const missingCostHtml = Number(item?.cost?.missingPriceTokens || 0) > 0
-                    ? ` <span class="cost-inline alt" title="有 ${formatTokenCompact(item.cost.missingPriceTokens)} Tokens 缺失模型价格">缺失价格</span>`
-                    : '';
                 return `
                     <div class="distribution-item">
                         <div class="dist-info">
                             <span class="dist-name">${escapeHtml(name)}</span>
-                            <span class="dist-count">${formatNumber(count)} 次 / ${formatTokenCompact(tokens)} Tokens (${percent}%)${costHtml}${estimatedCostHtml}${missingCostHtml}</span>
+                            <span class="dist-count">${formatNumber(count)} 次 / ${formatTokenCompact(tokens)} Tokens (${percent}%)${costHtml}</span>
                         </div>
                         <div class="dist-bar">
                             <div class="dist-fill" style="width: ${percent}%"></div>
@@ -2839,17 +2833,11 @@
                 const otherCostHtml = other.cost.actualUsd > 0 || other.cost.convertedUsd > 0 || other.cost.missingPriceTokens > 0
                     ? ` · ${formatDisplayCost(other.cost)}`
                     : '';
-                const otherEstimatedCostHtml = Number(other.cost.estimatedPriceTokens || 0) > 0
-                    ? ` <span class="cost-inline alt" title="${formatTokenCompact(other.cost.estimatedPriceTokens)} Tokens 使用加权均价估算">均价估算</span>`
-                    : '';
-                const otherMissingCostHtml = Number(other.cost.missingPriceTokens || 0) > 0
-                    ? ` <span class="cost-inline alt" title="有 ${formatTokenCompact(other.cost.missingPriceTokens)} Tokens 缺失模型价格">缺失价格</span>`
-                    : '';
                 container.innerHTML += `
                     <div class="distribution-item">
                         <div class="dist-info">
                             <span class="dist-name" style="font-style: italic;">其他 (${sorted.length - maxItems} 个)</span>
-                            <span class="dist-count">${formatNumber(otherCount)} 次 / ${formatTokenCompact(otherTokens)} Tokens (${otherPercent}%)${otherCostHtml}${otherEstimatedCostHtml}${otherMissingCostHtml}</span>
+                            <span class="dist-count">${formatNumber(otherCount)} 次 / ${formatTokenCompact(otherTokens)} Tokens (${otherPercent}%)${otherCostHtml}</span>
                         </div>
                         <div class="dist-bar">
                             <div class="dist-fill" style="width: ${otherPercent}%; background: #94a3b8;"></div>

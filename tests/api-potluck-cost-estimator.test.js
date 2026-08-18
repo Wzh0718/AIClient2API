@@ -5,10 +5,27 @@ import {
     buildCost,
     estimateUsageCost,
     getConversionModels,
-    normalizeConversionModel
+    getPricingDiagnostics,
+    normalizeConversionModel,
+    resetPricingDiagnostics
 } from '../src/plugins/api-potluck/cost-estimator.js';
 
 describe('api potluck cost estimator', () => {
+    test('tracks estimated and missing pricing as internal diagnostics', () => {
+        resetPricingDiagnostics();
+        const usage = { promptTokens: 1000, completionTokens: 100, totalTokens: 1100 };
+        const averageProfile = buildAveragePricingProfile({ 'gpt-5.4': usage });
+
+        estimateUsageCost(usage, 'unknown-model', { averageProfile, averageScope: 'global-day' });
+        estimateUsageCost(usage, 'another-unknown-model');
+
+        expect(getPricingDiagnostics()).toMatchObject({
+            estimatedAverageCount: 1,
+            estimatedAverageTokens: 1100,
+            missingPriceCount: 1,
+            missingPriceTokens: 1100
+        });
+    });
     test('uses standard official defaults for codex actual cost and gemini conversion cost', () => {
         const usage = {
             promptTokens: 1000000,

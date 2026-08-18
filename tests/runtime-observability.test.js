@@ -138,6 +138,16 @@ describe('runtime observability baseline', () => {
                 redisDegraded: false,
                 byWorker: {}
             },
+            pricingDiagnostics: {
+                estimatedAverageCount: 0,
+                estimatedAverageTokens: 0,
+                estimatedAverageUsd: 0,
+                missingPriceCount: 0,
+                missingPriceTokens: 0,
+                lastEstimatedAt: null,
+                lastMissingAt: null,
+                byWorker: {}
+            },
             providerCoordination: {
                 byWorker: {},
                 geminiScheduling: {
@@ -152,6 +162,36 @@ describe('runtime observability baseline', () => {
             }
         });
         expect(JSON.stringify(aggregateWorkerMetrics(snapshots))).not.toMatch(/prompt|imageData|credential/i);
+    });
+
+    test('aggregates pricing anomaly diagnostics across workers', () => {
+        const snapshots = new Map([
+            ['control-1', { pricingDiagnostics: {
+                estimatedAverageCount: 2,
+                estimatedAverageTokens: 300,
+                estimatedAverageUsd: 1.25,
+                missingPriceCount: 1,
+                missingPriceTokens: 50,
+                lastEstimatedAt: '2026-08-18T01:00:00.000Z'
+            } }],
+            ['execution-1', { pricingDiagnostics: {
+                estimatedAverageCount: 1,
+                estimatedAverageTokens: 100,
+                estimatedAverageUsd: 0.5,
+                missingPriceCount: 0,
+                missingPriceTokens: 0,
+                lastEstimatedAt: '2026-08-18T02:00:00.000Z'
+            } }]
+        ]);
+
+        expect(aggregateWorkerMetrics(snapshots).pricingDiagnostics).toMatchObject({
+            estimatedAverageCount: 3,
+            estimatedAverageTokens: 400,
+            estimatedAverageUsd: 1.75,
+            missingPriceCount: 1,
+            missingPriceTokens: 50,
+            lastEstimatedAt: '2026-08-18T02:00:00.000Z'
+        });
     });
 
     test('aggregates local image pressure while taking the maximum shared Redis usage', () => {
