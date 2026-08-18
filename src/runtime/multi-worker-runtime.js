@@ -17,6 +17,16 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         requests: { total: 0, success: 0, failed: 0, byWorker: {}, byKind: {} },
         output: { bytes: 0, backpressureMs: 0 },
         hooks: { pending: 0, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 0, consumerLag: 0, oldestPendingAgeMs: 0, available: true, unavailableWorkers: [], byWorker: {} },
+        imageCapacity: {
+            activeBytes: 0,
+            queued: 0,
+            globalUsedBytes: 0,
+            globalBudgetBytes: 0,
+            overcommitted: 0,
+            coordinationFailures: 0,
+            redisDegraded: false,
+            byWorker: {}
+        },
         inFlight: 0,
         process: { rss: 0, heapUsed: 0, maxEventLoopUtilization: 0, eventLoopDelay: { p95: 0, p99: 0, max: 0 } },
         providerCoordination: {
@@ -58,6 +68,16 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         result.process.eventLoopDelay.p95 = Math.max(result.process.eventLoopDelay.p95, Number(snapshot?.process?.eventLoopDelay?.p95 || 0));
         result.process.eventLoopDelay.p99 = Math.max(result.process.eventLoopDelay.p99, Number(snapshot?.process?.eventLoopDelay?.p99 || 0));
         result.process.eventLoopDelay.max = Math.max(result.process.eventLoopDelay.max, Number(snapshot?.process?.eventLoopDelay?.max || 0));
+        if (snapshot?.imageCapacity) {
+            result.imageCapacity.byWorker[workerId] = snapshot.imageCapacity;
+            result.imageCapacity.activeBytes += Number(snapshot.imageCapacity.activeBytes || 0);
+            result.imageCapacity.queued += Number(snapshot.imageCapacity.queued || 0);
+            result.imageCapacity.globalUsedBytes = Math.max(result.imageCapacity.globalUsedBytes, Number(snapshot.imageCapacity.globalUsedBytes || 0));
+            result.imageCapacity.globalBudgetBytes = Math.max(result.imageCapacity.globalBudgetBytes, Number(snapshot.imageCapacity.globalBudgetBytes || 0));
+            result.imageCapacity.overcommitted += Number(snapshot.imageCapacity.overcommitted || 0);
+            result.imageCapacity.coordinationFailures += Number(snapshot.imageCapacity.coordinationFailures || 0);
+            result.imageCapacity.redisDegraded ||= snapshot.imageCapacity.redisDegraded === true;
+        }
         if (snapshot?.providerCoordination) {
             result.providerCoordination.byWorker[workerId] = snapshot.providerCoordination;
             for (const field of ['cooldownWrites', 'probeAcquired', 'probeRejected', 'rateLimited', 'retryAttempts', 'fallbacks']) {

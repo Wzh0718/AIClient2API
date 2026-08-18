@@ -79,4 +79,25 @@ describe('image generation error audit', () => {
         expect(JSON.stringify(audit)).not.toContain('prompt');
         expect(JSON.stringify(audit)).not.toContain('access_token');
     });
+
+    test('classifies local image capacity separately from an upstream 429', () => {
+        const error = new Error('Image service is temporarily at capacity');
+        error.code = 'image_capacity_exceeded';
+        error.type = 'server_overloaded';
+        error.status = 503;
+        error.statusCode = 503;
+
+        const audit = buildImageGenerationErrorAudit({
+            requestId: 'client:req-local-capacity',
+            model: 'gpt-image-2',
+            error
+        });
+
+        expect(audit).toMatchObject({
+            errorClass: 'local_capacity',
+            httpStatus: 503,
+            errorCode: 'image_capacity_exceeded',
+            errorType: 'server_overloaded'
+        });
+    });
 });

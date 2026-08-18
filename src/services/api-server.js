@@ -23,6 +23,7 @@ import { createUsageEventStore } from '../runtime/usage-event-store.js';
 import { RuntimeUsageProjector } from '../runtime/runtime-usage-projector.js';
 import { migrateCodexFingerprintProviderPoolsFile } from '../utils/codex-fingerprint-migration.js';
 import { invalidateServiceAdapter } from '../providers/adapter.js';
+import { runtimeImageCapacity } from '../runtime/runtime-image-capacity.js';
 
 /**
  * @license
@@ -242,6 +243,7 @@ function buildRuntimeMetricsSnapshot() {
     return {
         ...runtimeMetrics.snapshot(),
         workerId: process.env.RUNTIME_WORKER_ID || RUNTIME_WORKER_ROLE,
+        imageCapacity: runtimeImageCapacity.snapshot(),
         providerCoordination: getProviderPoolManager()?.coordination?.getStatus?.() || null,
         hooks: getRuntimeHookSnapshot()
     };

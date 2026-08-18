@@ -128,6 +128,16 @@ describe('runtime observability baseline', () => {
             hooks: { pending: 0, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 0, consumerLag: 0, oldestPendingAgeMs: 0, available: true, unavailableWorkers: [], byWorker: {} },
             inFlight: 3,
             process: { rss: 2200, heapUsed: 1100, maxEventLoopUtilization: 0.3, eventLoopDelay: { p95: 15, p99: 22, max: 30 } },
+            imageCapacity: {
+                activeBytes: 0,
+                queued: 0,
+                globalUsedBytes: 0,
+                globalBudgetBytes: 0,
+                overcommitted: 0,
+                coordinationFailures: 0,
+                redisDegraded: false,
+                byWorker: {}
+            },
             providerCoordination: {
                 byWorker: {},
                 geminiScheduling: {
@@ -142,6 +152,43 @@ describe('runtime observability baseline', () => {
             }
         });
         expect(JSON.stringify(aggregateWorkerMetrics(snapshots))).not.toMatch(/prompt|imageData|credential/i);
+    });
+
+    test('aggregates local image pressure while taking the maximum shared Redis usage', () => {
+        const snapshots = new Map([
+            ['execution-1', { imageCapacity: {
+                activeBytes: 100,
+                queued: 2,
+                globalUsedBytes: 300,
+                globalBudgetBytes: 400,
+                overcommitted: 1,
+                coordinationFailures: 0,
+                redisDegraded: false
+            } }],
+            ['execution-2', { imageCapacity: {
+                activeBytes: 80,
+                queued: 1,
+                globalUsedBytes: 300,
+                globalBudgetBytes: 400,
+                overcommitted: 0,
+                coordinationFailures: 2,
+                redisDegraded: true
+            } }]
+        ]);
+
+        expect(aggregateWorkerMetrics(snapshots).imageCapacity).toMatchObject({
+            activeBytes: 180,
+            queued: 3,
+            globalUsedBytes: 300,
+            globalBudgetBytes: 400,
+            overcommitted: 1,
+            coordinationFailures: 2,
+            redisDegraded: true,
+            byWorker: {
+                'execution-1': snapshots.get('execution-1').imageCapacity,
+                'execution-2': snapshots.get('execution-2').imageCapacity
+            }
+        });
     });
 
     test('sums Gemini scheduling counters while taking the maximum shared-state gauges', () => {

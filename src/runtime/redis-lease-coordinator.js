@@ -263,6 +263,88 @@ if redis.call('GET', key) ~= ARGV[2] then return 0 end
 return redis.call('DEL', key)
 `;
 
+const ACQUIRE_IMAGE_CAPACITY_SCRIPT = `
+local leases_key = KEYS[1] .. ':image-capacity:leases'
+local expiry_key = KEYS[1] .. ':image-capacity:expiry'
+local now_ms = tonumber(ARGV[6])
+local expired = redis.call('ZRANGEBYSCORE', expiry_key, '-inf', now_ms)
+for _, lease_id in ipairs(expired) do
+  redis.call('HDEL', leases_key, lease_id)
+  redis.call('ZREM', expiry_key, lease_id)
+end
+local used = 0
+local values = redis.call('HVALS', leases_key)
+for _, value in ipairs(values) do
+  local lease = cjson.decode(value)
+  used = used + tonumber(lease.bytes or 0)
+end
+local bytes = tonumber(ARGV[3])
+local budget = tonumber(ARGV[4])
+if used + bytes > budget then
+  return cjson.encode({ acquired = false, usedBytes = used })
+end
+local lease = cjson.encode({ workerId = ARGV[2], bytes = bytes, requestId = ARGV[7], createdAt = now_ms })
+redis.call('HSET', leases_key, ARGV[1], lease)
+redis.call('ZADD', expiry_key, now_ms + tonumber(ARGV[5]), ARGV[1])
+redis.call('PEXPIRE', leases_key, tonumber(ARGV[5]) * 2)
+redis.call('PEXPIRE', expiry_key, tonumber(ARGV[5]) * 2)
+return cjson.encode({ acquired = true, leaseId = ARGV[1], usedBytes = used + bytes })
+`;
+
+const RESIZE_IMAGE_CAPACITY_SCRIPT = `
+local leases_key = KEYS[1] .. ':image-capacity:leases'
+local value = redis.call('HGET', leases_key, ARGV[1])
+if not value then return cjson.encode({ resized = false, missing = true }) end
+local current = cjson.decode(value)
+local used = 0
+local values = redis.call('HVALS', leases_key)
+for _, item in ipairs(values) do
+  local lease = cjson.decode(item)
+  used = used + tonumber(lease.bytes or 0)
+end
+local next_bytes = tonumber(ARGV[2])
+local next_used = used - tonumber(current.bytes or 0) + next_bytes
+current.bytes = next_bytes
+redis.call('HSET', leases_key, ARGV[1], cjson.encode(current))
+return cjson.encode({ resized = true, overcommitted = next_used > tonumber(ARGV[3]), usedBytes = next_used })
+`;
+
+const RELEASE_IMAGE_CAPACITY_SCRIPT = `
+local leases_key = KEYS[1] .. ':image-capacity:leases'
+local expiry_key = KEYS[1] .. ':image-capacity:expiry'
+local removed = redis.call('HDEL', leases_key, ARGV[1])
+redis.call('ZREM', expiry_key, ARGV[1])
+return removed
+`;
+
+const RENEW_IMAGE_CAPACITY_SCRIPT = `
+local leases_key = KEYS[1] .. ':image-capacity:leases'
+local expiry_key = KEYS[1] .. ':image-capacity:expiry'
+if redis.call('HEXISTS', leases_key, ARGV[1]) == 0 then return 0 end
+redis.call('ZADD', expiry_key, tonumber(ARGV[2]) + tonumber(ARGV[3]), ARGV[1])
+redis.call('PEXPIRE', leases_key, tonumber(ARGV[3]) * 2)
+redis.call('PEXPIRE', expiry_key, tonumber(ARGV[3]) * 2)
+return 1
+`;
+
+const SNAPSHOT_IMAGE_CAPACITY_SCRIPT = `
+local leases_key = KEYS[1] .. ':image-capacity:leases'
+local expiry_key = KEYS[1] .. ':image-capacity:expiry'
+local now_ms = tonumber(ARGV[1])
+local expired = redis.call('ZRANGEBYSCORE', expiry_key, '-inf', now_ms)
+for _, lease_id in ipairs(expired) do
+  redis.call('HDEL', leases_key, lease_id)
+  redis.call('ZREM', expiry_key, lease_id)
+end
+local values = redis.call('HVALS', leases_key)
+local used = 0
+for _, value in ipairs(values) do
+  local lease = cjson.decode(value)
+  used = used + tonumber(lease.bytes or 0)
+end
+return cjson.encode({ activeLeases = #values, usedBytes = used })
+`;
+
 function normalizeCandidate(candidate, priority) {
     const providerType = String(candidate.providerType || '');
     const uuid = String(candidate.uuid || '');
@@ -299,6 +381,16 @@ export class RedisLeaseCoordinator {
         this.renewIntervalMs = Math.min(20000, Math.max(1000, Math.floor(this.leaseTtlMs / 3)));
         this.renewTimers = new Map();
         this.activeLeases = new Map();
+        this.activeImageLeases = new Map();
+        this.imageCapacityRecoveryRequired = false;
+        this.imageCapacityMetrics = {
+            acquired: 0,
+            rejected: 0,
+            released: 0,
+            overcommitted: 0,
+            renewFailures: 0,
+            lastUsedBytes: 0
+        };
         this.modelSchedulingMetrics = {
             cooldownWrites: 0,
             probeAcquired: 0,
@@ -395,6 +487,120 @@ export class RedisLeaseCoordinator {
         ]);
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         return { count: Number(parsed?.count || 0), ttlMs };
+    }
+
+    async acquireImageCapacity({ bytes, budgetBytes, requestId = '', ttlMs = this.leaseTtlMs } = {}) {
+        const normalizedBytes = Math.max(1, Number(bytes) || 1);
+        const normalizedBudget = Math.max(1, Number(budgetBytes) || 1);
+        if (this.imageCapacityRecoveryRequired) {
+            await this.restoreImageCapacityLeases({ budgetBytes: normalizedBudget });
+        }
+        const leaseId = randomUUID();
+        const safeTtlMs = Math.max(1000, Number(ttlMs) || this.leaseTtlMs);
+        const requestIdHash = hashAffinityKey(requestId);
+        const result = await this._eval('acquire-image-capacity', ACQUIRE_IMAGE_CAPACITY_SCRIPT, [
+            leaseId,
+            this.workerId,
+            String(normalizedBytes),
+            String(normalizedBudget),
+            String(safeTtlMs),
+            String(Date.now()),
+            requestIdHash
+        ]);
+        const state = typeof result === 'string' ? JSON.parse(result) : result;
+        this.imageCapacityMetrics.lastUsedBytes = Number(state?.usedBytes || 0);
+        if (state?.acquired !== true) {
+            this.imageCapacityMetrics.rejected += 1;
+            return null;
+        }
+        const lease = { leaseId, bytes: normalizedBytes, budgetBytes: normalizedBudget, ttlMs: safeTtlMs, requestIdHash };
+        const timer = setInterval(() => {
+            this.renewImageCapacity(leaseId).catch(() => {
+                this.imageCapacityMetrics.renewFailures += 1;
+            });
+        }, Math.min(20000, Math.max(1000, Math.floor(safeTtlMs / 3))));
+        timer.unref?.();
+        lease.timer = timer;
+        this.activeImageLeases.set(leaseId, lease);
+        this.imageCapacityMetrics.acquired += 1;
+        return { leaseId, bytes: normalizedBytes, usedBytes: this.imageCapacityMetrics.lastUsedBytes };
+    }
+
+    async resizeImageCapacity(leaseId, bytes, { budgetBytes } = {}) {
+        const lease = this.activeImageLeases.get(leaseId);
+        const normalizedBudget = Math.max(1, Number(budgetBytes || lease?.budgetBytes) || 1);
+        const normalizedBytes = Math.max(1, Number(bytes) || 1);
+        const result = await this._eval('resize-image-capacity', RESIZE_IMAGE_CAPACITY_SCRIPT, [
+            String(leaseId || ''),
+            String(normalizedBytes),
+            String(normalizedBudget)
+        ]);
+        const state = typeof result === 'string' ? JSON.parse(result) : result;
+        this.imageCapacityMetrics.lastUsedBytes = Number(state?.usedBytes || 0);
+        if (state?.resized !== true) {
+            this.imageCapacityMetrics.overcommitted += 1;
+            return { ...state, resized: false, overcommitted: true };
+        }
+        if (lease) lease.bytes = normalizedBytes;
+        if (state?.overcommitted === true) this.imageCapacityMetrics.overcommitted += 1;
+        return { ...state, resized: true, overcommitted: state?.overcommitted === true };
+    }
+
+    async renewImageCapacity(leaseId) {
+        const lease = this.activeImageLeases.get(leaseId);
+        if (!lease) return false;
+        const renewed = Number(await this._eval('renew-image-capacity', RENEW_IMAGE_CAPACITY_SCRIPT, [
+            leaseId,
+            String(Date.now()),
+            String(lease.ttlMs)
+        ])) === 1;
+        if (!renewed) this.imageCapacityRecoveryRequired = true;
+        return renewed;
+    }
+
+    async restoreImageCapacityLeases({ budgetBytes } = {}) {
+        const active = [...this.activeImageLeases.values()];
+        if (active.length === 0) {
+            this.imageCapacityRecoveryRequired = false;
+            return { restored: 0 };
+        }
+        let restored = 0;
+        for (const lease of active) {
+            const result = await this._eval('acquire-image-capacity', ACQUIRE_IMAGE_CAPACITY_SCRIPT, [
+                lease.leaseId,
+                this.workerId,
+                String(lease.bytes),
+                String(Math.max(1, Number(budgetBytes || lease.budgetBytes) || 1)),
+                String(lease.ttlMs),
+                String(Date.now()),
+                lease.requestIdHash || ''
+            ]);
+            const state = typeof result === 'string' ? JSON.parse(result) : result;
+            if (state?.acquired !== true) {
+                this.imageCapacityRecoveryRequired = true;
+                throw new CoordinationUnavailableError('Image capacity coordination is recovering');
+            }
+            restored += 1;
+            this.imageCapacityMetrics.lastUsedBytes = Number(state.usedBytes || this.imageCapacityMetrics.lastUsedBytes);
+        }
+        this.imageCapacityRecoveryRequired = false;
+        return { restored };
+    }
+
+    async releaseImageCapacity(leaseId) {
+        const lease = this.activeImageLeases.get(leaseId);
+        if (lease?.timer) clearInterval(lease.timer);
+        this.activeImageLeases.delete(leaseId);
+        const released = Number(await this._eval('release-image-capacity', RELEASE_IMAGE_CAPACITY_SCRIPT, [String(leaseId || '')])) === 1;
+        if (released) this.imageCapacityMetrics.released += 1;
+        return released;
+    }
+
+    async snapshotImageCapacity() {
+        const result = await this._eval('snapshot-image-capacity', SNAPSHOT_IMAGE_CAPACITY_SCRIPT, [String(Date.now())]);
+        const state = typeof result === 'string' ? JSON.parse(result) : result;
+        this.imageCapacityMetrics.lastUsedBytes = Number(state?.usedBytes || 0);
+        return { activeLeases: Number(state?.activeLeases || 0), usedBytes: this.imageCapacityMetrics.lastUsedBytes };
     }
 
     async resolvePromptCacheKey(scope, { ttlMs = 60 * 60 * 1000 } = {}) {
@@ -542,6 +748,11 @@ export class RedisLeaseCoordinator {
             recovering: this.recovering,
             bootId: this.bootId,
             activeLeases: this.activeLeases.size,
+            imageCapacity: {
+                ...this.imageCapacityMetrics,
+                localActiveLeases: this.activeImageLeases.size,
+                recoveryRequired: this.imageCapacityRecoveryRequired
+            },
             geminiScheduling: {
                 ...this.modelSchedulingMetrics,
                 byModel: { ...this.modelSchedulingMetrics.byModel }

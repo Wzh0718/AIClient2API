@@ -18,7 +18,12 @@ import { SUPPORTED_IMAGE_MODELS } from '../utils/constants.js';
 import { convertData } from '../convert/convert.js';
 import { summarizePayloadForLog } from '../utils/log-sanitizer.js';
 import { writeImageJsonResponse } from '../runtime/image-json-response.js';
-import { estimateImageResponseBytes, runtimeImageCapacity, updateImageCapacitySignals } from '../runtime/runtime-image-capacity.js';
+import {
+    estimateActualImagePeakBytes,
+    estimateImageResponseBytes,
+    runtimeImageCapacity,
+    updateImageCapacitySignals
+} from '../runtime/runtime-image-capacity.js';
 import {
     ImageAspectRatioMismatchError,
     ImagePostprocessError,
@@ -191,7 +196,33 @@ function writeImageRequestError(res, error) {
     const headers = { 'Content-Type': 'application/json' };
     if (error?.retryAfterSeconds) headers['Retry-After'] = String(error.retryAfterSeconds);
     res.writeHead(status, headers);
+    if (['IMAGE_CAPACITY_EXCEEDED', 'image_capacity_exceeded'].includes(error?.code)) {
+        res.end(JSON.stringify({
+            error: {
+                message: error.message || 'Image service is temporarily at capacity',
+                type: error.type || 'server_overloaded',
+                code: 'image_capacity_exceeded'
+            }
+        }));
+        return;
+    }
     res.end(JSON.stringify(createErrorResponse(error, MODEL_PROTOCOL_PREFIX.OPENAI)));
+}
+
+function createImageRequestAbort(req, res) {
+    const controller = new AbortController();
+    const abort = () => {
+        if (!controller.signal.aborted && !res.writableEnded) controller.abort();
+    };
+    req.once?.('aborted', abort);
+    res.once?.('close', abort);
+    return {
+        signal: controller.signal,
+        cleanup() {
+            req.removeListener?.('aborted', abort);
+            res.removeListener?.('close', abort);
+        }
+    };
 }
 
 function resolveFinalImageRequestError(error, retryContext, slotUuid) {
@@ -288,7 +319,7 @@ function logImagePayloadSummary(scope, model, payload) {
 }
 
 export function buildImageCapacityErrorLog(error) {
-    if (error?.code !== 'IMAGE_CAPACITY_EXCEEDED' || !error?.details) return null;
+    if (!['IMAGE_CAPACITY_EXCEEDED', 'image_capacity_exceeded'].includes(error?.code) || !error?.details) return null;
     const details = error.details;
     return {
         blockedReasons: Array.isArray(details.blockedReasons) ? details.blockedReasons : [],
@@ -327,6 +358,7 @@ function parseRetryAfterMs(value) {
 function classifyImageGenerationError(error) {
     const status = error?.response?.status || error?.status || error?.statusCode || null;
     if (isImageConnectionResetError(error)) return 'network_reset';
+    if (['IMAGE_CAPACITY_EXCEEDED', 'image_capacity_exceeded'].includes(error?.code)) return 'local_capacity';
     if (Number(status) === 429) return 'upstream_429';
     if (Number(status) === 401 || Number(status) === 403) return 'auth_failed';
     if (Number(status) >= 500) return 'upstream_5xx';
@@ -368,7 +400,7 @@ export function buildImageGenerationErrorAudit({
         errorClass: classifyImageGenerationError(error),
         httpStatus: error?.response?.status || error?.status || error?.statusCode || null,
         errorCode: errorBody.code || error?.code || null,
-        errorType: errorBody.type || null,
+        errorType: errorBody.type || error?.type || null,
         message: errorBody.message || error?.message || 'unknown error',
         retryAfterMs: parseRetryAfterMs(retryAfter),
         upstreamRequestId,
@@ -533,6 +565,7 @@ async function handleImageGenerationRequest(req, res, currentConfig, providerPoo
     let promptConstraintApplied = false;
     let capacityTicket = retryContext?.capacityTicket || null;
     const ownsCapacityTicket = !capacityTicket;
+    const capacityAbort = ownsCapacityTicket ? createImageRequestAbort(req, res) : null;
 
     try {
         if (retryContext?.parsedBody) {
@@ -590,6 +623,17 @@ async function handleImageGenerationRequest(req, res, currentConfig, providerPoo
 
             // 预留变量，在获取到 service 确认协议后再转换
             codexRequestBody = virtualOpenAIRequest;
+        }
+
+        if (!capacityTicket) {
+            updateImageCapacitySignals(providerPoolManager);
+            capacityTicket = await runtimeImageCapacity.acquire({
+                bytes: estimateImageResponseBytes({ n }),
+                kind: 'image-generation',
+                coordination: providerPoolManager?.coordination,
+                requestId: currentConfig._monitorRequestId,
+                signal: capacityAbort?.signal
+            });
         }
 
         // 从号池获取服务实例
@@ -697,10 +741,9 @@ async function handleImageGenerationRequest(req, res, currentConfig, providerPoo
             processingMetadata = normalized.metadata;
         }
 
-        if (!capacityTicket) {
-            updateImageCapacitySignals(providerPoolManager);
-            capacityTicket = await runtimeImageCapacity.acquire({ bytes: estimateImageResponseBytes({ n }), kind: 'image-generation' });
-        }
+        await runtimeImageCapacity.resize(capacityTicket, estimateActualImagePeakBytes(responseData, {
+            reservedBytes: capacityTicket.bytes
+        }));
 
         const clientResponse = { created: Math.floor(Date.now() / 1000), data: responseData };
         if (includeProcessingMetadata && processingMetadata) {
@@ -830,7 +873,8 @@ async function handleImageGenerationRequest(req, res, currentConfig, providerPoo
 
         writeImageRequestError(res, resolveFinalImageRequestError(error, retryContext, slotUuid));
     } finally {
-        if (ownsCapacityTicket && capacityTicket) runtimeImageCapacity.release(capacityTicket);
+        capacityAbort?.cleanup();
+        if (ownsCapacityTicket && capacityTicket) await runtimeImageCapacity.release(capacityTicket);
         // 确保并发槽在请求结束后归还（与 handleStreamRequest/handleUnaryRequest 保持一致）
         if (providerPoolManager && slotProviderType && slotUuid) {
             providerPoolManager.releaseSlot(slotProviderType, slotUuid);
@@ -979,8 +1023,10 @@ async function handleImageEditsRequest(req, res, currentConfig, providerPoolMana
     let slotAccountEmail = null;
     let form = null;
     let model = null;
+    let totalImageBytes = 0;
     let capacityTicket = retryContext?.capacityTicket || null;
     const ownsCapacityTicket = !capacityTicket;
+    const capacityAbort = ownsCapacityTicket ? createImageRequestAbort(req, res) : null;
 
     try {
         form = retryContext?.parsedForm ?? await parseMultipartForm(req);
@@ -1029,20 +1075,24 @@ async function handleImageEditsRequest(req, res, currentConfig, providerPoolMana
             return;
         }
 
+        totalImageBytes = imageFiles.reduce((total, file) => total + file.buffer.length, 0);
+        if (!capacityTicket) {
+            updateImageCapacitySignals(providerPoolManager);
+            capacityTicket = await runtimeImageCapacity.acquire({
+                bytes: estimateImageResponseBytes({ n, inputBytes: totalImageBytes }),
+                kind: 'image-edit',
+                coordination: providerPoolManager?.coordination,
+                requestId: currentConfig._monitorRequestId,
+                signal: capacityAbort?.signal
+            });
+        }
+
         const imageParts = imageFiles.map(({buffer, mimetype}) => ({
             type: 'image_url',
             image_url: {
                 url: `data:${mimetype || 'image/png'};base64,${buffer.toString('base64')}`
             }
         }));
-        const totalImageBytes = imageFiles.reduce((total, file) => total + file.buffer.length, 0);
-        if (!capacityTicket) {
-            updateImageCapacitySignals(providerPoolManager);
-            capacityTicket = await runtimeImageCapacity.acquire({
-                bytes: estimateImageResponseBytes({ n, inputBytes: totalImageBytes }),
-                kind: 'image-edit'
-            });
-        }
 
         // 构造虚拟 OpenAI 对话请求，参考对话接口实现自动转换
         const virtualOpenAIRequest = {
@@ -1165,6 +1215,11 @@ async function handleImageEditsRequest(req, res, currentConfig, providerPoolMana
             processingMetadata = normalized.metadata;
         }
 
+        await runtimeImageCapacity.resize(capacityTicket, estimateActualImagePeakBytes(responseData, {
+            inputBytes: totalImageBytes,
+            reservedBytes: capacityTicket.bytes
+        }));
+
         const clientResponse = { created: Math.floor(Date.now() / 1000), data: responseData };
         if (includeProcessingMetadata && processingMetadata) {
             clientResponse.x_aiclient2api = { image_processing: processingMetadata };
@@ -1261,7 +1316,8 @@ async function handleImageEditsRequest(req, res, currentConfig, providerPoolMana
 
         writeImageRequestError(res, resolveFinalImageRequestError(error, retryContext, slotUuid));
     } finally {
-        if (ownsCapacityTicket && capacityTicket) runtimeImageCapacity.release(capacityTicket);
+        capacityAbort?.cleanup();
+        if (ownsCapacityTicket && capacityTicket) await runtimeImageCapacity.release(capacityTicket);
         if (providerPoolManager && slotProviderType && slotUuid) {
             providerPoolManager.releaseSlot(slotProviderType, slotUuid);
         }

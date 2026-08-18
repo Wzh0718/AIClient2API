@@ -14,6 +14,7 @@ class InMemoryRedisExecutor {
         this.promptCacheKeys = new Map();
         this.modelCooldowns = new Map();
         this.modelProbeLeases = new Map();
+        this.imageCapacityLeases = new Map();
         this.scriptCalls = [];
         this.now = 0;
     }
@@ -106,6 +107,41 @@ class InMemoryRedisExecutor {
             if (affinityKey && !mapped && baseSelected) this.affinity.set(affinityKey, baseSelected.key);
             this.leases.set(leaseId, { epoch, providerKey: selected.key, workerId, ttlMs: Number(ttlMs), probeHash: selected.probeHash, probeOwner });
             return JSON.stringify({ leaseId, providerType: selected.providerType, uuid: selected.uuid, probe: Boolean(selected.probeHash) });
+        }
+        if (name === 'acquire-image-capacity') {
+            const [leaseId, workerId, bytes, budgetBytes, ttlMs] = args;
+            const usedBytes = [...this.imageCapacityLeases.values()].reduce((sum, lease) => sum + lease.bytes, 0);
+            if (usedBytes + Number(bytes) > Number(budgetBytes)) {
+                return JSON.stringify({ acquired: false, usedBytes });
+            }
+            this.imageCapacityLeases.set(leaseId, { workerId, bytes: Number(bytes), ttlMs: Number(ttlMs) });
+            return JSON.stringify({ acquired: true, leaseId, usedBytes: usedBytes + Number(bytes) });
+        }
+        if (name === 'resize-image-capacity') {
+            const [leaseId, bytes, budgetBytes] = args;
+            const current = this.imageCapacityLeases.get(leaseId);
+            if (!current) return JSON.stringify({ resized: false, missing: true });
+            const usedWithoutCurrent = [...this.imageCapacityLeases.entries()]
+                .filter(([id]) => id !== leaseId)
+                .reduce((sum, [, lease]) => sum + lease.bytes, 0);
+            if (usedWithoutCurrent + Number(bytes) > Number(budgetBytes)) {
+                current.bytes = Number(bytes);
+                return JSON.stringify({ resized: true, overcommitted: true, usedBytes: usedWithoutCurrent + current.bytes });
+            }
+            current.bytes = Number(bytes);
+            return JSON.stringify({ resized: true, usedBytes: usedWithoutCurrent + current.bytes });
+        }
+        if (name === 'release-image-capacity') {
+            return this.imageCapacityLeases.delete(args[0]) ? 1 : 0;
+        }
+        if (name === 'renew-image-capacity') {
+            return this.imageCapacityLeases.has(args[0]) ? 1 : 0;
+        }
+        if (name === 'snapshot-image-capacity') {
+            return JSON.stringify({
+                activeLeases: this.imageCapacityLeases.size,
+                usedBytes: [...this.imageCapacityLeases.values()].reduce((sum, lease) => sum + lease.bytes, 0)
+            });
         }
         if (name === 'recover-worker-leases') {
             const [workerId, expectedWorkers, observedBootId, _leaseTtlMs, proposedBootId, leasesJson] = args;
@@ -510,5 +546,43 @@ describe('RedisLeaseCoordinator', () => {
             .rejects.toMatchObject({ code: 'COORDINATION_UNAVAILABLE' });
         await expect(second.synchronize()).resolves.toMatchObject({ ready: true });
         expect(redis.leases.has(lease.leaseId)).toBe(true);
+    });
+
+    test('shares one weighted image-memory budget across workers', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const first = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+        const second = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w2' });
+
+        const firstLease = await first.acquireImageCapacity({ bytes: 70, budgetBytes: 100, requestId: 'req-1' });
+        await expect(second.acquireImageCapacity({ bytes: 40, budgetBytes: 100, requestId: 'req-2' })).resolves.toBeNull();
+        await expect(second.acquireImageCapacity({ bytes: 30, budgetBytes: 100, requestId: 'req-2' })).resolves.toMatchObject({ bytes: 30 });
+        await expect(first.releaseImageCapacity(firstLease.leaseId)).resolves.toBe(true);
+
+        await expect(second.snapshotImageCapacity()).resolves.toMatchObject({ activeLeases: 1, usedBytes: 30 });
+    });
+
+    test('keeps an existing image result even when an actual-size lease increase would exceed the budget', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const coordinator = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+        const lease = await coordinator.acquireImageCapacity({ bytes: 80, budgetBytes: 100, requestId: 'req-1' });
+
+        await expect(coordinator.resizeImageCapacity(lease.leaseId, 120, { budgetBytes: 100 }))
+            .resolves.toMatchObject({ resized: true, overcommitted: true, usedBytes: 120 });
+        await expect(coordinator.snapshotImageCapacity()).resolves.toMatchObject({ usedBytes: 120 });
+        await expect(coordinator.releaseImageCapacity(lease.leaseId)).resolves.toBe(true);
+    });
+
+    test('restores active image leases before admitting new work after Redis loses lease state', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const coordinator = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+        const existing = await coordinator.acquireImageCapacity({ bytes: 70, budgetBytes: 100, requestId: 'req-existing' });
+
+        redis.imageCapacityLeases.clear();
+        await expect(coordinator.renewImageCapacity(existing.leaseId)).resolves.toBe(false);
+        expect(coordinator.getStatus().imageCapacity.recoveryRequired).toBe(true);
+
+        await expect(coordinator.acquireImageCapacity({ bytes: 20, budgetBytes: 100, requestId: 'req-new' }))
+            .resolves.toMatchObject({ bytes: 20, usedBytes: 90 });
+        expect(redis.imageCapacityLeases.size).toBe(2);
     });
 });
