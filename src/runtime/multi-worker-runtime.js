@@ -15,6 +15,7 @@ function addMapValues(target, source = {}) {
 export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
     const result = {
         requests: { total: 0, success: 0, failed: 0, byWorker: {}, byKind: {} },
+        stages: { byWorker: {} },
         output: { bytes: 0, backpressureMs: 0 },
         hooks: { pending: 0, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 0, consumerLag: 0, oldestPendingAgeMs: 0, available: true, unavailableWorkers: [], byWorker: {} },
         imageCapacity: {
@@ -58,6 +59,23 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         result.requests.failed += Number(snapshot?.requests?.failed || 0);
         addMapValues(result.requests.byWorker, snapshot?.requests?.byWorker);
         addMapValues(result.requests.byKind, snapshot?.requests?.byKind);
+        if (snapshot?.stages) {
+            result.stages.byWorker[workerId] = snapshot.stages;
+            for (const [stageName, stage] of Object.entries(snapshot.stages)) {
+                const aggregate = result.stages[stageName] || {
+                    count: 0,
+                    p50: 0,
+                    p95: 0,
+                    p99: 0,
+                    max: 0
+                };
+                aggregate.count += Number(stage?.count || 0);
+                for (const field of ['p50', 'p95', 'p99', 'max']) {
+                    aggregate[field] = Math.max(aggregate[field], Number(stage?.[field] || 0));
+                }
+                result.stages[stageName] = aggregate;
+            }
+        }
         result.output.bytes += Number(snapshot?.output?.bytes || 0);
         result.output.backpressureMs += Number(snapshot?.output?.backpressureMs || 0);
         result.inFlight += Number(snapshot?.inFlight || 0);

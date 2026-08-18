@@ -129,6 +129,7 @@ describe('runtime observability baseline', () => {
 
         expect(aggregateWorkerMetrics(snapshots)).toEqual({
             requests: { total: 12, success: 11, failed: 1, byWorker: { 'execution-1': 5, 'execution-2': 7 }, byKind: { model: 10, image: 2 } },
+            stages: { byWorker: {} },
             output: { bytes: 300, backpressureMs: 10 },
             hooks: { pending: 0, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 0, consumerLag: 0, oldestPendingAgeMs: 0, available: true, unavailableWorkers: [], byWorker: {} },
             inFlight: 3,
@@ -167,6 +168,27 @@ describe('runtime observability baseline', () => {
             }
         });
         expect(JSON.stringify(aggregateWorkerMetrics(snapshots))).not.toMatch(/prompt|imageData|credential/i);
+    });
+
+    test('exposes request stage latency by worker and as a conservative aggregate', () => {
+        const snapshots = new Map([
+            ['execution-1', { stages: {
+                providerFilterMs: { count: 2, p50: 5, p95: 10, p99: 12, max: 14 }
+            } }],
+            ['execution-2', { stages: {
+                providerFilterMs: { count: 1, p50: 7, p95: 12, p99: 15, max: 18 },
+                redisLeaseMs: { count: 1, p50: 3, p95: 3, p99: 3, max: 3 }
+            } }]
+        ]);
+
+        expect(aggregateWorkerMetrics(snapshots).stages).toEqual({
+            providerFilterMs: { count: 3, p50: 7, p95: 12, p99: 15, max: 18 },
+            redisLeaseMs: { count: 1, p50: 3, p95: 3, p99: 3, max: 3 },
+            byWorker: {
+                'execution-1': snapshots.get('execution-1').stages,
+                'execution-2': snapshots.get('execution-2').stages
+            }
+        });
     });
 
     test('aggregates pricing anomaly diagnostics across workers', () => {
