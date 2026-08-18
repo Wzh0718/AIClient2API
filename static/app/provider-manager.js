@@ -17,8 +17,8 @@ import {
     isExpectedOAuthPopupCompleteMessage
 } from './oauth-popup.js';
 import {
+    buildCredentialGroupCredentialSections,
     getFocusedCredentialGroupKeys,
-    getFocusedCredentials,
     resolveCredentialGroupMemberLabel
 } from './credential-group-view.js';
 
@@ -36,10 +36,11 @@ let credentialGroupBusyAction = null;
 let credentialGroupEventsBound = false;
 let providersAdvancedViewActive = false;
 const credentialGroupListExpanded = {
-    credentials: false,
     keys: false,
     previewKeys: false
 };
+const credentialGroupDetailsExpanded = new Set();
+let credentialGroupUngroupedExpanded = false;
 
 function getCredentialGroupResponseData(response) {
     return response?.data || response || {};
@@ -258,7 +259,36 @@ function renderCredentialGroupPolicy() {
     `;
 }
 
-function renderCredentialGroupCards(groups, emptyKey = 'providers.credentialGroups.empty.groups') {
+function renderCredentialDetailRows(credentials = [], duplicateCredentialRefs = []) {
+    const duplicateSet = new Set(duplicateCredentialRefs);
+    return credentials.map(credential => {
+        const status = getCredentialGroupCredentialStatus(credential);
+        const label = resolveCredentialGroupMemberLabel(credential.credentialRef, [credential]);
+        const reference = label.secondary
+            ? `<code title="${escapeHtml(label.secondary)}">${escapeHtml(label.secondary)}</code>`
+            : '';
+        const duplicateBadge = duplicateSet.has(String(credential.credentialRef || ''))
+            ? credentialGroupBadge(t('providers.credentialGroups.status.duplicateGroup'), 'is-warning')
+            : '';
+        const lockBadge = credential.manualLock === true
+            ? credentialGroupBadge(t('providers.credentialGroups.status.locked'), 'is-locked')
+            : '';
+        return `
+            <div class="credential-group-credential-row">
+                <div class="credential-group-credential-identity">
+                    <strong>${escapeHtml(label.primary || t('providers.credentialGroups.unknown'))}</strong>
+                    ${reference}
+                </div>
+                <div><span>${escapeHtml(t('providers.credentialGroups.label.capacity'))}</span><strong>${escapeHtml(formatCredentialGroupNumber(credential.capacity, 2))}</strong></div>
+                <div><span>${escapeHtml(t('providers.credentialGroups.label.remaining5h'))}</span><strong>${escapeHtml(formatCredentialGroupRatio(credential.fiveHourRemainingRatio))}</strong></div>
+                <div><span>${escapeHtml(t('providers.credentialGroups.label.remainingWeekly'))}</span><strong>${escapeHtml(formatCredentialGroupRatio(credential.weeklyRemainingRatio))}</strong></div>
+                <div class="credential-groups-table-badges">${credentialGroupBadge(status.text, status.className)}${lockBadge}${duplicateBadge}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderCredentialGroupCards(groups, emptyKey = 'providers.credentialGroups.empty.groups', options = {}) {
     if (!Array.isArray(groups) || groups.length === 0) {
         return credentialGroupEmpty('fa-layer-group', emptyKey);
     }
@@ -276,6 +306,9 @@ function renderCredentialGroupCards(groups, emptyKey = 'providers.credentialGrou
         const confidenceBadge = group?.confidence && group.confidence !== 'high'
             ? credentialGroupBadge(t('providers.credentialGroups.status.lowConfidence'), 'is-warning')
             : '';
+        const duplicateBadge = Array.isArray(group?.duplicateCredentialRefs) && group.duplicateCredentialRefs.length > 0
+            ? credentialGroupBadge(t('providers.credentialGroups.status.duplicateGroup'), 'is-warning')
+            : '';
         const credentials = Array.isArray(credentialGroupView?.credentials) ? credentialGroupView.credentials : [];
         const members = credentialRefs.length > 0
             ? credentialRefs.map(ref => {
@@ -283,9 +316,27 @@ function renderCredentialGroupCards(groups, emptyKey = 'providers.credentialGrou
                 const secondary = label.secondary
                     ? `<small title="${escapeHtml(label.secondary)}">${escapeHtml(label.secondary)}</small>`
                     : '';
-                return `<span class="credential-group-member"><i class="fas fa-id-card" aria-hidden="true"></i><span>${escapeHtml(label.primary)}${secondary}</span></span>`;
+                return `<span class="credential-group-member"><i class="fas fa-id-card" aria-hidden="true"></i><span class="credential-group-member-label"><strong>${escapeHtml(label.primary)}</strong>${secondary}</span></span>`;
             }).join('')
             : `<span class="credential-group-member">${escapeHtml(t('providers.credentialGroups.unknown'))}</span>`;
+        const detailsId = `credential-group-details-${index}`;
+        const expanded = credentialGroupDetailsExpanded.has(groupId);
+        const groupCredentials = Array.isArray(group?.credentials) ? group.credentials : [];
+        const missingRefs = Array.isArray(group?.missingCredentialRefs) ? group.missingCredentialRefs : [];
+        const details = options.showCredentialDetails === true ? `
+            <button type="button" class="btn btn-outline credential-group-details-toggle"
+                data-credential-group-details-toggle="${escapeHtml(groupId)}"
+                aria-expanded="${expanded}" aria-controls="${detailsId}">
+                <i class="fas fa-chevron-${expanded ? 'up' : 'down'}" aria-hidden="true"></i>
+                <span>${escapeHtml(t(expanded ? 'providers.credentialGroups.collapseDetails' : 'providers.credentialGroups.expandDetails', { count: groupCredentials.length }))}</span>
+            </button>
+            <div class="credential-group-credential-details" id="${detailsId}"${expanded ? '' : ' hidden'}>
+                ${groupCredentials.length > 0
+                    ? renderCredentialDetailRows(groupCredentials, group.duplicateCredentialRefs)
+                    : credentialGroupEmpty('fa-id-card-clip', 'providers.credentialGroups.empty.credentials')}
+                ${missingRefs.length > 0 ? `<div class="credential-group-reference-warning"><i class="fas fa-triangle-exclamation" aria-hidden="true"></i>${escapeHtml(t('providers.credentialGroups.missingCredentialRefs', { count: missingRefs.length }))}</div>` : ''}
+            </div>
+        ` : '';
         return `
             <article class="credential-group-card${group?.manualLock === true ? ' is-locked' : ''}">
                 <div class="credential-group-card-head">
@@ -293,7 +344,7 @@ function renderCredentialGroupCards(groups, emptyKey = 'providers.credentialGrou
                         <h5>${escapeHtml(groupName)}</h5>
                         <div class="credential-group-card-id">${escapeHtml(groupId)}</div>
                     </div>
-                    <div class="credential-groups-table-badges">${lockBadge}${confidenceBadge}</div>
+                    <div class="credential-groups-table-badges">${lockBadge}${confidenceBadge}${duplicateBadge}</div>
                 </div>
                 <div class="credential-group-metrics">
                     <div class="credential-group-metric"><span>${escapeHtml(t('providers.credentialGroups.label.credentials'))}</span><strong>${escapeHtml(formatCredentialGroupNumber(credentialCount, 0))}</strong></div>
@@ -302,6 +353,7 @@ function renderCredentialGroupCards(groups, emptyKey = 'providers.credentialGrou
                     <div class="credential-group-metric"><span>${escapeHtml(t('providers.credentialGroups.label.loadIndex'))}</span><strong>${escapeHtml(loadIndex)}</strong></div>
                 </div>
                 <div class="credential-group-members">${members}</div>
+                ${details}
             </article>
         `;
     }).join('');
@@ -320,45 +372,31 @@ function getCredentialGroupCredentialStatus(credential) {
     return { text: t('providers.credentialGroups.status.available'), className: 'is-available' };
 }
 
-function renderCredentialGroupCredentialsTable() {
-    const container = document.getElementById('credentialGroupsCredentials');
-    if (!container || !credentialGroupView) return;
-    const credentials = Array.isArray(credentialGroupView.credentials) ? credentialGroupView.credentials : [];
-    const focused = getFocusedCredentials(credentials);
-    const expanded = credentialGroupListExpanded.credentials === true;
-    const visibleCredentials = expanded ? focused.all : focused.visible;
-    if (credentials.length === 0) {
-        container.innerHTML = credentialGroupEmpty('fa-id-card-clip', 'providers.credentialGroups.empty.credentials');
-        return;
+function renderUngroupedCredentials(credentials = []) {
+    const section = document.getElementById('credentialGroupsUngroupedSection');
+    const container = document.getElementById('credentialGroupsUngroupedCredentials');
+    const toggle = document.getElementById('credentialGroupsUngroupedToggle');
+    if (!section || !container || !toggle) return;
+    const hasCredentials = credentials.length > 0;
+    section.hidden = !hasCredentials;
+    toggle.setAttribute('aria-expanded', credentialGroupUngroupedExpanded ? 'true' : 'false');
+    const icon = toggle.querySelector('i');
+    if (icon) icon.className = `fas fa-chevron-${credentialGroupUngroupedExpanded ? 'up' : 'down'}`;
+    const label = toggle.querySelector('span');
+    if (label) {
+        label.textContent = t(
+            credentialGroupUngroupedExpanded
+                ? 'providers.credentialGroups.collapseDetails'
+                : 'providers.credentialGroups.expandDetails',
+            { count: credentials.length }
+        );
     }
-    const table = visibleCredentials.length > 0 ? `
-        <table class="credential-groups-table">
-            <thead><tr>
-                <th>${escapeHtml(t('providers.credentialGroups.label.credential'))}</th>
-                <th>${escapeHtml(t('providers.credentialGroups.label.provider'))}</th>
-                <th>${escapeHtml(t('providers.credentialGroups.label.capacity'))}</th>
-                <th>${escapeHtml(t('providers.credentialGroups.label.remaining5h'))}</th>
-                <th>${escapeHtml(t('providers.credentialGroups.label.remainingWeekly'))}</th>
-                <th>${escapeHtml(t('providers.credentialGroups.label.status'))}</th>
-            </tr></thead>
-            <tbody>${visibleCredentials.map(credential => {
-                const status = getCredentialGroupCredentialStatus(credential);
-                const lockBadge = credential.manualLock === true
-                    ? credentialGroupBadge(t('providers.credentialGroups.status.locked'), 'is-locked')
-                    : '';
-                const name = credential.customName ? `<small>${escapeHtml(credential.customName)}</small>` : '';
-                return `<tr>
-                    <td><div class="credential-groups-table-primary"><code>${escapeHtml(credential.credentialRef || t('providers.credentialGroups.unknown'))}</code>${name}</div></td>
-                    <td>${escapeHtml(credential.providerType || t('providers.credentialGroups.unknown'))}</td>
-                    <td>${escapeHtml(formatCredentialGroupNumber(credential.capacity, 2))}</td>
-                    <td>${escapeHtml(formatCredentialGroupRatio(credential.fiveHourRemainingRatio))}</td>
-                    <td>${escapeHtml(formatCredentialGroupRatio(credential.weeklyRemainingRatio))}</td>
-                    <td><div class="credential-groups-table-badges">${credentialGroupBadge(status.text, status.className)}${lockBadge}</div></td>
-                </tr>`;
-            }).join('')}</tbody>
-        </table>
-    ` : credentialGroupEmpty('fa-id-card-clip', 'providers.credentialGroups.empty.focusedCredentials');
-    container.innerHTML = `${table}${renderCredentialGroupDisclosure('credentials', focused.hiddenCount, expanded)}`;
+    container.hidden = !credentialGroupUngroupedExpanded;
+    container.innerHTML = credentials.length > 0 ? `
+        <div class="credential-group-credential-details is-ungrouped">
+            ${renderCredentialDetailRows(credentials)}
+        </div>
+    ` : '';
 }
 
 function formatCredentialGroupDemand(demand) {
@@ -512,11 +550,19 @@ function renderCredentialGroupManagement() {
     renderCredentialGroupSummary();
     renderCredentialGroupPolicy();
     renderCredentialGroupPreview();
+    const credentialSections = buildCredentialGroupCredentialSections(
+        credentialGroupView.groups,
+        credentialGroupView.credentials
+    );
     const currentGroups = document.getElementById('credentialGroupsCurrentGroups');
     if (currentGroups) {
-        currentGroups.innerHTML = renderCredentialGroupCards(credentialGroupView.groups);
+        currentGroups.innerHTML = renderCredentialGroupCards(
+            credentialSections.groups,
+            'providers.credentialGroups.empty.groups',
+            { showCredentialDetails: true }
+        );
     }
-    renderCredentialGroupCredentialsTable();
+    renderUngroupedCredentials(credentialSections.ungroupedCredentials);
     const currentKeys = document.getElementById('credentialGroupsKeys');
     if (currentKeys) currentKeys.innerHTML = renderCredentialGroupKeyTable(credentialGroupView.keys, 'providers.credentialGroups.empty.keys', 'keys');
     renderCredentialGroupRevisionsTable();
@@ -545,6 +591,20 @@ function initCredentialGroupManagement() {
     bindOnce(applyButton, 'click', () => applyCredentialGroupPreview(), 'credentialGroupsApplyPreview');
     bindOnce(rollbackButton, 'click', () => rollbackCredentialGroups(), 'credentialGroupsRollback');
     bindOnce(panel, 'click', event => {
+        const ungroupedButton = event.target.closest('[data-credential-group-ungrouped-toggle]');
+        if (ungroupedButton && panel?.contains(ungroupedButton)) {
+            credentialGroupUngroupedExpanded = !credentialGroupUngroupedExpanded;
+            renderCredentialGroupManagement();
+            return;
+        }
+        const detailsButton = event.target.closest('[data-credential-group-details-toggle]');
+        if (detailsButton && panel?.contains(detailsButton)) {
+            const groupId = detailsButton.dataset.credentialGroupDetailsToggle;
+            if (credentialGroupDetailsExpanded.has(groupId)) credentialGroupDetailsExpanded.delete(groupId);
+            else credentialGroupDetailsExpanded.add(groupId);
+            renderCredentialGroupManagement();
+            return;
+        }
         const button = event.target.closest('[data-credential-group-toggle]');
         if (!button || !panel?.contains(button)) return;
         const scope = button.dataset.credentialGroupToggle;

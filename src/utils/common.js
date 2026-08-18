@@ -1871,7 +1871,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                     );
                 }
             } catch (fallbackError) {
-                logger.error('[Temporary Route] Original stream fallback failed:', fallbackError.message);
+                logger.error(`[Temporary Route] ${DEFAULT_CODEX_FALLBACK_MODEL} stream fallback failed:`, fallbackError.message);
             }
         }
 
@@ -2216,7 +2216,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 );
             }
         } catch (fallbackError) {
-            logger.error('[Temporary Route] Original unary fallback failed:', fallbackError.message);
+            logger.error(`[Temporary Route] ${DEFAULT_CODEX_FALLBACK_MODEL} unary fallback failed:`, fallbackError.message);
         }
 
         // 使用新方法创建符合 fromProvider 格式的错误响应
@@ -2442,7 +2442,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     }
 
     let temporaryRouteFallbackUsed = false;
-    const buildTemporaryOriginalFallback = temporaryRoute?.fallbackToOriginal
+    const buildTemporaryLunaFallback = temporaryRoute?.fallbackToOriginal
         ? async () => {
             CONFIG.MODEL_PROVIDER = temporaryRoute.originalProviderType;
             delete CONFIG.actualProviderType;
@@ -2451,16 +2451,11 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
                 acquireSlot: Boolean(providerPoolManager && CONFIG.providerPools),
                 disableProviderFallback: true
             };
-            let result;
-            try {
-                result = await getApiServiceWithFallback(CONFIG, temporaryRoute.requestedModel, {
-                    ...selectionOptions,
-                    preserveRequestedCodexModel: true
-                });
-            } catch (originalSelectionError) {
-                logger.warn(`[Temporary Route] Original Codex model unavailable; using ${DEFAULT_CODEX_FALLBACK_MODEL}: ${originalSelectionError.message}`);
-                result = await getApiServiceWithFallback(CONFIG, DEFAULT_CODEX_FALLBACK_MODEL, selectionOptions);
-            }
+            const result = await getApiServiceWithFallback(
+                CONFIG,
+                DEFAULT_CODEX_FALLBACK_MODEL,
+                selectionOptions
+            );
             let fallbackRequestBody = { ...originalRequestBody };
             if (isCodexProvider(result.actualProviderType)) {
                 fallbackRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY] = inboundCodexFingerprintContext;
@@ -2485,7 +2480,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             await _manageSystemPrompt(fallbackRequestBody, result.actualProviderType);
             return {
                 service: result.service,
-                model: result.actualModel || temporaryRoute.requestedModel,
+                model: result.actualModel || DEFAULT_CODEX_FALLBACK_MODEL,
                 requestBody: fallbackRequestBody,
                 toProvider: result.actualProviderType,
                 uuid: result.uuid,
@@ -2544,9 +2539,9 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
                 ...(routingStrategy ? { routingStrategy } : {})
             });
         } catch (selectionError) {
-            if (!buildTemporaryOriginalFallback) throw selectionError;
-            logger.warn(`[Temporary Route] Target selection failed; using original route: ${selectionError.message}`);
-            const fallback = await buildTemporaryOriginalFallback();
+            if (!buildTemporaryLunaFallback) throw selectionError;
+            logger.warn(`[Temporary Route] Target selection failed; using ${DEFAULT_CODEX_FALLBACK_MODEL}: ${selectionError.message}`);
+            const fallback = await buildTemporaryLunaFallback();
             providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
             temporaryRouteFallbackUsed = true;
             result = {
@@ -2659,7 +2654,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             : {}),
         ...(temporaryRoute ? {
             temporaryRoute,
-            temporaryRouteFallback: buildTemporaryOriginalFallback,
+            temporaryRouteFallback: buildTemporaryLunaFallback,
             temporaryRouteFallbackAttempted: temporaryRouteFallbackUsed
         } : {})
     };

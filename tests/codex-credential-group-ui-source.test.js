@@ -30,10 +30,21 @@ describe('Codex credential-group UI source', () => {
             'credentialGroupsContent',
             'credentialGroupsPreview',
             'credentialGroupsCurrentGroups',
-            'credentialGroupsCredentials',
+            'credentialGroupsUngroupedCredentials',
             'credentialGroupsKeys',
             'credentialGroupsRevisions'
         ].forEach(id => expect(providersHtml).toContain(`id="${id}"`));
+    });
+
+    test('merges credential details into collapsible group cards instead of a permanent credential table', () => {
+        expect(providersHtml).not.toContain('id="credentialGroupsCredentials"');
+        expect(providerManager).toContain('buildCredentialGroupCredentialSections');
+        expect(providerManager).toContain('aria-expanded=');
+        expect(providerManager).toContain('credential-group-credential-details');
+        expect(providerManager).toContain('credentialGroupsUngroupedCredentials');
+        expect(providersHtml).toContain('data-credential-group-ungrouped-toggle');
+        expect(providersHtml).toContain('aria-controls="credentialGroupsUngroupedCredentials"');
+        expect(providerManager).toContain('credentialGroupUngroupedExpanded');
     });
 
     test('uses the apiClient relative paths so the client adds the /api prefix exactly once', () => {
@@ -69,7 +80,7 @@ describe('Codex credential-group UI source', () => {
     test('renders only public credential references and escapes dynamic management data', () => {
         expect(providerManager).toContain('credential.credentialRef');
         expect(providerManager).toContain('key?.maskedKey || key?.keyRef');
-        expect(providerManager).toContain('escapeHtml(credential.credentialRef');
+        expect(providerManager).toContain('escapeHtml(label.secondary)');
         expect(providerManager).toContain('escapeHtml(primaryGroup)');
         expect(providerManager).not.toContain('fixedCredential.uuid');
         expect(providerManager).not.toContain('credential.uuid');

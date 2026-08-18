@@ -115,3 +115,36 @@ export function getFocusedCredentials(credentials = []) {
         hiddenCount: Math.max(0, all.length - visible.length)
     };
 }
+
+export function buildCredentialGroupCredentialSections(groups = [], credentials = []) {
+    const credentialByRef = new Map(
+        credentials.map(credential => [credentialStableRef(credential), credential])
+    );
+    const membershipCount = new Map();
+
+    groups.forEach(group => {
+        const refs = new Set(Array.isArray(group?.credentialRefs) ? group.credentialRefs.map(String) : []);
+        refs.forEach(ref => membershipCount.set(ref, (membershipCount.get(ref) || 0) + 1));
+    });
+
+    const duplicateCredentialRefs = [...membershipCount.entries()]
+        .filter(([, count]) => count > 1)
+        .map(([ref]) => ref)
+        .sort();
+    const duplicateSet = new Set(duplicateCredentialRefs);
+    const assignedRefs = new Set(membershipCount.keys());
+
+    return {
+        groups: groups.map(group => {
+            const refs = Array.isArray(group?.credentialRefs) ? group.credentialRefs.map(String) : [];
+            return {
+                ...group,
+                credentials: refs.map(ref => credentialByRef.get(ref)).filter(Boolean),
+                missingCredentialRefs: refs.filter(ref => !credentialByRef.has(ref)),
+                duplicateCredentialRefs: refs.filter(ref => duplicateSet.has(ref))
+            };
+        }),
+        duplicateCredentialRefs,
+        ungroupedCredentials: credentials.filter(credential => !assignedRefs.has(credentialStableRef(credential)))
+    };
+}

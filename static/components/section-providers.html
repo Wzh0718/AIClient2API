@@ -125,14 +125,20 @@
                 <div class="credential-groups-card-grid" id="credentialGroupsCurrentGroups"></div>
             </section>
 
-            <section class="credential-groups-section" aria-labelledby="credential-groups-credentials-title">
+            <section class="credential-groups-section" id="credentialGroupsUngroupedSection" aria-labelledby="credential-groups-ungrouped-title" hidden>
                 <div class="credential-groups-section-head">
                     <div>
-                        <h4 id="credential-groups-credentials-title"><i class="fas fa-id-card-clip"></i> <span data-i18n="providers.credentialGroups.credentialsTitle">Codex OAuth 凭据</span></h4>
-                        <p data-i18n="providers.credentialGroups.credentialsDesc">仅显示脱敏凭据引用、健康状态与额度比例，不显示 OAuth Token、Cookie 或原始 UUID。</p>
+                        <h4 id="credential-groups-ungrouped-title"><i class="fas fa-id-card-clip"></i> <span data-i18n="providers.credentialGroups.ungroupedTitle">未分组凭据</span></h4>
+                        <p data-i18n="providers.credentialGroups.ungroupedDesc">仅在存在尚未加入当前凭据组的脱敏凭据时显示。</p>
                     </div>
+                    <button type="button" class="btn btn-outline" id="credentialGroupsUngroupedToggle"
+                        data-credential-group-ungrouped-toggle aria-expanded="false"
+                        aria-controls="credentialGroupsUngroupedCredentials">
+                        <i class="fas fa-chevron-down" aria-hidden="true"></i>
+                        <span data-i18n="providers.credentialGroups.expandDetails">展开凭据详情</span>
+                    </button>
                 </div>
-                <div class="credential-groups-table-wrap" id="credentialGroupsCredentials"></div>
+                <div id="credentialGroupsUngroupedCredentials" hidden></div>
             </section>
 
             <section class="credential-groups-section" aria-labelledby="credential-groups-keys-title">

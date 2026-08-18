@@ -103,4 +103,24 @@ describe('credential-group focused management view', () => {
         expect(result.visible.map(item => item.credentialRef)).toEqual(['healthy']);
         expect(result.hiddenCount).toBe(3);
     });
+
+    test('maps credential details into groups and separates ungrouped and duplicate credentials', async () => {
+        const { buildCredentialGroupCredentialSections } = await import('../static/app/credential-group-view.js');
+        const credentials = [
+            { credentialRef: 'ref-a', accountEmail: 'a@example.com' },
+            { credentialRef: 'ref-b', customName: 'Credential B' },
+            { credentialRef: 'ref-c' },
+            { credentialRef: 'ref-unused' }
+        ];
+        const result = buildCredentialGroupCredentialSections([
+            { id: 'group-1', credentialRefs: ['ref-a', 'ref-b'] },
+            { id: 'group-2', credentialRefs: ['ref-b', 'ref-c', 'ref-missing'] }
+        ], credentials);
+
+        expect(result.groups[0].credentials.map(item => item.credentialRef)).toEqual(['ref-a', 'ref-b']);
+        expect(result.groups[1].credentials.map(item => item.credentialRef)).toEqual(['ref-b', 'ref-c']);
+        expect(result.groups[1].missingCredentialRefs).toEqual(['ref-missing']);
+        expect(result.duplicateCredentialRefs).toEqual(['ref-b']);
+        expect(result.ungroupedCredentials.map(item => item.credentialRef)).toEqual(['ref-unused']);
+    });
 });

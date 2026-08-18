@@ -262,6 +262,52 @@ describe('RuntimeHookBridge', () => {
         expect(messages[0].args[0]._temporaryKeyModelRouteResult).not.toHaveProperty('accountIdentity');
     });
 
+    test('reuses one event id when a Luna fallback usage event is replayed', async () => {
+        const published = [];
+        const bridge = new RuntimeHookBridge({
+            send: jest.fn(),
+            durableTransport: {
+                publish: event => {
+                    published.push(event);
+                    return { persisted: true, streamId: `${published.length}-0` };
+                },
+                snapshot: () => ({})
+            }
+        });
+        const fallbackPayload = {
+            _monitorRequestId: 'batch-luna-fallback-event',
+            model: 'gpt-5.6-luna',
+            fromProvider: 'openaiResponses',
+            toProvider: 'openai-codex-oauth',
+            originalRequestBody: { model: 'gpt-5.4-mini' },
+            processedRequestBody: { model: 'gpt-5.6-luna' },
+            _temporaryKeyModelRouteResult: {
+                id: 'temporary-antigravity-flash',
+                targetProviderType: 'gemini-antigravity',
+                targetModel: 'gemini-2.5-flash',
+                actualProviderType: 'openai-codex-oauth',
+                actualModel: 'gpt-5.6-luna',
+                credentialRetryUsed: true,
+                fallbackUsed: true
+            }
+        };
+
+        await bridge.handle('onContentGenerated', fallbackPayload);
+        await bridge.handle('onContentGenerated', fallbackPayload);
+
+        expect(published).toHaveLength(2);
+        expect(published[0].eventId).toBe(published[1].eventId);
+        expect(published[0].args[0]).toMatchObject({
+            model: 'gpt-5.6-luna',
+            toProvider: 'openai-codex-oauth',
+            _temporaryKeyModelRouteResult: {
+                actualProviderType: 'openai-codex-oauth',
+                actualModel: 'gpt-5.6-luna',
+                fallbackUsed: true
+            }
+        });
+    });
+
     test('bridges only cache fingerprints for prepared upstream requests, never raw prompts', async () => {
         const messages = [];
         const bridge = new RuntimeHookBridge({ send: message => messages.push(message) });
