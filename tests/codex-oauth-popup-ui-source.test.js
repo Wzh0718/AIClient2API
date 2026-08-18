@@ -217,7 +217,7 @@ describe('Codex OAuth popup lifecycle UI source', () => {
     });
 
     test('pre-registers listeners only for Codex and registers legacy listeners after opening the popup', () => {
-        const providerSource = readFileSync('static/app/provider-manager.js', 'utf8');
+        const providerSource = readFileSync('static/app/provider-manager.js', 'utf8').replace(/\r\n/g, '\n');
 
         expect(providerSource).toContain("if (authInfo.provider === 'openai-codex-oauth') {\n        popupSession.registerListeners();\n    }");
         expect(providerSource).toContain('popupSession.setAuthWindow(authWindow);\n        popupSession.registerListeners();');
