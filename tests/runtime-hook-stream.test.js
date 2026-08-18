@@ -112,6 +112,28 @@ describe('RuntimeHookStream', () => {
         fs.rmSync(dir, { recursive: true, force: true });
     });
 
+    test('tracks producer WAL size incrementally instead of rescanning the directory per event', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-hook-spool-index-'));
+        const redis = {
+            command: jest.fn(async parts => parts[0] === 'INFO'
+                ? 'used_memory:1024\r\nused_memory_peak:1024\r\nmaxmemory:805306368\r\n'
+                : '1-0')
+        };
+        const readdir = jest.spyOn(fs, 'readdirSync');
+        const stream = new RuntimeHookStream({ redis, epoch: 'test', workerId: 'execution-1', spoolDir: dir });
+
+        await stream.publish({ eventId: 'evt-index-1', args: [] });
+        await stream.publish({ eventId: 'evt-index-2', args: [] });
+        await stream.publish({ eventId: 'evt-index-3', args: [] });
+
+        expect(readdir.mock.calls.filter(([target]) => target === dir)).toHaveLength(1);
+        readdir.mockRestore();
+        await stream.acknowledge('evt-index-1');
+        await stream.acknowledge('evt-index-2');
+        await stream.acknowledge('evt-index-3');
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
     test('atomically acknowledges and deletes a committed stream entry', async () => {
         const redis = {
             command: jest.fn().mockResolvedValue(0),

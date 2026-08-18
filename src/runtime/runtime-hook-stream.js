@@ -104,19 +104,42 @@ export class RuntimeHookStream {
         this.oomCommandErrors = 0;
         this.memorySnapshot = null;
         this.memorySnapshotAt = 0;
+        this.spoolEntries = null;
+        this.spoolBytes = 0;
+        this.spoolMutationTail = Promise.resolve();
     }
 
-    async _writeSpool(event) {
+    _initializeSpoolIndex() {
+        if (this.spoolEntries) return;
+        this.spoolEntries = new Map();
+        this.spoolBytes = 0;
+        if (!fs.existsSync(this.spoolDir)) return;
+        for (const name of fs.readdirSync(this.spoolDir).filter(item => item.endsWith('.json'))) {
+            const stat = fs.statSync(path.join(this.spoolDir, name));
+            this.spoolEntries.set(name, { size: stat.size, mtimeMs: stat.mtimeMs });
+            this.spoolBytes += stat.size;
+        }
+    }
+
+    _enqueueSpoolMutation(operation) {
+        const result = this.spoolMutationTail.then(operation);
+        this.spoolMutationTail = result.catch(() => {});
+        return result;
+    }
+
+    _writeSpool(event) {
+        return this._enqueueSpoolMutation(() => this._writeSpoolNow(event));
+    }
+
+    async _writeSpoolNow(event) {
         await fsp.mkdir(this.spoolDir, { recursive: true });
+        this._initializeSpoolIndex();
         const serialized = `${JSON.stringify(event)}\n`;
         const target = path.join(this.spoolDir, safeFileName(event.eventId));
-        let existingBytes = 0;
-        try {
-            existingBytes = (await fsp.stat(target)).size;
-        } catch {}
-        const nextBytes = this.snapshot().spoolBytes
-            - existingBytes
-            + Buffer.byteLength(serialized, 'utf8');
+        const name = path.basename(target);
+        const existingBytes = this.spoolEntries.get(name)?.size || 0;
+        const serializedBytes = Buffer.byteLength(serialized, 'utf8');
+        const nextBytes = this.spoolBytes - existingBytes + serializedBytes;
         if (nextBytes > this.spoolMaxBytes) {
             this.spoolFull = true;
             const error = new Error(`Runtime hook spool limit exceeded (${this.spoolMaxBytes} bytes)`);
@@ -126,6 +149,8 @@ export class RuntimeHookStream {
         const temp = `${target}.${process.pid}.tmp`;
         await fsp.writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600 });
         await fsp.rename(temp, target);
+        this.spoolEntries.set(name, { size: serializedBytes, mtimeMs: Date.now() });
+        this.spoolBytes = nextBytes;
         this.spoolFull = false;
         return target;
     }
@@ -158,14 +183,25 @@ export class RuntimeHookStream {
     }
 
     async acknowledge(eventId) {
-        if (!eventId || !fs.existsSync(this.spoolDir)) return;
-        await fsp.rm(path.join(this.spoolDir, safeFileName(eventId)), { force: true });
+        if (!eventId) return;
+        await this._enqueueSpoolMutation(async () => {
+            this._initializeSpoolIndex();
+            const name = safeFileName(eventId);
+            const existing = this.spoolEntries.get(name);
+            await fsp.rm(path.join(this.spoolDir, name), { force: true });
+            if (existing) {
+                this.spoolEntries.delete(name);
+                this.spoolBytes = Math.max(0, this.spoolBytes - existing.size);
+            }
+        });
     }
 
     async flushSpool() {
-        if (!fs.existsSync(this.spoolDir)) return 0;
+        await this.spoolMutationTail;
+        this._initializeSpoolIndex();
+        if (this.spoolEntries.size === 0) return 0;
         let flushed = 0;
-        const files = (await fsp.readdir(this.spoolDir)).filter(name => name.endsWith('.json'));
+        const files = [...this.spoolEntries.keys()];
         for (const name of files) {
             const file = path.join(this.spoolDir, name);
             let event;
@@ -336,21 +372,15 @@ export class RuntimeHookStream {
     }
 
     snapshot() {
-        let spooled = 0;
-        let spoolBytes = 0;
+        this._initializeSpoolIndex();
         let oldestPendingAgeMs = 0;
-        if (fs.existsSync(this.spoolDir)) {
-            const now = Date.now();
-            for (const name of fs.readdirSync(this.spoolDir).filter(item => item.endsWith('.json'))) {
-                const stat = fs.statSync(path.join(this.spoolDir, name));
-                spooled += 1;
-                spoolBytes += stat.size;
-                oldestPendingAgeMs = Math.max(oldestPendingAgeMs, now - stat.mtimeMs);
-            }
+        const now = Date.now();
+        for (const entry of this.spoolEntries.values()) {
+            oldestPendingAgeMs = Math.max(oldestPendingAgeMs, now - entry.mtimeMs);
         }
         return {
-            spooled,
-            spoolBytes,
+            spooled: this.spoolEntries.size,
+            spoolBytes: this.spoolBytes,
             oldestPendingAgeMs,
             lastPublishedAt: this.lastPublishedAt,
             lastCommittedAt: this.lastCommittedAt,
