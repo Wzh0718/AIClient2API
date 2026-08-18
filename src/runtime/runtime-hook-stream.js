@@ -109,14 +109,20 @@ export class RuntimeHookStream {
     async _writeSpool(event) {
         await fsp.mkdir(this.spoolDir, { recursive: true });
         const serialized = `${JSON.stringify(event)}\n`;
-        const currentBytes = this.snapshot().spoolBytes;
-        if (currentBytes + Buffer.byteLength(serialized, 'utf8') > this.spoolMaxBytes) {
+        const target = path.join(this.spoolDir, safeFileName(event.eventId));
+        let existingBytes = 0;
+        try {
+            existingBytes = (await fsp.stat(target)).size;
+        } catch {}
+        const nextBytes = this.snapshot().spoolBytes
+            - existingBytes
+            + Buffer.byteLength(serialized, 'utf8');
+        if (nextBytes > this.spoolMaxBytes) {
             this.spoolFull = true;
             const error = new Error(`Runtime hook spool limit exceeded (${this.spoolMaxBytes} bytes)`);
             error.code = 'RUNTIME_HOOK_SPOOL_FULL';
             throw error;
         }
-        const target = path.join(this.spoolDir, safeFileName(event.eventId));
         const temp = `${target}.${process.pid}.tmp`;
         await fsp.writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600 });
         await fsp.rename(temp, target);
@@ -125,6 +131,7 @@ export class RuntimeHookStream {
     }
 
     async publish(event) {
+        await this._writeSpool(event);
         const payload = JSON.stringify(event);
         try {
             const memory = await this._getRedisMemorySnapshot();
@@ -145,7 +152,6 @@ export class RuntimeHookStream {
             return { persisted: true, spooled: false, streamId };
         } catch (error) {
             if (/\bOOM\b|maxmemory/i.test(error.message || '')) this.oomCommandErrors++;
-            await this._writeSpool(event);
             this.lastError = error.message;
             return { persisted: true, spooled: true, streamId: null };
         }
@@ -167,7 +173,6 @@ export class RuntimeHookStream {
                 event = JSON.parse(await fsp.readFile(file, 'utf8'));
                 const result = await this.publish(event);
                 if (result.spooled) break;
-                await fsp.rm(file, { force: true });
                 flushed += 1;
             } catch (error) {
                 this.lastError = error.message;

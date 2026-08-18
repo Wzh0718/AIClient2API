@@ -83,8 +83,32 @@ describe('RuntimeHookStream', () => {
         expect(stream.snapshot()).toMatchObject({ spooled: 1 });
         available = true;
         await stream.flushSpool();
-        expect(stream.snapshot()).toMatchObject({ spooled: 0 });
+        expect(stream.snapshot()).toMatchObject({ spooled: 1 });
         expect(commands.some(parts => parts[0] === 'XADD')).toBe(true);
+        await stream.acknowledge(event.eventId);
+        expect(stream.snapshot()).toMatchObject({ spooled: 0 });
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('retains successful publishes in the producer spool until the durable ACK arrives', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-hook-producer-wal-'));
+        const redis = {
+            command: jest.fn(async parts => parts[0] === 'INFO'
+                ? 'used_memory:1024\r\nused_memory_peak:1024\r\nmaxmemory:805306368\r\n'
+                : '1-0')
+        };
+        const stream = new RuntimeHookStream({ redis, epoch: 'test', workerId: 'execution-1', spoolDir: dir });
+        const event = { eventId: 'evt-before-redis-restart', type: 'runtime_hook', args: [] };
+
+        await expect(stream.publish(event)).resolves.toMatchObject({ persisted: true, spooled: false });
+        expect(stream.snapshot()).toMatchObject({ spooled: 1 });
+
+        await stream.flushSpool();
+        expect(redis.command.mock.calls.filter(([parts]) => parts[0] === 'XADD')).toHaveLength(2);
+        expect(stream.snapshot()).toMatchObject({ spooled: 1 });
+
+        await stream.acknowledge(event.eventId);
+        expect(stream.snapshot()).toMatchObject({ spooled: 0 });
         fs.rmSync(dir, { recursive: true, force: true });
     });
 
