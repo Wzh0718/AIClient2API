@@ -13,7 +13,7 @@ const TYPE = 'openai-codex-oauth';
 const UUID = 'test-provider-uuid';
 
 function createManager(config = {}, options = {}) {
-    return new ProviderPoolManager({
+    const manager = new ProviderPoolManager({
         [TYPE]: [{
             uuid: UUID,
             customName: 'Codex test',
@@ -25,6 +25,11 @@ function createManager(config = {}, options = {}) {
         saveDebounceTime: 60_000,
         ...options
     });
+    if (manager.saveTimer) clearTimeout(manager.saveTimer);
+    manager.saveTimer = null;
+    manager.pendingSaves.clear();
+    manager._debouncedSave = jest.fn();
+    return manager;
 }
 
 describe('Codex identity request hot path', () => {
@@ -37,7 +42,7 @@ describe('Codex identity request hot path', () => {
             codexAccountId: 'account-id',
             codexEmail: 'masked@example.invalid'
         });
-        const saveSpy = jest.spyOn(manager, '_debouncedSave');
+        const saveSpy = manager._debouncedSave;
         const revision = manager.providerConfigRevision;
 
         for (let i = 0; i < 1000; i++) {
@@ -55,7 +60,7 @@ describe('Codex identity request hot path', () => {
     test('concurrent first discovery applies one complete identity update', async () => {
         const configEvents = [];
         const manager = createManager({}, { configEventSink: event => configEvents.push(event) });
-        const saveSpy = jest.spyOn(manager, '_debouncedSave');
+        const saveSpy = manager._debouncedSave;
         const identity = {
             codexAccountKey: 'new-account-key',
             codexAccountId: 'new-account-id',
