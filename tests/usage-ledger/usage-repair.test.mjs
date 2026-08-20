@@ -387,6 +387,82 @@ test('applyRepairBundle updates approved dates by delta, preserves live fields a
   assert.equal(repeated.status, 'already-applied');
 });
 
+test('model-stats-only repair leaves Potluck and permanent ledgers untouched', async () => {
+  const fixture = await makeEligibleRepairFixture();
+  const outDir = path.join(fixture.base, 'model-stats-only-output');
+  const bundle = await createRepairBundle({
+    base: fixture.base,
+    from: '2026-07-21',
+    to: '2026-07-21',
+    outDir,
+    now: new Date('2026-07-23T00:00:00.000Z'),
+    targets: ['model-stats'],
+  });
+  const potluckPath = path.join(fixture.base, 'api-potluck-keys.json');
+  const potluckBefore = fs.readFileSync(potluckPath, 'utf8');
+
+  const applied = await applyRepairBundle({
+    base: fixture.base,
+    bundle: outDir,
+    approvedManifestSha256: bundle.manifestSha256,
+    approvedReportSha256: bundle.reportSha256,
+    backupDir: path.join(fixture.base, 'model-stats-only-backup'),
+    now: new Date('2026-07-23T01:00:00.000Z'),
+  });
+
+  assert.equal(applied.status, 'applied');
+  assert.equal(fs.readFileSync(potluckPath, 'utf8'), potluckBefore);
+  assert.equal(fs.existsSync(path.join(fixture.base, 'permanent-usage-ledger', 'daily', 'usage-2026-07-21.jsonl')), false);
+  assert.equal(fs.existsSync(path.join(fixture.base, 'permanent-usage-ledger', 'hourly', 'usage-2026-07-21.jsonl')), false);
+  const modelStats = JSON.parse(fs.readFileSync(path.join(fixture.base, 'model-usage-stats.json'), 'utf8'));
+  assert.equal(modelStats.daily['2026-07-21'].totalTokens, 15);
+
+  const repeated = await applyRepairBundle({
+    base: fixture.base,
+    bundle: outDir,
+    approvedManifestSha256: bundle.manifestSha256,
+    approvedReportSha256: bundle.reportSha256,
+    backupDir: path.join(fixture.base, 'model-stats-only-backup'),
+    now: new Date('2026-07-23T01:00:00.000Z'),
+  });
+  assert.equal(repeated.status, 'already-applied');
+});
+
+test('incremental model-stats repair adds only filtered events to the existing day', async () => {
+  const fixture = await makeEligibleRepairFixture();
+  const outDir = path.join(fixture.base, 'model-stats-incremental-output');
+  const potluckPath = path.join(fixture.base, 'api-potluck-keys.json');
+  const potluckBefore = fs.readFileSync(potluckPath, 'utf8');
+  const bundle = await createRepairBundle({
+    base: fixture.base,
+    from: '2026-07-21',
+    to: '2026-07-21',
+    outDir,
+    now: new Date('2026-07-23T00:00:00.000Z'),
+    targets: ['model-stats'],
+    repairMode: 'incremental',
+    eventFilter: event => event.requestId === 'apply-1',
+  });
+
+  const applied = await applyRepairBundle({
+    base: fixture.base,
+    bundle: outDir,
+    approvedManifestSha256: bundle.manifestSha256,
+    approvedReportSha256: bundle.reportSha256,
+    backupDir: path.join(fixture.base, 'model-stats-incremental-backup'),
+    now: new Date('2026-07-23T01:00:00.000Z'),
+  });
+
+  assert.equal(applied.status, 'applied');
+  assert.equal(fs.readFileSync(potluckPath, 'utf8'), potluckBefore);
+  const modelStats = JSON.parse(fs.readFileSync(path.join(fixture.base, 'model-usage-stats.json'), 'utf8'));
+  assert.equal(modelStats.summary.requestCount, 11);
+  assert.equal(modelStats.summary.totalTokens, 65);
+  assert.equal(modelStats.daily['2026-07-21'].requestCount, 2);
+  assert.equal(modelStats.daily['2026-07-21'].totalTokens, 20);
+  assert.equal(modelStats.accounts['openai-codex-oauth:apply@example.com'].summary.totalTokens, 15);
+});
+
 test('applyRepairBundle treats a missing previous model day as an empty usage bucket', async () => {
   const fixture = await makeEligibleRepairFixture({ missingModelDay: true });
 

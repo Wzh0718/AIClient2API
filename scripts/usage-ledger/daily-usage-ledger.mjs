@@ -1257,6 +1257,17 @@ function finishRepairRows(grouped) {
   return applyAveragePricing([...grouped.values()].sort((left, right) => rowGroupKey(left).localeCompare(rowGroupKey(right))));
 }
 
+async function sha256FilePrefix(filePath, byteLength) {
+  const hash = crypto.createHash('sha256');
+  const input = fs.createReadStream(filePath, { start: 0, end: Math.max(0, byteLength - 1) });
+  let read = 0;
+  for await (const chunk of input) {
+    hash.update(chunk);
+    read += chunk.length;
+  }
+  return { sha256: hash.digest('hex'), size: read };
+}
+
 function createRepairCandidateAccumulator(potluckStore) {
   const byHash = buildRepairKeyLookup(potluckStore);
   const ledgerKeyLookup = buildKeyLookup(potluckStore);
@@ -1438,28 +1449,39 @@ async function buildRepairBaseline({
   modelStatsStore,
   ledgerRoot,
   dates,
+  targets = ['potluck', 'model-stats', 'ledger'],
   dailyLedgerRowsByDate = null,
   hourlyLedgerRowsByDate = null,
 }) {
-  return {
-    potluckSlices: Object.fromEntries(Object.entries(potluckStore.keys || {}).map(([rawKey, keyData]) => [
+  const selected = new Set(targets);
+  const baseline = {};
+  if (selected.has('potluck')) baseline.potluckSlices = Object.fromEntries(Object.entries(potluckStore.keys || {}).map(([rawKey, keyData]) => [
       rawKey,
       Object.fromEntries(dates.map(date => [date, keyData?.usageHistory?.[date] || null])),
-    ])),
-    modelSlices: Object.fromEntries(dates.map(date => [date, modelStatsStore.daily?.[date] || null])),
-    dailyLedgerSlices: Object.fromEntries(await Promise.all(dates.map(async date => [
+    ]));
+  if (selected.has('model-stats')) baseline.modelSlices = Object.fromEntries(dates.map(date => [date, modelStatsStore.daily?.[date] || null]));
+  if (selected.has('ledger')) baseline.dailyLedgerSlices = Object.fromEntries(await Promise.all(dates.map(async date => [
       date,
       dailyLedgerRowsByDate && Object.hasOwn(dailyLedgerRowsByDate, date)
         ? dailyLedgerRowsByDate[date]
         : await readLedgerDailyRows(ledgerRoot, date),
-    ]))),
-    hourlyLedgerSlices: Object.fromEntries(await Promise.all(dates.map(async date => [
+    ])));
+  if (selected.has('ledger')) baseline.hourlyLedgerSlices = Object.fromEntries(await Promise.all(dates.map(async date => [
       date,
       hourlyLedgerRowsByDate && Object.hasOwn(hourlyLedgerRowsByDate, date)
         ? hourlyLedgerRowsByDate[date]
         : await readLedgerHourlyRows(ledgerRoot, date),
-    ]))),
-  };
+    ])));
+  return baseline;
+}
+
+function normalizeRepairTargets(targets) {
+  const normalized = [...new Set((targets || ['potluck', 'model-stats', 'ledger']).map(value => String(value).trim()).filter(Boolean))];
+  const supported = new Set(['potluck', 'model-stats', 'ledger']);
+  if (normalized.length === 0 || normalized.some(target => !supported.has(target))) {
+    throw new Error('repair targets must contain potluck, model-stats, or ledger');
+  }
+  return normalized;
 }
 
 export async function createRepairBundle({
@@ -1470,12 +1492,20 @@ export async function createRepairBundle({
   now = new Date(),
   allowCurrentDate = false,
   allowDecreasing = false,
+  targets = ['potluck', 'model-stats', 'ledger'],
+  repairMode = 'replace',
   eventFilter = null,
   cleanupMetadata = null,
 }) {
   if (!base || !from || !outDir) throw new Error('base, from, and outDir are required');
   if (fs.existsSync(outDir)) throw new Error('out-dir already exists');
   const end = to || from;
+  const repairTargets = normalizeRepairTargets(targets);
+  if (!['replace', 'incremental'].includes(repairMode)) throw new Error('repairMode must be replace or incremental');
+  if (repairMode === 'incremental' && (repairTargets.length !== 1 || repairTargets[0] !== 'model-stats')) {
+    throw new Error('incremental repair currently supports only model-stats');
+  }
+  const selectedTargets = new Set(repairTargets);
   const auditDir = path.join(base, 'request-audit');
   const files = await discoverRepairAuditFiles({ auditDir, from, to: end });
   const potluckPath = path.join(base, 'api-potluck-keys.json');
@@ -1535,13 +1565,18 @@ export async function createRepairBundle({
       ledgerHourlyTotals: hasNonDecreasingCandidate(candidateHourlyLedger, currentHourlyLedger),
       ledgerHourlyDimensions: ledgerRowsNonDecreasing(candidateHourlyLedgerRows, currentHourlyLedgerRows || []),
     };
+    const selectedNonDecreasing = [
+      ...(selectedTargets.has('potluck') ? [nonDecreasing.potluckTotals, nonDecreasing.potluckKeys, nonDecreasing.potluckDimensions] : []),
+      ...(selectedTargets.has('model-stats') ? [nonDecreasing.modelStatsTotals, nonDecreasing.modelStatsDimensions, nonDecreasing.modelProviderAttribution] : []),
+      ...(selectedTargets.has('ledger') ? [nonDecreasing.ledgerTotals, nonDecreasing.ledgerDimensions, nonDecreasing.ledgerHourlyTotals, nonDecreasing.ledgerHourlyDimensions] : []),
+    ];
     const eligible = (date < today || (allowCurrentDate && date === today)) &&
       missingSourceDates.length === 0 &&
       corruptSourceDates.length === 0 &&
-      unknownPotluckKeys === 0 &&
-      (allowDecreasing
+      (!selectedTargets.has('potluck') || unknownPotluckKeys === 0) &&
+      (repairMode === 'incremental' || allowDecreasing
         ? nonDecreasing.modelProviderAttribution
-        : Object.values(nonDecreasing).every(Boolean));
+        : selectedNonDecreasing.every(Boolean));
     days.push({
       date,
       eligible,
@@ -1571,6 +1606,7 @@ export async function createRepairBundle({
     modelStatsStore,
     ledgerRoot,
     dates: eligibleDates,
+    targets: repairTargets,
   });
   const patch = {
     schemaVersion: 1,
@@ -1580,6 +1616,8 @@ export async function createRepairBundle({
     eligibleDates,
     currentDateOverride: allowCurrentDate === true,
     allowDecreasing: allowDecreasing === true,
+    targets: repairTargets,
+    repairMode,
     cleanupMetadata,
     sourceEventDigest: scan.sourceEventDigest,
     sourceFiles: scan.sourceFiles.map(file => ({ utcDate: file.utcDate, sha256: file.sha256, size: file.size })),
@@ -1596,6 +1634,8 @@ export async function createRepairBundle({
     range: { from, to: end, excludedActiveDate: today },
     currentDateOverride: allowCurrentDate === true,
     allowDecreasing: allowDecreasing === true,
+    targets: repairTargets,
+    repairMode,
     cleanupMetadata,
     scan: {
       sourceFiles: scan.sourceFiles.map(file => ({
@@ -1621,14 +1661,14 @@ export async function createRepairBundle({
   const patchPath = path.join(outDir, 'patch.json');
   await writeJsonMode(reportPath, report);
   await writeJsonMode(patchPath, patch);
-  for (const date of eligibleDates) {
+  if (selectedTargets.has('ledger')) for (const date of eligibleDates) {
     await atomicWriteJsonl(path.join(outDir, 'ledger', 'daily', `usage-${date}.jsonl`), repairRowsForDate(candidates.dailyRows, date));
     await atomicWriteJsonl(path.join(outDir, 'ledger', 'hourly', `usage-${date}.jsonl`), repairRowsForDate(candidates.hourlyRows, date));
   }
   const reportSha256 = await sha256File(reportPath);
   const artifacts = [];
   const artifactPaths = [reportPath, patchPath];
-  for (const date of eligibleDates) {
+  if (selectedTargets.has('ledger')) for (const date of eligibleDates) {
     artifactPaths.push(path.join(outDir, 'ledger', 'daily', `usage-${date}.jsonl`));
     artifactPaths.push(path.join(outDir, 'ledger', 'hourly', `usage-${date}.jsonl`));
   }
@@ -1645,6 +1685,8 @@ export async function createRepairBundle({
     reportSha256,
     eligibleDates,
     currentDateOverride: allowCurrentDate === true,
+    targets: repairTargets,
+    repairMode,
     artifacts,
   };
   const manifestPath = path.join(outDir, 'manifest.json');
@@ -1865,6 +1907,66 @@ function buildNextModelStatsStore(currentStore, patch, now) {
   return next;
 }
 
+function addIncrementalAccount(targetMap, accountKey, accountDelta = {}) {
+  if (!targetMap[accountKey]) {
+    targetMap[accountKey] = cloneJson(accountDelta);
+    targetMap[accountKey].summary = createRepairUsageBucket();
+    targetMap[accountKey].models = {};
+  }
+  const target = targetMap[accountKey];
+  for (const field of ['provider', 'providerUuid', 'accountIdentity', 'accountEmail', 'providerName']) {
+    if (accountDelta[field] !== undefined) target[field] = accountDelta[field];
+  }
+  target.providerUuids = [...new Set([...(target.providerUuids || []), ...(accountDelta.providerUuids || [])].filter(Boolean))];
+  target.summary ||= createRepairUsageBucket();
+  target.models ||= {};
+  applyUsageDelta(target.summary, currentUsageSummary(accountDelta.summary));
+  adjustUsageMap(target.models, accountDelta.models, {});
+  target.summary = preserveRepairPeaks(target.summary, accountDelta.summary);
+  for (const [model, usage] of Object.entries(accountDelta.models || {})) {
+    target.models[model] = preserveRepairPeaks(target.models[model], usage);
+  }
+}
+
+function buildNextModelStatsIncremental(currentStore, patch, now) {
+  const next = cloneJson(currentStore);
+  next.summary ||= createRepairUsageBucket();
+  next.providers ||= {};
+  next.accounts ||= {};
+  next.accountUsageEvents ||= {};
+  next.daily ||= {};
+
+  for (const date of patch.eligibleDates) {
+    const deltaDay = patch.modelDays?.[date];
+    if (!deltaDay) continue;
+    applyUsageDelta(next.summary, currentUsageSummary(deltaDay.summary));
+    const day = next.daily[date] ||= { ...createRepairUsageBucket(), models: {}, accounts: {} };
+    day.models ||= {};
+    day.accounts ||= {};
+    applyUsageDelta(day, currentUsageSummary(deltaDay.summary));
+    adjustUsageMap(day.models, deltaDay.models, {});
+    for (const [accountKey, accountDelta] of Object.entries(deltaDay.accounts || {})) {
+      addIncrementalAccount(day.accounts, accountKey, accountDelta);
+      addIncrementalAccount(next.accounts, accountKey, accountDelta);
+    }
+
+    for (const [provider, providerDelta] of Object.entries(patch.modelProviderDays?.[date] || {})) {
+      if (!next.providers[provider]) next.providers[provider] = { summary: createRepairUsageBucket(), models: {} };
+      next.providers[provider].summary ||= createRepairUsageBucket();
+      next.providers[provider].models ||= {};
+      applyUsageDelta(next.providers[provider].summary, currentUsageSummary(providerDelta.summary));
+      adjustUsageMap(next.providers[provider].models, providerDelta.models, {});
+    }
+  }
+
+  for (const [accountKey, events] of Object.entries(patch.modelAccountEvents || {})) {
+    next.accountUsageEvents[accountKey] = [...(next.accountUsageEvents[accountKey] || []), ...(events || [])]
+      .sort((left, right) => String(left?.timestamp || '').localeCompare(String(right?.timestamp || '')));
+  }
+  next.updatedAt = now.toISOString();
+  return next;
+}
+
 function resolveInside(root, relativePath) {
   const resolvedRoot = path.resolve(root);
   const resolved = path.resolve(root, relativePath);
@@ -1882,7 +1984,7 @@ async function verifyRepairArtifacts(bundle, manifest) {
   }
 }
 
-async function repairMarkerMatches({ markerPath, manifestSha256, reportSha256, base, bundle, eligibleDates }) {
+async function repairMarkerMatches({ markerPath, manifestSha256, reportSha256, base, bundle, eligibleDates, targets }) {
   if (!fs.existsSync(markerPath)) return false;
   const marker = await readJson(markerPath);
   if (marker.manifestSha256 !== manifestSha256 || marker.reportSha256 !== reportSha256) {
@@ -1897,11 +1999,12 @@ async function repairMarkerMatches({ markerPath, manifestSha256, reportSha256, b
     modelStatsStore,
     ledgerRoot: path.join(base, 'permanent-usage-ledger'),
     dates: eligibleDates,
+    targets,
   });
   if (sha256Text(stableJson(currentBaseline)) !== marker.appliedBaselineDigest) {
     throw new Error('repair marker exists but approved slices changed');
   }
-  for (const date of eligibleDates) {
+  if (targets.includes('ledger')) for (const date of eligibleDates) {
     for (const kind of ['daily', 'hourly']) {
       const target = path.join(base, 'permanent-usage-ledger', kind, `usage-${date}.jsonl`);
       const candidate = path.join(bundle, 'ledger', kind, `usage-${date}.jsonl`);
@@ -1993,6 +2096,7 @@ export async function applyRepairBundle({
   await verifyRepairArtifacts(bundle, manifest);
   const patch = await readJson(patchPath);
   if (!Array.isArray(patch.eligibleDates) || patch.eligibleDates.length === 0) throw new Error('repair bundle has no eligible dates');
+  const repairTargets = normalizeRepairTargets(patch.targets);
 
   const markerPath = path.join(base, 'permanent-usage-ledger', 'repairs', `${manifestSha256}.json`);
   if (await repairMarkerMatches({
@@ -2002,6 +2106,7 @@ export async function applyRepairBundle({
     base,
     bundle,
     eligibleDates: patch.eligibleDates,
+    targets: repairTargets,
   })) {
     return { status: 'already-applied', eligibleDates: patch.eligibleDates };
   }
@@ -2011,10 +2116,34 @@ export async function applyRepairBundle({
     from: patch.from,
     to: patch.to,
   });
-  const scan = await scanRepairAuditFiles({ files, from: patch.from, to: patch.to, collectEvents: false });
-  if (scan.sourceEventDigest !== patch.sourceEventDigest) throw new Error('repair source event digest changed');
+  const exactFrom = patch.eventWindowFrom || patch.from;
+  const exactTo = patch.eventWindowTo || patch.to;
+  const scan = await scanRepairAuditFiles({ files, from: exactFrom, to: exactTo, collectEvents: false });
+  if (!patch.eventWindowFrom && scan.sourceEventDigest !== patch.sourceEventDigest) {
+    throw new Error('repair source event digest changed');
+  }
   const currentSourceFiles = scan.sourceFiles.map(file => ({ utcDate: file.utcDate, sha256: file.sha256, size: file.size }));
-  if (stableJson(currentSourceFiles) !== stableJson(patch.sourceFiles)) throw new Error('repair source file hashes changed');
+  const currentByPath = new Map(scan.sourceFiles.map(file => [path.relative(base, file.path).replaceAll('\\', '/'), file]));
+  for (const expected of patch.sourceFiles || []) {
+    const expectedPath = expected.path || null;
+    let current = expectedPath ? currentByPath.get(expectedPath) : null;
+    if (!current) {
+      const candidates = scan.sourceFiles.filter(file => file.utcDate === expected.utcDate && file.size >= expected.size);
+      const matches = [];
+      for (const candidate of candidates) {
+        const prefix = await sha256FilePrefix(candidate.path, expected.size);
+        if (prefix.size === expected.size && prefix.sha256 === expected.sha256) matches.push(candidate);
+      }
+      if (matches.length === 1) current = matches[0];
+      else if (matches.length > 1) throw new Error(`repair source file match ambiguous: ${expected.utcDate}`);
+    }
+    if (!current) throw new Error(`repair source file missing: ${expectedPath || expected.utcDate}`);
+    if (current.size < expected.size) throw new Error(`repair source file truncated: ${expectedPath}`);
+    const prefix = await sha256FilePrefix(current.path, expected.size);
+    if (prefix.size !== expected.size || prefix.sha256 !== expected.sha256) {
+      throw new Error(`repair source file prefix changed: ${expectedPath}`);
+    }
+  }
 
   const potluckPath = path.join(base, 'api-potluck-keys.json');
   const modelStatsPath = path.join(base, 'model-usage-stats.json');
@@ -2026,11 +2155,16 @@ export async function applyRepairBundle({
     modelStatsStore,
     ledgerRoot,
     dates: patch.eligibleDates,
+    targets: repairTargets,
   });
   if (sha256Text(stableJson(baseline)) !== patch.baselineDigest) throw new Error('repair baseline changed');
 
-  const nextPotluck = buildNextPotluckStore(potluckStore, patch);
-  const nextModelStats = buildNextModelStatsStore(modelStatsStore, patch, now);
+  const nextPotluck = repairTargets.includes('potluck') ? buildNextPotluckStore(potluckStore, patch) : potluckStore;
+  const nextModelStats = repairTargets.includes('model-stats')
+    ? (patch.repairMode === 'incremental'
+      ? buildNextModelStatsIncremental(modelStatsStore, patch, now)
+      : buildNextModelStatsStore(modelStatsStore, patch, now))
+    : modelStatsStore;
   const candidateDailyRowsByDate = {};
   const candidateHourlyRowsByDate = {};
   for (const date of patch.eligibleDates) {
@@ -2046,15 +2180,15 @@ export async function applyRepairBundle({
     modelStatsStore: nextModelStats,
     ledgerRoot,
     dates: patch.eligibleDates,
+    targets: repairTargets,
     dailyLedgerRowsByDate: candidateDailyRowsByDate,
     hourlyLedgerRowsByDate: candidateHourlyRowsByDate,
   });
   const appliedBaselineDigest = sha256Text(stableJson(expectedAppliedBaseline));
-  const targetBodies = [
-    { path: potluckPath, body: `${JSON.stringify(nextPotluck, null, 2)}\n` },
-    { path: modelStatsPath, body: `${JSON.stringify(nextModelStats, null, 2)}\n` },
-  ];
-  for (const date of patch.eligibleDates) {
+  const targetBodies = [];
+  if (repairTargets.includes('potluck')) targetBodies.push({ path: potluckPath, body: `${JSON.stringify(nextPotluck, null, 2)}\n` });
+  if (repairTargets.includes('model-stats')) targetBodies.push({ path: modelStatsPath, body: `${JSON.stringify(nextModelStats, null, 2)}\n` });
+  if (repairTargets.includes('ledger')) for (const date of patch.eligibleDates) {
     for (const kind of ['daily', 'hourly']) {
       const source = path.join(bundle, 'ledger', kind, `usage-${date}.jsonl`);
       targetBodies.push({
@@ -2071,6 +2205,7 @@ export async function applyRepairBundle({
       manifestSha256,
       reportSha256,
       eligibleDates: patch.eligibleDates,
+      targets: repairTargets,
       appliedBaselineDigest,
     }, null, 2)}\n`,
   });
@@ -2099,7 +2234,8 @@ async function commandRepairReport(args) {
   const now = args.now ? new Date(args.now) : new Date();
   if (!Number.isFinite(now.getTime())) throw new Error('--now must be an ISO timestamp');
   const allowCurrentDate = args['allow-current-date'] === 'true';
-  const result = await createRepairBundle({ base, from, to, outDir, now, allowCurrentDate });
+  const targets = args.targets ? args.targets.split(',') : undefined;
+  const result = await createRepairBundle({ base, from, to, outDir, now, allowCurrentDate, targets });
   console.log(JSON.stringify({
     outDir: result.outDir,
     manifestSha256: result.manifestSha256,
