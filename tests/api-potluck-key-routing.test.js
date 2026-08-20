@@ -6,6 +6,8 @@ import path from 'path';
 const mockAtomicWriteFile = jest.fn();
 const mockAtomicWriteFileSync = jest.fn();
 
+jest.mock('sharp', () => ({ default: () => ({}) }));
+
 jest.mock('../src/utils/file-lock.js', () => ({
     atomicWriteFile: mockAtomicWriteFile,
     atomicWriteFileSync: mockAtomicWriteFileSync
@@ -340,6 +342,51 @@ describe('API Potluck key credential routing', () => {
         catalog[0].usageHistory['2026-08-13'] = { summary: { totalTokens: 99 } };
         expect((await keyManager.getKey(created.id)).name).toBe('Catalog Key');
         expect((await keyManager.getKey(created.id)).usageHistory).toEqual({});
+    });
+
+    test('publishes a versioned key-store sync event after routing mutations', async () => {
+        const keyManager = await import('../src/plugins/api-potluck/key-manager.js');
+        const publish = jest.fn();
+        keyManager.setKeyStoreSyncPublisher(publish);
+        const created = await keyManager.createKey('Sync Routing', 1000);
+
+        publish.mockClear();
+        await keyManager.updateKeyRouting(created.id, {
+            routingMode: 'pool',
+            primaryGroupId: 'stale-group'
+        });
+
+        expect(publish).toHaveBeenCalledWith(expect.objectContaining({
+            revision: expect.any(Number),
+            reason: 'key-routing-updated'
+        }));
+    });
+
+    test('rejects stale routing sync and clears legacy assignment fields for pool', async () => {
+        const keyManager = await import('../src/plugins/api-potluck/key-manager.js');
+        const created = await keyManager.createKey('Sync Pool', 1000);
+
+        expect(keyManager.applyKeyStoreSyncEvent({
+            type: 'potluck_key_routing_sync',
+            revision: 4,
+            records: [{
+                keyId: created.id,
+                routingMode: 'pool',
+                primaryGroupId: 'group-2',
+                fixedCredential: { uuid: 'stale' }
+            }]
+        })).toMatchObject({ applied: true, revision: 4 });
+        expect(await keyManager.validateKey(created.id)).toMatchObject({
+            valid: true,
+            keyData: { routingMode: 'pool', primaryGroupId: null, fixedCredential: null, routingConfigRevision: 4 }
+        });
+        expect(keyManager.applyKeyStoreSyncEvent({
+            revision: 3,
+            records: [{ keyId: created.id, routingMode: 'auto', primaryGroupId: 'group-2' }]
+        })).toMatchObject({ applied: false, stale: true, revision: 4 });
+        expect((await keyManager.validateKey(created.id)).keyData).toMatchObject({
+            routingMode: 'pool', primaryGroupId: null, fixedCredential: null
+        });
     });
 
     test('limits the credential routing catalog to the rolling seven-day summary window', async () => {

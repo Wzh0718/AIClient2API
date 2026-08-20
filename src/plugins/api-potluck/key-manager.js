@@ -99,10 +99,58 @@ let currentMaxDirtyAge = DEFAULT_CONFIG.maxDirtyAge;
 let dirtySince = null;
 let mutationVersion = 0;
 let lastPersistedVersion = 0;
+let routingConfigRevision = 0;
+let keyStoreSyncPublisher = null;
 let persistPromise = null;
 let retryNotBefore = 0;
 
 const rateManager = new RateManager(60);
+
+export function setKeyStoreSyncPublisher(publisher) {
+    keyStoreSyncPublisher = typeof publisher === 'function' ? publisher : null;
+}
+
+export function getKeyRoutingRevision() {
+    return routingConfigRevision;
+}
+
+function routingSnapshot(keyData) {
+    return {
+        keyId: keyData.id,
+        routingMode: keyData.routingMode || 'pool',
+        primaryGroupId: keyData.routingMode === 'auto' ? (keyData.primaryGroupId || null) : null,
+        fixedCredential: keyData.routingMode === 'fixed' && keyData.fixedCredential ? { ...keyData.fixedCredential } : null,
+        manualLock: keyData.manualLock === true
+    };
+}
+
+function publishRoutingSync(keyIds, reason) {
+    if (!keyStoreSyncPublisher || !Array.isArray(keyIds) || keyIds.length === 0) return;
+    const records = keyIds.map(keyId => keyStore.keys[keyId]).filter(Boolean).map(routingSnapshot);
+    if (records.length === 0) return;
+    const revision = ++routingConfigRevision;
+    keyStoreSyncPublisher({ type: 'potluck_key_routing_sync', revision, reason, records });
+}
+
+export function applyKeyStoreSyncEvent(event = {}) {
+    ensureLoaded();
+    const revision = Number(event.revision || 0);
+    if (!Number.isInteger(revision) || revision <= routingConfigRevision) {
+        return { applied: false, revision: routingConfigRevision, stale: true };
+    }
+    if (!Array.isArray(event.records)) return { applied: false, revision: routingConfigRevision, malformed: true };
+    for (const record of event.records) {
+        const keyData = keyStore.keys[record?.keyId];
+        if (!keyData || !record?.keyId) continue;
+        const routingMode = ['pool', 'auto', 'fixed'].includes(record.routingMode) ? record.routingMode : 'pool';
+        keyData.routingMode = routingMode;
+        keyData.primaryGroupId = routingMode === 'auto' ? (record.primaryGroupId || null) : null;
+        keyData.fixedCredential = routingMode === 'fixed' && record.fixedCredential ? { ...record.fixedCredential } : null;
+        if (typeof record.manualLock === 'boolean') keyData.manualLock = record.manualLock;
+    }
+    routingConfigRevision = revision;
+    return { applied: true, revision, records: event.records.length };
+}
 
 function createUsageBucket() {
     return {
@@ -1848,7 +1896,9 @@ export async function updateKeyRouting(keyId, routing = {}) {
     const normalizedRouting = normalizeKeyRouting(routing, { strict: true });
     Object.assign(keyData, normalizedRouting);
     const targetVersion = markDirty();
-    return buildManagementMutationResult(targetVersion, keyData);
+    const result = await buildManagementMutationResult(targetVersion, keyData);
+    publishRoutingSync([keyId], 'key-routing-updated');
+    return result;
 }
 
 /**
@@ -1922,7 +1972,9 @@ export async function applyKeyRoutingAssignments(assignments) {
     if (updated === 0) return attachPersistenceStatus(summary, false);
 
     const targetVersion = markDirty();
-    return buildManagementMutationResult(targetVersion, summary);
+    const result = await buildManagementMutationResult(targetVersion, summary);
+    publishRoutingSync(normalizedAssignments.filter(({ keyId }) => keyStore.keys[keyId] && keyStore.keys[keyId].manualLock !== true).map(({ keyId }) => keyId), 'key-routing-assignments-updated');
+    return result;
 }
 
 // 用于防止同一 Key 下同一请求重复入账，保留短窗口覆盖 stream/fallback 重复 finalize。
@@ -2499,7 +2551,8 @@ export async function validateKey(apiKey) {
         routingMode: updated.routingMode,
         primaryGroupId: updated.primaryGroupId,
         fixedCredential: updated.fixedCredential ? { ...updated.fixedCredential } : null,
-        manualLock: updated.manualLock === true
+        manualLock: updated.manualLock === true,
+        routingConfigRevision
     };
     if (updated.dailyLimit > 0 && updated.todayUsage >= updated.dailyLimit) {
         return { valid: false, reason: 'quota_exceeded', keyData: validationKeyData };

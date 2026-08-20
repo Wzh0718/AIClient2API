@@ -218,8 +218,10 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
     const workerMetrics = new Map();
     const providerConfigAcks = createProviderConfigAckTracker();
     const rawCaptureConfigAcks = createProviderConfigAckTracker();
+    const potluckRoutingAcks = createProviderConfigAckTracker();
     const latestProviderConfigEvents = new Map();
     let latestRawCaptureConfigEvent = null;
+    let latestPotluckRoutingEvent = null;
     const ready = new Set();
     let shuttingDown = false;
 
@@ -241,6 +243,7 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
                 ready.add(id);
                 if (role === 'execution') {
                     providerConfigAcks.acknowledge(id, Number(message.providerConfigRevision || 0));
+                    potluckRoutingAcks.acknowledge(id, Number(message.potluckKeyRoutingRevision || 0));
                     const replayEvents = [...latestProviderConfigEvents.values()].sort((left, right) => left.revision - right.revision);
                     for (const event of replayEvents) {
                         if (child.connected) child.send({ ...event, targetWorkerId: id });
@@ -248,6 +251,10 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
                     if (latestRawCaptureConfigEvent && child.connected) {
                         rawCaptureConfigAcks.notePublished(latestRawCaptureConfigEvent.revision, [id]);
                         child.send({ ...latestRawCaptureConfigEvent, targetWorkerId: id });
+                    }
+                    if (latestPotluckRoutingEvent && child.connected) {
+                        potluckRoutingAcks.notePublished(latestPotluckRoutingEvent.revision, [id]);
+                        child.send({ ...latestPotluckRoutingEvent, targetWorkerId: id });
                     }
                 }
                 if (role === 'control') {
@@ -306,6 +313,22 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
                     ...rawCaptureConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id))
                 });
             }
+            if (message?.type === 'potluck_key_routing_sync' && role === 'control') {
+                latestPotluckRoutingEvent = { ...message };
+                const executionIds = [...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id);
+                potluckRoutingAcks.notePublished(message.revision, executionIds);
+                for (const worker of workers.values()) {
+                    if (worker.role === 'execution' && worker.child.connected) worker.child.send(message);
+                }
+            }
+            if (message?.type === 'potluck_key_routing_sync_ack' && role === 'execution') {
+                potluckRoutingAcks.acknowledge(id, message.revision);
+                const control = workers.get('control-1');
+                if (control?.child.connected) control.child.send({
+                    type: 'potluck_key_routing_sync_status',
+                    ...potluckRoutingAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id))
+                });
+            }
             if (message?.type === 'runtime_metrics' && message.snapshot) {
                 workerMetrics.set(id, message.snapshot);
                 // A metrics snapshot is emitted immediately before the explicit ready message.
@@ -351,6 +374,7 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
             persistenceBacklog: metrics.hooks.pending + metrics.hooks.spooled + metrics.hooks.consumerLag,
             providerConfig: providerConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
             rawCapture: rawCaptureConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
+            potluckRouting: potluckRoutingAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
             runtimeHooks: metrics.hooks,
             metrics
         };

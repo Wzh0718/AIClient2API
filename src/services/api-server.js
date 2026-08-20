@@ -445,6 +445,7 @@ async function startServer() {
     const pluginManager = getPluginManager();
     if (!IS_EXECUTION_WORKER && IS_WORKER_PROCESS && process.send) {
         CONFIG._requestAuditRawCaptureEventSink = event => sendToMaster(event);
+        CONFIG._potluckKeyRoutingEventSink = event => sendToMaster(event);
     }
     await pluginManager.initAll(CONFIG);
     if (IS_WORKER_PROCESS && ['execution', 'control'].includes(RUNTIME_WORKER_ROLE)) {
@@ -819,6 +820,7 @@ async function startServer() {
             logger.info(`[Runtime] Coordination recovery barrier ready: ${coordinationStatus.readyWorkers}/${runtimeCoordination.expectedWorkers}`);
         }
         if (IS_WORKER_PROCESS) {
+            const potluckPlugin = getPluginManager()?.getEnabledPlugins?.().find(plugin => plugin.name === 'api-potluck');
             sendToMaster({ type: 'runtime_metrics', snapshot: buildRuntimeMetricsSnapshot() });
             runtimeMetricsTimerId = setInterval(() => {
                 sendToMaster({ type: 'runtime_metrics', snapshot: buildRuntimeMetricsSnapshot() });
@@ -827,7 +829,8 @@ async function startServer() {
             sendToMaster({
                 type: 'ready',
                 pid: process.pid,
-                providerConfigRevision: getProviderPoolManager()?.providerConfigRevision || 0
+                providerConfigRevision: getProviderPoolManager()?.providerConfigRevision || 0,
+                potluckKeyRoutingRevision: potluckPlugin?.getKeyRoutingRevision?.() || 0
             });
         }
                 finishStartup();
@@ -862,6 +865,16 @@ const shutdownHandlers = registerWorkerShutdownHandlers({
         }
         if (message.type === 'provider_config_sync_status' && RUNTIME_WORKER_ROLE === 'control') {
             globalThis.providerConfigSyncStatus = message;
+            return true;
+        }
+        if (message.type === 'potluck_key_routing_sync' && IS_EXECUTION_WORKER) {
+            const plugin = getPluginManager()?.getEnabledPlugins?.().find(candidate => candidate.name === 'api-potluck');
+            const result = plugin?.applyKeyRoutingSync?.(message);
+            sendToMaster({ type: 'potluck_key_routing_sync_ack', revision: result?.revision || message.revision, applied: result?.applied === true });
+            return true;
+        }
+        if (message.type === 'potluck_key_routing_sync_status' && RUNTIME_WORKER_ROLE === 'control') {
+            globalThis.potluckKeyRoutingSyncStatus = message;
             return true;
         }
         if (message.type === 'provider_identity_discovered' && RUNTIME_WORKER_ROLE === 'control') {

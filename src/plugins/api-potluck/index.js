@@ -26,7 +26,10 @@ import {
     KEY_PREFIX,
     setConfigGetter,
     flushPendingChanges,
-    resolveKeyIdByHash
+    resolveKeyIdByHash,
+    setKeyStoreSyncPublisher,
+    applyKeyStoreSyncEvent,
+    getKeyRoutingRevision
 } from './key-manager.js';
 import {
     beginUsageHistoryEventBatch,
@@ -97,12 +100,21 @@ const apiPotluckPlugin = {
      * @param {Object} config - 服务器配置
      */
     async init(config) {
+        setKeyStoreSyncPublisher(config?._potluckKeyRoutingEventSink);
         setConfigGetter(() => ({
             persistInterval: config?.API_POTLUCK_PERSIST_INTERVAL ?? 30_000,
             maxDirtyAge: config?.API_POTLUCK_MAX_DIRTY_AGE ?? 60_000,
             defaultDailyLimit: config?.API_POTLUCK_DEFAULT_DAILY_LIMIT ?? 500
         }));
         logger.info('[API Potluck Plugin] Initializing...');
+    },
+
+    applyKeyRoutingSync(event) {
+        return applyKeyStoreSyncEvent(event);
+    },
+
+    getKeyRoutingRevision() {
+        return getKeyRoutingRevision();
     },
 
     /**

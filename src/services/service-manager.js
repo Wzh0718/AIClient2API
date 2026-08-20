@@ -396,6 +396,10 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
     }
 
     if (keyRouting.routingMode === 'pool') {
+        const keyHash = config.potluckKeyData?.id
+            ? `sha256:${crypto.createHash('sha256').update(String(config.potluckKeyData.id)).digest('hex').slice(0, 16)}`
+            : 'none';
+        logger.info(`[Codex Routing] pool selection key=${keyHash} mode=pool revision=${keyRouting.routingConfigRevision || 0}`);
         const poolOptions = withStickyProviderAffinity(config, providerType, {
             ...options,
             selectionDiagnostics,
