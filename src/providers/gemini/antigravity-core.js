@@ -55,6 +55,7 @@ const ANTIGRAVITY_USAGE_TIMEOUT_MS = 15000;
 // 上游偶尔以非 SSE 的 JSON 数组返回整个响应，需缓存原始行才能回退解析。
 // 超过该行数认为不是「一次性 JSON 响应」，放弃缓存以免长流吃内存。
 const ANTIGRAVITY_RAW_FALLBACK_MAX_LINES = 20000;
+const ANTIGRAVITY_ERROR_BODY_MAX_BYTES = 1024 * 1024;
 
 // 获取 Antigravity 模型列表
 const ANTIGRAVITY_MODELS = getProviderModels(MODEL_PROVIDER.ANTIGRAVITY);
@@ -65,11 +66,14 @@ const ANTIGRAVITY_CLIENT_TO_UPSTREAM_MODEL = {
     'gemini-3.5-flash-high': 'gemini-3.5-flash-low',
     'gemini-3.6-flash-high': 'gemini-3.6-flash-low',
     'gemini-3.6-flash': 'gemini-3.6-flash-low',
+    'gemini-3.7-flash-high': 'gemini-3.7-flash-low',
+    'gemini-3.7-flash': 'gemini-3.7-flash-low',
 };
 
 const ANTIGRAVITY_UPSTREAM_TO_CLIENT_MODELS = {
     'gemini-pro-agent': ['gemini-3.1-pro-high', 'gemini-3.1-pro-preview'],
     'gemini-3.6-flash-low': ['gemini-3.6-flash', 'gemini-3.6-flash-low', 'gemini-3.6-flash-high'],
+    'gemini-3.7-flash-low': ['gemini-3.7-flash', 'gemini-3.7-flash-low', 'gemini-3.7-flash-high'],
 };
 
 const ANTIGRAVITY_CLIENT_MODEL_THINKING_LEVEL = {
@@ -80,10 +84,12 @@ const ANTIGRAVITY_CLIENT_MODEL_THINKING_LEVEL = {
     'gemini-3-pro-preview': 'high',
     'gemini-3.5-flash-high': 'high',
     'gemini-3.6-flash-high': 'high',
+    'gemini-3.7-flash-high': 'high',
     'gemini-3.1-pro-low': 'low',
     'gemini-3-pro-low': 'low',
     'gemini-3.5-flash-low': 'low',
-    'gemini-3.6-flash-low': 'low'
+    'gemini-3.6-flash-low': 'low',
+    'gemini-3.7-flash-low': 'low'
 };
 
 const ANTIGRAVITY_MODEL_METADATA = {
@@ -138,6 +144,18 @@ const ANTIGRAVITY_MODEL_METADATA = {
         thinking: { min: 1, max: 65535, dynamicAllowed: true, levels: ['low', 'medium', 'high'] }
     },
     'gemini-3.6-flash-low': {
+        maxOutputTokens: 65535,
+        thinking: { min: 1, max: 65535, dynamicAllowed: true, levels: ['low', 'medium', 'high'] }
+    },
+    'gemini-3.6-flash-high': {
+        maxOutputTokens: 65535,
+        thinking: { min: 1, max: 65535, dynamicAllowed: true, levels: ['low', 'medium', 'high'] }
+    },
+    'gemini-3.7-flash-low': {
+        maxOutputTokens: 65535,
+        thinking: { min: 1, max: 65535, dynamicAllowed: true, levels: ['low', 'medium', 'high'] }
+    },
+    'gemini-3.7-flash-high': {
         maxOutputTokens: 65535,
         thinking: { min: 1, max: 65535, dynamicAllowed: true, levels: ['low', 'medium', 'high'] }
     }
@@ -1520,6 +1538,7 @@ export class AntigravityApiService {
         }
 
         const baseURL = this.baseURLs[baseURLIndex];
+        let hasYielded = false;
 
         try {
             const requestOptions = {
@@ -1535,29 +1554,56 @@ export class AntigravityApiService {
                 // 阻止 gaxios 在非 2xx 时自行消耗流并抛异常，
                 // 由下方 res.status !== 200 统一处理，保证流仍可读取
                 validateStatus: () => true,
-                // 首字节超时：响应头迟迟不到时主动失败，避免请求永久挂起。
-                // 注意这是「响应头」超时，SSE 建连后由下方 parseSSEStream 的空闲超时接管。
-                timeout: this.config.ANTIGRAVITY_STREAM_FIRST_BYTE_TIMEOUT_MS
-                    ?? ANTIGRAVITY_STREAM_FIRST_BYTE_TIMEOUT_MS,
                 body: JSON.stringify(body)
             };
 
             this._applySidecar(requestOptions);
-            const res = await this.authClient.request(requestOptions);
+
+            // 只限制响应头/首字节等待；首字节到达后由 parseSSEStream 的 idle watchdog 接管。
+            const firstByteTimeoutMs = this.config.ANTIGRAVITY_STREAM_FIRST_BYTE_TIMEOUT_MS
+                ?? ANTIGRAVITY_STREAM_FIRST_BYTE_TIMEOUT_MS;
+            let firstByteTimer = null;
+            let firstByteTimedOut = false;
+            if (firstByteTimeoutMs > 0) {
+                const firstByteController = new AbortController();
+                requestOptions.signal = firstByteController.signal;
+                firstByteTimer = setTimeout(() => {
+                    firstByteTimedOut = true;
+                    firstByteController.abort();
+                }, firstByteTimeoutMs);
+            }
+
+            let res;
+            try {
+                res = await this.authClient.request(requestOptions);
+            } catch (error) {
+                if (firstByteTimedOut) {
+                    const timeoutError = new Error(`[Antigravity] Stream first byte timeout after ${firstByteTimeoutMs}ms.`);
+                    timeoutError.code = 'ETIMEDOUT';
+                    throw timeoutError;
+                }
+                throw error;
+            } finally {
+                if (firstByteTimer) clearTimeout(firstByteTimer);
+            }
 
             if (res.status !== 200) {
                 let errorBody = '';
                 try {
-                    for await (const chunk of res.data) {
-                        errorBody += chunk.toString();
-                    }
-                } catch (_) { /* 流可能已关闭 */ }
+                    errorBody = await this.readErrorResponseBody(res.data);
+                } catch (error) {
+                    if (error?.code === 'ETIMEDOUT') throw error;
+                    errorBody = `[Failed to read upstream error body: ${error.message}]`;
+                }
                 const upstreamError = new Error(`Upstream API Error (Status ${res.status}): ${errorBody}`);
                 upstreamError.response = { status: res.status, data: errorBody };
                 throw upstreamError;
             }
 
-            yield* this.parseSSEStream(res.data);
+            for await (const chunk of this.parseSSEStream(res.data)) {
+                hasYielded = true;
+                yield chunk;
+            }
         } catch (error) {
             const status = error.response?.status;
             const errorCode = error.code;
@@ -1565,8 +1611,14 @@ export class AntigravityApiService {
             
             // 检查是否为可重试的网络错误
             const isNetworkError = isRetryableNetworkError(error);
-            
+
             logger.error(`[Antigravity API] Error during stream (Status: ${status}, Code: ${errorCode}):`, error.message);
+
+            // 已经产出内容后禁止 provider 内部重试，避免重复生成或拼接错位。
+            if (hasYielded) {
+                logger.warn('[Antigravity API] Stream failed after partial output; skipping internal retry.');
+                throw error;
+            }
 
             if ((status === 401) && !isRetry) {
                 logger.info('[Antigravity API] Received 401 Unauthorized during stream. Triggering background refresh via PoolManager...');
@@ -1638,6 +1690,59 @@ export class AntigravityApiService {
         }
     }
 
+    async readErrorResponseBody(stream) {
+        const idleTimeoutMs = this.config.ANTIGRAVITY_STREAM_IDLE_TIMEOUT_MS
+            ?? ANTIGRAVITY_STREAM_IDLE_TIMEOUT_MS;
+        let idleTimer = null;
+        let idleTimedOut = false;
+        const chunks = [];
+        let totalBytes = 0;
+        let truncated = false;
+
+        const clearIdleTimer = () => {
+            if (idleTimer) {
+                clearTimeout(idleTimer);
+                idleTimer = null;
+            }
+        };
+        const armIdleTimer = () => {
+            clearIdleTimer();
+            if (!(idleTimeoutMs > 0)) return;
+            idleTimer = setTimeout(() => {
+                idleTimedOut = true;
+                try { stream.destroy(new Error('Antigravity error response idle timeout')); } catch (_) { /* 忽略 */ }
+            }, idleTimeoutMs);
+        };
+
+        try {
+            armIdleTimer();
+            for await (const chunk of stream) {
+                armIdleTimer();
+                const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+                const remaining = ANTIGRAVITY_ERROR_BODY_MAX_BYTES - totalBytes;
+                if (data.length > remaining) {
+                    if (remaining > 0) chunks.push(data.subarray(0, remaining));
+                    truncated = true;
+                    try { stream.destroy(); } catch (_) { /* 忽略 */ }
+                    break;
+                }
+                chunks.push(data);
+                totalBytes += data.length;
+            }
+        } catch (error) {
+            if (idleTimedOut) {
+                const timeoutError = new Error(`[Antigravity] Error response idle timeout after ${idleTimeoutMs}ms.`);
+                timeoutError.code = 'ETIMEDOUT';
+                throw timeoutError;
+            }
+            throw error;
+        } finally {
+            clearIdleTimer();
+        }
+
+        return Buffer.concat(chunks).toString('utf8') + (truncated ? '\n[error body truncated]' : '');
+    }
+
     async * parseSSEStream(stream) {
         const rl = readline.createInterface({
             input: stream,
@@ -1691,11 +1796,14 @@ export class AntigravityApiService {
             }
             rawLines.push(line);
         };
+        const canObserveRawData = typeof stream?.on === 'function';
+        const onStreamData = () => armIdleTimer();
+        if (canObserveRawData) stream.on('data', onStreamData);
         try {
             armIdleTimer();
             for await (let line of rl) {
-                // 收到任意一行即重新计时
-                armIdleTimer();
+                // 非 Node stream 无法监听原始 data 事件时，退回按行续期。
+                if (!canObserveRawData) armIdleTimer();
                 lineCount++;
                 const trimmedLine = line.trim();
                 // 只在尚未产出任何 chunk 时留存原始文本：正常 SSE 流不会为此占用内存
@@ -1731,6 +1839,10 @@ export class AntigravityApiService {
             throw error;
         } finally {
             clearIdleTimer();
+            if (canObserveRawData) {
+                if (typeof stream.off === 'function') stream.off('data', onStreamData);
+                else if (typeof stream.removeListener === 'function') stream.removeListener('data', onStreamData);
+            }
             rl.close();
         }
 

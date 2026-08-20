@@ -71,4 +71,62 @@ describe('Gemini and Antigravity streaming fixes from upstream v3.3.9', () => {
             code: 'ETIMEDOUT'
         });
     });
+
+    test('uses a first-byte AbortController instead of an absolute stream timeout', async () => {
+        const service = createService();
+        const responseStream = Readable.from([]);
+        let requestOptions;
+        service.authClient.request = jest.fn(async options => {
+            requestOptions = options;
+            return { status: 200, data: responseStream };
+        });
+
+        await expect(collect(service.streamApi('streamGenerateContent', {}))).resolves.toEqual([]);
+        expect(requestOptions.timeout).toBeUndefined();
+        expect(requestOptions.signal).toBeInstanceOf(AbortSignal);
+    });
+
+    test('caps error response bodies at 1 MiB', async () => {
+        const service = createService();
+        const body = await service.readErrorResponseBody(Readable.from([Buffer.alloc(1024 * 1024 + 32, 'x')]));
+
+        expect(Buffer.byteLength(body)).toBeLessThanOrEqual(1024 * 1024 + Buffer.byteLength('\n[error body truncated]'));
+        expect(body.endsWith('[error body truncated]')).toBe(true);
+    });
+
+    test('refreshes the idle watchdog when raw stream data arrives without a newline', async () => {
+        const service = createService({ ANTIGRAVITY_STREAM_IDLE_TIMEOUT_MS: 100 });
+        const stream = new PassThrough();
+        const resultPromise = collect(service.parseSSEStream(stream));
+
+        stream.write('data: {"response":');
+        await new Promise(resolve => setTimeout(resolve, 40));
+        stream.write('{"candidates":[]}');
+        await new Promise(resolve => setTimeout(resolve, 40));
+        stream.end('}\n\n');
+
+        await expect(resultPromise).resolves.toEqual([{ response: { candidates: [] } }]);
+    });
+
+    test('does not retry a stream after partial output', async () => {
+        const service = createService({ REQUEST_MAX_RETRIES: 1 });
+        service.parseSSEStream = jest.fn(async function* () {
+            yield { response: { candidates: [{ index: 0 }] } };
+            const error = new Error('socket reset after output');
+            error.code = 'ECONNRESET';
+            throw error;
+        });
+        service.authClient.request = jest.fn(async () => ({
+            status: 200,
+            data: Readable.from([])
+        }));
+
+        const output = [];
+        await expect((async () => {
+            for await (const chunk of service.streamApi('streamGenerateContent', {})) output.push(chunk);
+        })()).rejects.toMatchObject({ code: 'ECONNRESET' });
+
+        expect(output).toHaveLength(1);
+        expect(service.authClient.request).toHaveBeenCalledTimes(1);
+    });
 });

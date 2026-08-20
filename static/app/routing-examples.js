@@ -318,7 +318,9 @@ async function copyCurlExample(provider, options = {}) {
     }
     
     const { protocol = 'openai', model = 'default-model', message = 'Hello!' } = options;
-    const path = route.paths[protocol];
+    const path = protocol === 'responses'
+        ? `/${provider}/v1/responses`
+        : route.paths[protocol];
     
     if (!path) {
         showToast(t('common.error'), t('common.error'), 'error');
@@ -330,6 +332,17 @@ async function copyCurlExample(provider, options = {}) {
                      `${window.location.protocol}//${window.location.host}`;
                      
     let curlCommand = '';
+
+    if (protocol === 'responses') {
+        curlCommand = `curl ${hostname}${path} \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -d '{
+    "model": "${model}",
+    "input": "${message}",
+    "max_output_tokens": 1000
+  }'`;
+    } else {
     
     // 获取基础提供商ID（去掉后缀）
     const baseProviderId = routes.find(r => provider.startsWith(r.provider))?.provider || provider;
@@ -458,6 +471,7 @@ async function copyCurlExample(provider, options = {}) {
     "model": "${model}",
     "messages": [{"role": "user", "content": "${message}"}]
   }'`;
+    }
     }
     
     if (!curlCommand) {

@@ -171,6 +171,7 @@ function renderProviderCards(providers, defaultProviders, configMap) {
         const icon = config?.icon || 'fa-server';
         const route = resolveRouteInfo(provider.id, name);
         const openaiPath = route.paths?.openai;
+        const responsesPath = `/${provider.id}/v1/responses`;
         const claudePath = route.paths?.claude;
         const isDefault = defaultProviders.includes(provider.id);
         const emptyClass = provider.totalNodes === 0 ? 'empty' : '';
@@ -230,6 +231,25 @@ function renderProviderCards(providers, defaultProviders, configMap) {
                                     title="复制 curl 示例"
                                     data-provider="${provider.id}"
                                     data-protocol="openai">
+                                <i class="fas fa-terminal"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="access-endpoint-row">
+                        <strong>${escapeHtml(t('access.providers.responsesEndpoint'))}</strong>
+                        <code>${escapeHtml(getFullEndpoint(responsesPath))}</code>
+                        <div class="access-endpoint-actions">
+                            <button type="button" class="btn btn-secondary btn-sm access-copy-btn"
+                                    data-i18n-title="access.actions.copyEndpoint"
+                                    title="${escapeHtml(t('access.actions.copyEndpoint'))}"
+                                    data-copy="${escapeHtml(getFullEndpoint(responsesPath))}">
+                                <i class="fas fa-copy"></i>
+                            </button>
+                            <button type="button" class="btn btn-outline btn-sm access-curl-btn"
+                                    data-i18n-title="access.actions.copyCurl"
+                                    title="${escapeHtml(t('access.actions.copyCurl'))}"
+                                    data-provider="${provider.id}"
+                                    data-protocol="responses">
                                 <i class="fas fa-terminal"></i>
                             </button>
                         </div>

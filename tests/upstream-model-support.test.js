@@ -40,6 +40,15 @@ describe('upstream model registrations', () => {
         ]));
     });
 
+    test('registers Gemini 3.7 Flash aliases for Gemini and Antigravity providers', () => {
+        expect(getProviderModels('gemini-cli-oauth')).toContain('gemini-3.7-flash');
+        expect(getProviderModels('gemini-antigravity')).toEqual(expect.arrayContaining([
+            'gemini-3.7-flash',
+            'gemini-3.7-flash-low',
+            'gemini-3.7-flash-high'
+        ]));
+    });
+
     test('registers Claude Opus 5 for Kiro', () => {
         expect(getProviderModels('claude-kiro-oauth')).toContain('claude-opus-5');
     });

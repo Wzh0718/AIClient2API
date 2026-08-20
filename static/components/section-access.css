@@ -363,7 +363,7 @@
 
 .access-endpoint-row {
     display: grid;
-    grid-template-columns: 90px minmax(0, 1fr) auto;
+    grid-template-columns: 150px minmax(0, 1fr) auto;
     align-items: center;
     gap: 0.75rem;
     background: var(--bg-primary);
