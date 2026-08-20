@@ -21,3 +21,5 @@ keep: apply 必须基于未过期 preview 和匹配的 baseRevision；rollback �
 keep: UI 和管理输出只使用脱敏凭据引用，不显示 Token、Cookie、原始 API Key 或原始凭据 UUID。
 [credential-groups-final | 2026-08-14T09:33:06+08:00] ✓ 完成最终验证：6 个 suite、65 个测试及语法/diff 检查通过
 keep: 未执行真实浏览器截图或页面 smoke；未执行 git push。
+[quota-fingerprint-diagnosis | 2026-08-17T11:40:00+08:00] ✓ 完成额度/指纹只读诊断，并另开隐含周限快照观测计划
+keep: 13/13 账号 session+migrated；部分号隐含周限从约 8B 落到 1–2B，部分号没有；不改指纹默认。

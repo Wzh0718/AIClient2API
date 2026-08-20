@@ -109,3 +109,8 @@ RETROSPECTIVE: No high-signal memory updates.
 
 ## gpt-image-2 Capacity Hotfix - 2026-08-14T19:06:29+08:00
 DECISION: 复用现有 BigObjectCapacity、RuntimeMetrics 与分块响应机制，不新增第二套限流器；累计 backpressureMs 仅保留观测用途，图片准入继续由 active byte budget、单 worker RSS 与 event-loop p95 控制，避免累计指标形成永久熔断。
+
+## Codex quota fingerprint diagnosis - DONE - 2026-08-17T11:40:00+08:00
+产物：docs/2026-08-17-codex-quota-fingerprint-diagnosis.md、docs/plans/2026-08-17-codex-usage-ceiling-snapshot-plan.md。
+DECISION: 本轮只写诊断和观测计划，不改指纹默认、不改生产配置；观测计划另开是因为已确认部分号隐含周限塌缩，现有 usage cache 留不住历史。
+验证：对照 prod-sync 2026-08-11、e2e 2026-08-14、live 2026-08-17 三份 usage-cache，以及 provider_pools / credential-groups；未跑 Jest，因为没有改代码。
