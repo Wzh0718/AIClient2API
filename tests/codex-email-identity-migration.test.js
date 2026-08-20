@@ -386,4 +386,65 @@ describe('Codex email identity migration', () => {
         });
         expect(fs.existsSync(path.join(result.backupDir, 'codex-email-identity-overrides.json'))).toBe(true);
     });
+
+    test('explicit UUID override replaces an embedded historical email identity', async () => {
+        writeJson('provider_pools.json', {});
+        writeJson('codex-email-identity-overrides.json', {
+            'provider-uuid': 'new-address@mail.com'
+        });
+        writeJson('model-usage-stats.json', {
+            updatedAt: '2026-08-19T03:59:57.000Z',
+            summary: { requestCount: 2, totalTokens: 300 },
+            providers: {},
+            accounts: {
+                'openai-codex-oauth:old-address@outlook.com': {
+                    provider: 'openai-codex-oauth',
+                    providerUuid: 'old-address@outlook.com',
+                    accountIdentity: 'old-address@outlook.com',
+                    accountEmail: 'old-address@outlook.com',
+                    providerName: 'old-address@outlook.com',
+                    providerUuids: ['provider-uuid'],
+                    summary: { requestCount: 2, totalTokens: 300 },
+                    models: { 'gpt-5.6-sol': { requestCount: 2, totalTokens: 300 } }
+                }
+            },
+            accountUsageEvents: {
+                'openai-codex-oauth:old-address@outlook.com': [
+                    { timestamp: '2026-08-19T04:00:00.000Z', totalTokens: 300 }
+                ]
+            },
+            daily: {
+                '2026-08-19': {
+                    accounts: {
+                        'openai-codex-oauth:old-address@outlook.com': {
+                            provider: 'openai-codex-oauth',
+                            providerUuid: 'old-address@outlook.com',
+                            accountIdentity: 'old-address@outlook.com',
+                            accountEmail: 'old-address@outlook.com',
+                            providerName: 'old-address@outlook.com',
+                            providerUuids: ['provider-uuid'],
+                            summary: { requestCount: 2, totalTokens: 300 },
+                            models: { 'gpt-5.6-sol': { requestCount: 2, totalTokens: 300 } }
+                        }
+                    }
+                }
+            }
+        });
+        writeJson('api-potluck-keys.json', { keys: {} });
+
+        const { migrateCodexEmailIdentity } = await import('../src/scripts/migrate-codex-email-identity.js');
+        await migrateCodexEmailIdentity({ configDir: tempDir, dryRun: false });
+
+        const stats = readJson('model-usage-stats.json');
+        const newKey = 'openai-codex-oauth:new-address@mail.com';
+        expect(stats.accounts[newKey]).toMatchObject({
+            accountEmail: 'new-address@mail.com',
+            accountIdentity: 'new-address@mail.com',
+            providerUuids: ['provider-uuid'],
+            summary: { requestCount: 2, totalTokens: 300 }
+        });
+        expect(stats.accounts['openai-codex-oauth:old-address@outlook.com']).toBeUndefined();
+        expect(stats.daily['2026-08-19'].accounts[newKey].summary.totalTokens).toBe(300);
+        expect(stats.accountUsageEvents[newKey]).toHaveLength(1);
+    });
 });

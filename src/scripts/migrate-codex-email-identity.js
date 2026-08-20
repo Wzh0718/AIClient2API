@@ -82,12 +82,6 @@ function createPermanentBackup(configDir, now) {
 
 function buildProviderEmailIndex(providerPools = {}, emailOverrides = {}) {
     const index = new Map();
-    for (const [key, value] of Object.entries(emailOverrides || {})) {
-        const email = normalizeEmail(value);
-        if (!email) continue;
-        index.set(key, email);
-    }
-
     for (const [providerType, providers] of Object.entries(providerPools || {})) {
         if (!Array.isArray(providers)) continue;
         for (const provider of providers) {
@@ -100,6 +94,13 @@ function buildProviderEmailIndex(providerPools = {}, emailOverrides = {}) {
             index.set(`${providerType}:${provider.uuid}`, email);
             index.set(provider.uuid, email);
         }
+    }
+
+    // Explicit UUID mappings are the final authority for renamed accounts.
+    for (const [key, value] of Object.entries(emailOverrides || {})) {
+        const email = normalizeEmail(value);
+        if (!email) continue;
+        index.set(key, email);
     }
     return index;
 }
@@ -114,13 +115,6 @@ function getIdentityFromAccountKey(accountKey) {
 
 function resolveAccountEmail(accountKey, account = {}, providerEmailIndex) {
     const provider = account.provider || getProviderFromAccountKey(accountKey);
-    const directEmail = normalizeEmail(account.accountEmail)
-        || normalizeEmail(account.accountIdentity)
-        || normalizeEmail(account.providerName)
-        || normalizeEmail(account.providerUuid)
-        || normalizeEmail(getIdentityFromAccountKey(accountKey));
-    if (directEmail) return directEmail;
-
     const candidates = [
         account.providerUuid,
         getIdentityFromAccountKey(accountKey),
@@ -131,6 +125,13 @@ function resolveAccountEmail(accountKey, account = {}, providerEmailIndex) {
         const email = providerEmailIndex.get(`${provider}:${uuid}`) || providerEmailIndex.get(uuid);
         if (email) return email;
     }
+
+    const directEmail = normalizeEmail(account.accountEmail)
+        || normalizeEmail(account.accountIdentity)
+        || normalizeEmail(account.providerName)
+        || normalizeEmail(account.providerUuid)
+        || normalizeEmail(getIdentityFromAccountKey(accountKey));
+    if (directEmail) return directEmail;
 
     return null;
 }
