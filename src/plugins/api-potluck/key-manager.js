@@ -156,6 +156,14 @@ function normalizeUsageMap(map = {}) {
     return normalized;
 }
 
+function normalizeProviderModelUsageMap(map = {}) {
+    const normalized = {};
+    for (const [provider, models] of Object.entries(map || {})) {
+        normalized[provider] = normalizeUsageMap(models);
+    }
+    return normalized;
+}
+
 function normalizeAccountUsageMap(map = {}) {
     const normalized = {};
     for (const [accountKey, account] of Object.entries(map || {})) {
@@ -183,6 +191,7 @@ function normalizeHourlyUsageMap(map = {}) {
             summary: normalizeUsageBucket(hourData?.summary),
             providers: normalizeUsageMap(hourData?.providers),
             models: normalizeUsageMap(hourData?.models),
+            providerModels: normalizeProviderModelUsageMap(hourData?.providerModels),
             accounts: normalizeAccountUsageMap(hourData?.accounts)
         };
     }
@@ -196,6 +205,7 @@ function normalizeUsageHistoryDay(day = {}) {
         }),
         providers: normalizeUsageMap(day.providers),
         models: normalizeUsageMap(day.models),
+        providerModels: normalizeProviderModelUsageMap(day.providerModels),
         accounts: normalizeAccountUsageMap(day.accounts),
         hours: normalizeHourlyUsageMap(day.hours)
     };
@@ -216,6 +226,9 @@ function addUsageHistoryRatios(usageHistory = {}) {
         }
         for (const usage of Object.values(day.models || {})) {
             addCacheHitRatio(usage);
+        }
+        for (const models of Object.values(day.providerModels || {})) {
+            for (const usage of Object.values(models || {})) addCacheHitRatio(usage);
         }
         for (const account of Object.values(day.accounts || {})) {
             addCacheHitRatio(account.summary);
@@ -491,6 +504,7 @@ function ensureHourUsage(dayHistory, hour) {
             summary: createUsageBucket(),
             providers: {},
             models: {},
+            providerModels: {},
             accounts: {}
         };
     }
@@ -519,6 +533,23 @@ function addAccountUsage(targetMap, account = {}) {
     for (const [model, usage] of Object.entries(account.models || {})) {
         accountUsage.models[model] = normalizeUsageBucket(accountUsage.models[model]);
         addUsage(accountUsage.models[model], usage);
+    }
+}
+
+function addProviderModelUsage(targetMap, provider, model, usage = {}) {
+    if (!provider || !model) return;
+    if (!targetMap[provider]) targetMap[provider] = {};
+    targetMap[provider][model] = normalizeUsageBucket(targetMap[provider][model]);
+    addUsage(targetMap[provider][model], usage);
+}
+
+function addProviderModelsFromAccounts(targetMap, accounts = {}) {
+    for (const account of Object.values(accounts || {})) {
+        const provider = account?.provider;
+        if (!provider) continue;
+        for (const [model, usage] of Object.entries(account.models || {})) {
+            addProviderModelUsage(targetMap, provider, model, usage);
+        }
     }
 }
 
@@ -976,6 +1007,9 @@ function resetUsageHistoryTokens(usageHistory) {
         for (const usage of Object.values(day.models || {})) {
             resetUsageBucketTokens(usage);
         }
+        for (const models of Object.values(day.providerModels || {})) {
+            for (const usage of Object.values(models || {})) resetUsageBucketTokens(usage);
+        }
 
         for (const account of Object.values(day.accounts || {})) {
             resetUsageBucketTokens(account.summary);
@@ -991,6 +1025,9 @@ function resetUsageHistoryTokens(usageHistory) {
             }
             for (const usage of Object.values(hour.models || {})) {
                 resetUsageBucketTokens(usage);
+            }
+            for (const models of Object.values(hour.providerModels || {})) {
+                for (const usage of Object.values(models || {})) resetUsageBucketTokens(usage);
             }
             for (const account of Object.values(hour.accounts || {})) {
                 resetUsageBucketTokens(account.summary);
@@ -1085,6 +1122,11 @@ function addCostToUsageHistory(usageHistory = {}, conversionModel = DEFAULT_CONV
         for (const [model, usage] of Object.entries(day.models || {})) {
             usage.cost = buildCost(usage, { [model]: usage }, conversionModel);
         }
+        for (const models of Object.values(day.providerModels || {})) {
+            for (const [model, usage] of Object.entries(models || {})) {
+                usage.cost = buildCost(usage, { [model]: usage }, conversionModel);
+            }
+        }
         for (const account of Object.values(day.accounts || {})) {
             account.summary.cost = buildCost(account.summary, account.models || {}, conversionModel);
             for (const [model, usage] of Object.entries(account.models || {})) {
@@ -1095,6 +1137,11 @@ function addCostToUsageHistory(usageHistory = {}, conversionModel = DEFAULT_CONV
             hour.summary.cost = buildCost(hour.summary, hour.models || {}, conversionModel);
             for (const [model, usage] of Object.entries(hour.models || {})) {
                 usage.cost = buildCost(usage, { [model]: usage }, conversionModel);
+            }
+            for (const models of Object.values(hour.providerModels || {})) {
+                for (const [model, usage] of Object.entries(models || {})) {
+                    usage.cost = buildCost(usage, { [model]: usage }, conversionModel);
+                }
             }
             for (const account of Object.values(hour.accounts || {})) {
                 account.summary.cost = buildCost(account.summary, account.models || {}, conversionModel);
@@ -2046,6 +2093,8 @@ export async function incrementUsage(apiKey, pName = 'unknown', mName = 'unknown
     if (!dayHistory.models[mName]) dayHistory.models[mName] = createUsageBucket();
     addUsage(dayHistory.models[mName], usageRecord);
     updatePeaks(dayHistory.models[mName]);
+    addProviderModelUsage(dayHistory.providerModels, pName, mName, usageRecord);
+    updatePeaks(dayHistory.providerModels[pName][mName]);
 
     if (!keyData.totalModels) keyData.totalModels = {};
     if (!keyData.totalModels[mName]) keyData.totalModels[mName] = createUsageBucket();
@@ -2076,6 +2125,8 @@ export async function incrementUsage(apiKey, pName = 'unknown', mName = 'unknown
     if (!hourUsage.models[mName]) hourUsage.models[mName] = createUsageBucket();
     addUsage(hourUsage.models[mName], usageRecord);
     updatePeaks(hourUsage.models[mName]);
+    addProviderModelUsage(hourUsage.providerModels, pName, mName, usageRecord);
+    updatePeaks(hourUsage.providerModels[pName][mName]);
     const hourAccountUsage = ensureAccountUsage(hourUsage.accounts, pName, providerUuid, providerName, accountIdentity, accountEmail);
     if (hourAccountUsage) {
         if (accountEmail && !hourAccountUsage.accountEmail) hourAccountUsage.accountEmail = accountEmail;
@@ -2203,6 +2254,19 @@ export async function getStats(options = {}) {
                         aggregatedHistory[date].models[m] = normalizeUsageBucket(aggregatedHistory[date].models[m]);
                         addUsage(aggregatedHistory[date].models[m], usage);
                     });
+                }
+
+                if (!compactHistory) {
+                    const providerModels = normalizeProviderModelUsageMap(history.providerModels);
+                    if (Object.keys(providerModels).length > 0) {
+                        for (const [provider, models] of Object.entries(providerModels)) {
+                            for (const [model, usage] of Object.entries(models)) {
+                                addProviderModelUsage(aggregatedHistory[date].providerModels, provider, model, usage);
+                            }
+                        }
+                    } else {
+                        addProviderModelsFromAccounts(aggregatedHistory[date].providerModels, history.accounts);
+                    }
                 }
 
                 // 汇总账号维度，供管理页展示 Codex OAuth 账号 Token 占比。

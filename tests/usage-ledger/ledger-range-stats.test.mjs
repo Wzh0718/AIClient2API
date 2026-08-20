@@ -58,6 +58,31 @@ test('aggregator groups rows by provider, model, and account with cost totals', 
   assert.equal(result.accounts['openai-codex-oauth:user@example.com'].models['gpt-5.5'].totalTokens, 100);
 });
 
+test('aggregator keeps same-named models separated by provider', () => {
+  const aggregator = createLedgerRangeAggregator({ conversionModel: 'gemini-2.5-flash' });
+  aggregator.addRow(row({
+    provider: 'openai-codex-oauth',
+    model: 'shared-model',
+    totalTokens: 120,
+    requestCount: 2,
+  }));
+  aggregator.addRow(row({
+    provider: 'gemini-antigravity',
+    accountEmail: 'gemini@example.com',
+    model: 'shared-model',
+    totalTokens: 80,
+    requestCount: 1,
+  }));
+
+  const result = aggregator.result();
+
+  assert.equal(result.models['shared-model'].totalTokens, 200);
+  assert.equal(result.providerModels['openai-codex-oauth']['shared-model'].totalTokens, 120);
+  assert.equal(result.providerModels['openai-codex-oauth']['shared-model'].requestCount, 2);
+  assert.equal(result.providerModels['gemini-antigravity']['shared-model'].totalTokens, 80);
+  assert.equal(result.providerModels['gemini-antigravity']['shared-model'].requestCount, 1);
+});
+
 test('aggregator reprices stale GPT-5.6 ledger rows with current prices', () => {
   const aggregator = createLedgerRangeAggregator({ conversionModel: 'gemini-2.5-flash' });
   const usage = {

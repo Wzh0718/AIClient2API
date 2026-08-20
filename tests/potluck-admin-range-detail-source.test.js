@@ -46,7 +46,8 @@ describe('API Potluck admin range and key detail UI source', () => {
         expect(source).toContain("const statsResult = await apiRequest(`${API_BASE}/stats?${getCostQuery()}`)");
         expect(source).toContain('const stats = statsResult?.success ? statsResult.data : keysResult.data.stats');
         expect(source).toContain('function renderProviderAccountTokenTree(elementId, providers, accounts, totalTokens)');
-        expect(source).toContain("renderProviderAccountTokenTree('providerAccountDistribution', rangeSummary.providers, rangeSummary.accounts, totalTokens)");
+        expect(source).toContain("elementId: 'providerAccountDistribution'");
+        expect(source).toContain('renderSynchronizedProviderViews()');
         expect(source).toContain('usageTokens(b) - usageTokens(a)');
         expect(source).toContain('formatTokenCompact(tokens)');
         expect(source).toContain('Token');
@@ -57,8 +58,18 @@ describe('API Potluck admin range and key detail UI source', () => {
         const source = loadPotluckSource();
 
         expect(source).toContain('模型活跃度 (Models)');
-        expect(source).toContain('const displayModels = aggregateModelDistributionForDisplay(rangeSummary.models)');
-        expect(source).toContain("renderDistribution('modelDistribution', displayModels, totalCalls, {");
+        expect(source).toContain('function buildProviderModelDistribution(providerModels = {}, accounts = {})');
+        expect(source).toContain('function renderProviderModelDistribution(elementId, providerModels, accounts = {})');
+        expect(source).toContain("elementId: 'modelDistribution'");
+        expect(source).toContain('providerModels: rangeSummary.providerModels');
+        expect(source).toContain('selectedProviderAccountName = providerName');
+        expect(source).toContain('renderSynchronizedProviderViews()');
+        expect(source).toContain("providerName === 'unknown'");
+        expect(source).toContain("normalizedName === 'unknown'");
+        expect(source).toContain('const selectedTotalCalls = usageCount(selectedProvider.summary)');
+        expect(source).toContain('const selectedTotalTokens = usageTokens(selectedProvider.summary)');
+        expect(source).toContain("document.getElementById('modelTotalCount').textContent = `${formatNumber(selectedTotalCalls)} 次 / ${formatTokenCompact(selectedTotalTokens)} Tokens`");
+        expect(source).toContain("renderDistribution('modelProviderPanel', selectedProvider.models, selectedTotalCalls, {");
         expect(source).toContain('maxItems: Number.POSITIVE_INFINITY');
         expect(source).toContain("emptyText: '当前范围暂无模型数据'");
         expect(source).toContain('filter: usage => usageTokens(usage) > 0');
@@ -79,6 +90,7 @@ describe('API Potluck admin range and key detail UI source', () => {
         expect(source).not.toContain("'gpt-image-2-fast': 'gpt-image-2'");
         expect(source).toContain('function aggregateModelDistributionForDisplay(models = {}, minCalls = 100)');
         expect(source).toContain("const lowCallLabel = `其他模型（<${minCalls}次）`");
+        expect(source).toContain('providerModels: {}');
         expect(source).not.toContain('const allModelSummary = summarizeUsageHistoryForRange(usageHistory, \'total\')');
         expect(source).not.toContain("document.getElementById('modelDistribution').innerHTML = '<div class=\"detail-empty\">当前范围暂无模型数据</div>'");
     });
@@ -144,7 +156,7 @@ describe('API Potluck admin range and key detail UI source', () => {
         expect(source).toContain('function resolveSelectedProviderAccountName(providers)');
         expect(source).toContain("providers.find(provider => provider.name === 'openai-codex-oauth')");
         expect(source).toContain('providers.some(provider => provider.name === selectedProviderAccountName)');
-        expect(source).toContain('function selectProviderAccount(providerName)');
+        expect(source).toContain('function selectProviderAccount(providerName, focusElementId = providerAccountViewState.elementId)');
         expect(source).toContain('selectedProviderAccountName = providerName');
         expect(source).toContain("container.querySelector('.provider-account-tab[aria-selected=\"true\"]')?.focus()");
         expect(source).toContain('renderProviderAccountTokenTree(');
@@ -178,6 +190,8 @@ describe('API Potluck admin range and key detail UI source', () => {
         expect(source).toContain('role="tabpanel"');
         expect(source).toContain('id="providerAccountPanel"');
         expect(source).toContain('function handleProviderAccountTabKeydown(event, providerName)');
+        expect(source).toContain("const isModelTab = event.currentTarget.id.startsWith('modelProviderTab')");
+        expect(source).toContain('selectProviderAccount(providers[nextIndex].name, focusElementId)');
         expect(source).toContain("event.key === 'ArrowRight'");
         expect(source).toContain("event.key === 'ArrowLeft'");
         expect(source).toContain("event.key === 'Home'");
@@ -226,7 +240,7 @@ describe('API Potluck admin range and key detail UI source', () => {
         const source = loadPotluckSource();
 
         expect(source).toContain("document.getElementById('providerAccountTotalCount').textContent = `${formatNumber(totalCalls)} 次 / ${formatTokenCompact(totalTokens)} Tokens`");
-        expect(source).toContain("document.getElementById('modelTotalCount').textContent = `${formatNumber(totalCalls)} 次 / ${formatTokenCompact(totalTokens)} Tokens`");
+        expect(source).toContain("document.getElementById('modelTotalCount').textContent = `${formatNumber(selectedTotalCalls)} 次 / ${formatTokenCompact(selectedTotalTokens)} Tokens`");
         expect(source).not.toContain("document.getElementById('providerAccountTotalCount').innerHTML = `${formatNumber(totalCalls)} 次 / ${formatTokenCompact(totalTokens)} Tokens${rangeSummary.summary.cost");
         expect(source).not.toContain("document.getElementById('modelTotalCount').innerHTML = `${formatNumber(totalCalls)} 次${rangeSummary.summary.cost");
 

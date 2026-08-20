@@ -376,6 +376,41 @@ describe('api potluck persistence', () => {
         });
     });
 
+    test('records daily model usage separately for each provider', async () => {
+        const plugin = await loadPotluckPlugin();
+        const key = await plugin.exports.createKey('Provider Models', 1000);
+
+        await plugin.exports.incrementUsage(key.id, 'openai-codex-oauth', 'shared-model', {
+            requestCount: 2,
+            promptTokens: 100,
+            completionTokens: 20,
+            totalTokens: 120
+        }, 'req-provider-model-codex', {
+            providerUuid: 'codex-account',
+            accountEmail: 'codex@example.com'
+        });
+        const recorded = await plugin.exports.incrementUsage(key.id, 'gemini-antigravity', 'shared-model', {
+            requestCount: 1,
+            promptTokens: 60,
+            completionTokens: 20,
+            totalTokens: 80
+        }, 'req-provider-model-gemini', {
+            providerUuid: 'gemini-account',
+            accountEmail: 'gemini@example.com'
+        });
+
+        const today = Object.keys(recorded.usageHistory).sort().at(-1);
+        expect(recorded.usageHistory[today].models['shared-model'].totalTokens).toBe(200);
+        expect(recorded.usageHistory[today].providerModels['openai-codex-oauth']['shared-model']).toMatchObject({
+            requestCount: 2,
+            totalTokens: 120
+        });
+        expect(recorded.usageHistory[today].providerModels['gemini-antigravity']['shared-model']).toMatchObject({
+            requestCount: 1,
+            totalTokens: 80
+        });
+    });
+
     test('reports recorded, delta update, and deduplicated outcomes for one request snapshot', async () => {
         const plugin = await loadPotluckPlugin();
         const key = await plugin.exports.createKey('Usage Outcome', 1000);

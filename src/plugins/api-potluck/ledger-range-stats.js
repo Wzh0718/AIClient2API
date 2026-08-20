@@ -144,6 +144,7 @@ export function createLedgerRangeAggregator({
     const summary = createBucket();
     const providers = {};
     const models = {};
+    const providerModels = {};
     const accounts = {};
     const daily = {};
     const keySummaries = {};
@@ -185,6 +186,8 @@ export function createLedgerRangeAggregator({
 
                 const modelName = row.model || 'unknown';
                 addRowToBucket(ensureBucket(models, modelName), row, currentCost);
+                if (!providerModels[providerName]) providerModels[providerName] = {};
+                addRowToBucket(ensureBucket(providerModels[providerName], modelName), row, currentCost);
 
                 if (row.date) addRowToBucket(ensureBucket(daily, row.date), row, currentCost);
 
@@ -207,6 +210,9 @@ export function createLedgerRangeAggregator({
             finalizeBucket(summary, normalizedConversionModel);
             for (const bucket of Object.values(providers)) finalizeBucket(bucket, normalizedConversionModel);
             for (const bucket of Object.values(models)) finalizeBucket(bucket, normalizedConversionModel);
+            for (const providerModelMap of Object.values(providerModels)) {
+                for (const bucket of Object.values(providerModelMap)) finalizeBucket(bucket, normalizedConversionModel);
+            }
             for (const bucket of Object.values(daily)) finalizeBucket(bucket, normalizedConversionModel);
             for (const account of Object.values(accounts)) {
                 finalizeBucket(account.summary, normalizedConversionModel);
@@ -227,6 +233,7 @@ export function createLedgerRangeAggregator({
                 summary,
                 providers,
                 models,
+                providerModels,
                 accounts,
                 daily,
                 ...(includeKeySummaries ? { keySummaries } : {}),

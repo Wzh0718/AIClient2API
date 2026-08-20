@@ -1619,6 +1619,7 @@
         let currentCustomRange = { from: '', to: '' };
         let selectedProviderAccountName = null;
         let providerAccountViewState = { elementId: null, providers: {}, accounts: {}, totalTokens: 0 };
+        let providerModelViewState = { elementId: null, providerModels: {}, accounts: {} };
         let currentRangeBounds = { from: '', to: '' };
         const ACTUAL_VALUE_MODE = 'actual';
         let currentConversionModel = ACTUAL_VALUE_MODE;
@@ -1965,12 +1966,26 @@
             addUsageBucket(target[name], usage);
         }
 
+        function addProviderModelUsageMap(target, provider, models = {}) {
+            if (!target[provider]) target[provider] = {};
+            Object.entries(models || {}).forEach(([model, usage]) => addUsageMap(target[provider], model, usage));
+        }
+
+        function addProviderModelsFromAccounts(target, accounts = {}) {
+            Object.values(accounts || {}).forEach(account => {
+                const provider = String(account?.provider || '').trim();
+                if (!provider) return;
+                addProviderModelUsageMap(target, provider, account.models || {});
+            });
+        }
+
         function aggregateModelDistributionForDisplay(models = {}, minCalls = 100) {
             const normalizedModels = {};
             const lowCallLabel = `其他模型（<${minCalls}次）`;
 
             Object.entries(models || {}).forEach(([model, usage]) => {
                 const normalizedName = normalizeDisplayModelName(model);
+                if (normalizedName === 'unknown') return;
                 if (!normalizedModels[normalizedName]) normalizedModels[normalizedName] = createUsageSummaryBucket();
                 addUsageBucket(normalizedModels[normalizedName], usage);
             });
@@ -2039,6 +2054,7 @@
             const summary = createUsageSummaryBucket();
             const providers = {};
             const models = {};
+            const providerModels = {};
             const accounts = {};
 
             dates.forEach(date => {
@@ -2047,6 +2063,11 @@
                 Object.entries(day.providers || {}).forEach(([name, usage]) => addUsageMap(providers, name, usage));
                 Object.entries(day.models || {}).forEach(([name, usage]) => addUsageMap(models, name, usage));
                 Object.entries(day.accounts || {}).forEach(([name, account]) => addAccountUsageMap(accounts, name, account));
+                if (Object.keys(day.providerModels || {}).length > 0) {
+                    Object.entries(day.providerModels).forEach(([provider, providerModelMap]) => addProviderModelUsageMap(providerModels, provider, providerModelMap));
+                } else {
+                    addProviderModelsFromAccounts(providerModels, day.accounts);
+                }
             });
 
             return {
@@ -2054,6 +2075,7 @@
                 summary: withCacheHitRatio(summary),
                 providers,
                 models,
+                providerModels,
                 accounts
             };
         }
@@ -2478,11 +2500,13 @@
             const summary = createUsageSummaryBucket();
             const providers = {};
             const models = {};
+            const providerModels = {};
             const accounts = {};
 
             addUsageBucket(summary, ledgerStats.summary || {});
             Object.entries(ledgerStats.providers || {}).forEach(([name, usage]) => addUsageMap(providers, name, usage));
             Object.entries(ledgerStats.models || {}).forEach(([name, usage]) => addUsageMap(models, name, usage));
+            Object.entries(ledgerStats.providerModels || {}).forEach(([provider, providerModelMap]) => addProviderModelUsageMap(providerModels, provider, providerModelMap));
             Object.entries(ledgerStats.accounts || {}).forEach(([name, account]) => addAccountUsageMap(accounts, name, account));
 
             const liveDates = (ledgerStats.missingDates || []).filter(date => usageHistory?.[date]);
@@ -2492,6 +2516,11 @@
                 Object.entries(day.providers || {}).forEach(([name, usage]) => addUsageMap(providers, name, usage));
                 Object.entries(day.models || {}).forEach(([name, usage]) => addUsageMap(models, name, usage));
                 Object.entries(day.accounts || {}).forEach(([name, account]) => addAccountUsageMap(accounts, name, account));
+                if (Object.keys(day.providerModels || {}).length > 0) {
+                    Object.entries(day.providerModels).forEach(([provider, providerModelMap]) => addProviderModelUsageMap(providerModels, provider, providerModelMap));
+                } else {
+                    addProviderModelsFromAccounts(providerModels, day.accounts);
+                }
             });
 
             return {
@@ -2499,6 +2528,7 @@
                 summary: withCacheHitRatio(summary),
                 providers,
                 models,
+                providerModels,
                 accounts,
                 dataSource: {
                     ledgerDates: ledgerStats.availableDates || [],
@@ -2542,32 +2572,28 @@
             document.querySelector('#usageStatsSection .section-title').innerHTML = `<i class="fas fa-chart-pie"></i> 节点与 Token 使用统计 (${getUsageRangeLabel(range)})`;
             const totalCalls = rangeSummary.summary.requestCount;
             const totalTokens = rangeSummary.summary.totalTokens;
-            const displayModels = aggregateModelDistributionForDisplay(rangeSummary.models);
             renderRangeCostHighlights(rangeSummary);
 
             if (totalCalls === 0) {
                 document.getElementById('providerAccountDistribution').innerHTML = '<div class="detail-empty">当前范围暂无 Provider / 账号 Token 数据</div>';
-                renderDistribution('modelDistribution', displayModels, totalCalls, {
-                    maxItems: Number.POSITIVE_INFINITY,
-                    emptyText: '当前范围暂无模型数据',
-                    filter: usage => usageTokens(usage) > 0
-                });
+                renderProviderModelDistribution('modelDistribution', rangeSummary.providerModels, rangeSummary.accounts);
                 document.getElementById('providerAccountTotalCount').textContent = `0 次 / 0 Tokens`;
-                document.getElementById('modelTotalCount').textContent = `${formatNumber(totalCalls)} 次 / ${formatTokenCompact(totalTokens)} Tokens`;
                 return;
             }
 
-            // 渲染中心视角 Provider / 账号 Token 树形占比
-            renderProviderAccountTokenTree('providerAccountDistribution', rangeSummary.providers, rangeSummary.accounts, totalTokens);
+            providerAccountViewState = {
+                elementId: 'providerAccountDistribution',
+                providers: rangeSummary.providers,
+                accounts: rangeSummary.accounts,
+                totalTokens
+            };
+            providerModelViewState = {
+                elementId: 'modelDistribution',
+                providerModels: rangeSummary.providerModels,
+                accounts: rangeSummary.accounts
+            };
+            renderSynchronizedProviderViews();
             document.getElementById('providerAccountTotalCount').textContent = `${formatNumber(totalCalls)} 次 / ${formatTokenCompact(totalTokens)} Tokens`;
-
-            // 渲染模型分布 (模型总数与提供商总数一致)
-            renderDistribution('modelDistribution', displayModels, totalCalls, {
-                maxItems: Number.POSITIVE_INFINITY,
-                emptyText: '当前范围暂无模型数据',
-                filter: usage => usageTokens(usage) > 0
-            });
-            document.getElementById('modelTotalCount').textContent = `${formatNumber(totalCalls)} 次 / ${formatTokenCompact(totalTokens)} Tokens`;
         }
 
         function isCodexOauthAccount(account) {
@@ -2655,24 +2681,42 @@
             return selectedProviderAccountName;
         }
 
-        function selectProviderAccount(providerName) {
-            if (!providerAccountViewState.elementId) return;
+        function selectProviderAccount(providerName, focusElementId = providerAccountViewState.elementId) {
             selectedProviderAccountName = providerName;
-            renderProviderAccountTokenTree(
-                providerAccountViewState.elementId,
-                providerAccountViewState.providers,
-                providerAccountViewState.accounts,
-                providerAccountViewState.totalTokens
-            );
-            const container = document.getElementById(providerAccountViewState.elementId);
+            renderSynchronizedProviderViews();
+            const container = document.getElementById(focusElementId || providerAccountViewState.elementId || providerModelViewState.elementId);
             container.querySelector('.provider-account-tab[aria-selected="true"]')?.focus();
         }
 
+        function renderSynchronizedProviderViews() {
+            if (providerAccountViewState.elementId) {
+                renderProviderAccountTokenTree(
+                    providerAccountViewState.elementId,
+                    providerAccountViewState.providers,
+                    providerAccountViewState.accounts,
+                    providerAccountViewState.totalTokens
+                );
+            }
+            if (providerModelViewState.elementId) {
+                renderProviderModelDistribution(
+                    providerModelViewState.elementId,
+                    providerModelViewState.providerModels,
+                    providerModelViewState.accounts
+                );
+            }
+        }
+
         function handleProviderAccountTabKeydown(event, providerName) {
-            const providers = orderProviderAccountTabs(buildProviderAccountTokenTree(
-                providerAccountViewState.providers,
-                providerAccountViewState.accounts
-            )).filter(provider => usageTokens(provider.summary) > 0);
+            const isModelTab = event.currentTarget.id.startsWith('modelProviderTab');
+            const providers = isModelTab
+                ? orderProviderAccountTabs(buildProviderModelDistribution(
+                    providerModelViewState.providerModels,
+                    providerModelViewState.accounts
+                ))
+                : orderProviderAccountTabs(buildProviderAccountTokenTree(
+                    providerAccountViewState.providers,
+                    providerAccountViewState.accounts
+                )).filter(provider => usageTokens(provider.summary) > 0);
             const currentIndex = providers.findIndex(provider => provider.name === providerName);
             if (currentIndex < 0) return;
 
@@ -2684,7 +2728,8 @@
             else return;
 
             event.preventDefault();
-            selectProviderAccount(providers[nextIndex].name);
+            const focusElementId = isModelTab ? providerModelViewState.elementId : providerAccountViewState.elementId;
+            selectProviderAccount(providers[nextIndex].name, focusElementId);
         }
 
         function rollupProviderCostFromAccounts(provider) {
@@ -2779,7 +2824,66 @@
 
             container.querySelectorAll('.provider-account-tab').forEach((tab, index) => {
                 const providerName = sorted[index].name;
-                tab.addEventListener('click', () => selectProviderAccount(providerName));
+                tab.addEventListener('click', () => selectProviderAccount(providerName, elementId));
+                tab.addEventListener('keydown', event => handleProviderAccountTabKeydown(event, providerName));
+            });
+        }
+
+        function buildProviderModelDistribution(providerModels = {}, accounts = {}) {
+            const source = {};
+            Object.entries(providerModels || {}).forEach(([provider, models]) => addProviderModelUsageMap(source, provider, models));
+            if (Object.keys(source).length === 0) addProviderModelsFromAccounts(source, accounts);
+
+            const accountProviders = new Set(Object.values(accounts || {}).map(account => String(account?.provider || '').trim()).filter(Boolean));
+            return [...new Set([...Object.keys(source), ...accountProviders])]
+                .filter(providerName => providerName && !(providerName === 'unknown'))
+                .map(providerName => {
+                    const models = aggregateModelDistributionForDisplay(source[providerName] || {});
+                    const summary = createUsageSummaryBucket();
+                    Object.values(models).forEach(usage => addUsageBucket(summary, usage));
+                    return { name: providerName, models, summary };
+                });
+        }
+
+        function renderProviderModelDistribution(elementId, providerModels, accounts = {}) {
+            const container = document.getElementById(elementId);
+            providerModelViewState = { elementId, providerModels, accounts };
+            const providers = orderProviderAccountTabs(buildProviderModelDistribution(providerModels, accounts));
+
+            if (providers.length === 0) {
+                container.innerHTML = '<div class="detail-empty">当前范围暂无模型数据</div>';
+                document.getElementById('modelTotalCount').textContent = '0 次 / 0 Tokens';
+                return;
+            }
+
+            const selectedProviderName = providers.some(provider => provider.name === selectedProviderAccountName)
+                ? selectedProviderAccountName
+                : resolveSelectedProviderAccountName(providers);
+            const selectedProvider = providers.find(provider => provider.name === selectedProviderName);
+            const selectedIndex = providers.findIndex(provider => provider.name === selectedProviderName);
+            const knownTotalTokens = providers.reduce((sum, provider) => sum + usageTokens(provider.summary), 0);
+            const selectedTotalCalls = usageCount(selectedProvider.summary);
+            const selectedTotalTokens = usageTokens(selectedProvider.summary);
+            const tabs = providers.map((provider, index) => {
+                const selected = provider.name === selectedProviderName;
+                const share = formatPercentShare(usageTokens(provider.summary), knownTotalTokens);
+                return `<button class="provider-account-tab" type="button" role="tab" id="modelProviderTab${index}" aria-selected="${selected}" aria-controls="modelProviderPanel" tabindex="${selected ? 0 : -1}">${escapeHtml(getProviderDisplayName(provider.name))} · ${share}</button>`;
+            }).join('');
+
+            container.innerHTML = `
+                <div class="provider-account-tabs" role="tablist" aria-label="Provider 模型用量">${tabs}</div>
+                <div class="provider-account-panel" id="modelProviderPanel" role="tabpanel" aria-labelledby="modelProviderTab${selectedIndex}"></div>
+            `;
+            renderDistribution('modelProviderPanel', selectedProvider.models, selectedTotalCalls, {
+                maxItems: Number.POSITIVE_INFINITY,
+                emptyText: '当前范围暂无模型数据',
+                filter: usage => usageTokens(usage) > 0
+            });
+            document.getElementById('modelTotalCount').textContent = `${formatNumber(selectedTotalCalls)} 次 / ${formatTokenCompact(selectedTotalTokens)} Tokens`;
+
+            container.querySelectorAll('.provider-account-tab').forEach((tab, index) => {
+                const providerName = providers[index].name;
+                tab.addEventListener('click', () => selectProviderAccount(providerName, elementId));
                 tab.addEventListener('keydown', event => handleProviderAccountTabKeydown(event, providerName));
             });
         }
