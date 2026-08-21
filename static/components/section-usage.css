@@ -375,12 +375,19 @@
     background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
 }
 
-.account-usage-last-used-row {
+.account-usage-summary-meta {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
+    flex-direction: column;
+    align-items: flex-start;
     gap: 0.5rem;
     margin: 0 0 0.625rem;
+}
+
+.account-usage-recent-request-row,
+.account-usage-estimated-weekly-row {
+    display: flex;
+    width: 100%;
+    min-width: 0;
 }
 
 .account-usage-last-used {
@@ -486,10 +493,7 @@
 }
 
 @media (max-width: 520px) {
-    .account-usage-last-used-row {
-        align-items: flex-start;
-        flex-direction: column;
-    }
+    .account-usage-summary-meta { align-items: stretch; }
 }
 
 .usage-section .info-grid {

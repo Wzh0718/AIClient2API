@@ -1089,9 +1089,9 @@ function renderAccountUsageSummary(accountSummary, usage = {}) {
     section.className = 'usage-section account-usage-summary';
     const lastUsedAt = accountSummary.lastUsedAt || accountSummary.today?.lastUsedAt || accountSummary.week?.lastUsedAt || accountSummary.month?.lastUsedAt || null;
     section.innerHTML = `
-        ${(lastUsedAt || usage.weeklyQuotaEstimate) ? `<div class="account-usage-last-used-row">
-            ${lastUsedAt ? `<div class="account-usage-last-used"><i class="fas fa-clock"></i> 最近请求 ${formatDate(lastUsedAt)}</div>` : '<div></div>'}
-            ${renderEstimatedWeeklyQuota(accountSummary, usage)}
+        ${(lastUsedAt || usage.weeklyQuotaEstimate) ? `<div class="account-usage-summary-meta">
+            ${lastUsedAt ? `<div class="account-usage-recent-request-row"><div class="account-usage-last-used"><i class="fas fa-clock"></i> 最近请求 ${formatDate(lastUsedAt)}</div></div>` : ''}
+            ${usage.weeklyQuotaEstimate ? `<div class="account-usage-estimated-weekly-row">${renderEstimatedWeeklyQuota(accountSummary, usage)}</div>` : ''}
         </div>` : ''}
             <div class="account-usage-period-grid">
                 ${renderAccountUsagePeriod('今日', accountSummary.today)}
@@ -1108,7 +1108,9 @@ function renderEstimatedWeeklyQuota(accountSummary, usage = {}) {
         return '<div class="account-usage-estimated-weekly" title="需要更多官方额度变化样本后才能估算"><i class="fas fa-chart-line"></i><span>预估周额度</span><strong>采样中</strong></div>';
     }
     const amount = Math.round(Number(estimate.estimatedUsd));
-    const tooltip = `基于 ${estimate.sampleCount} 次周额度变化样本，${estimate.observedFrom ? `起始 ${formatDate(estimate.observedFrom)}，` : ''}当前为本地金额增量反推值`;
+        const tooltip = estimate.method === 'single-sample-period-extrapolation'
+            ? `单日低置信度估算：基于当前额度周期累计金额和官方已用百分比反推，${estimate.observedFrom ? `采样于 ${formatDate(estimate.observedFrom)}` : ''}`
+            : `基于 ${estimate.sampleCount} 次周额度变化样本，${estimate.observedFrom ? `起始 ${formatDate(estimate.observedFrom)}，` : ''}当前为本地金额增量反推值`;
     return `<div class="account-usage-estimated-weekly" title="${escapeHtml(tooltip)}"><i class="fas fa-chart-line"></i><span>预估周额度</span><strong>$${amount.toLocaleString(getCurrentLanguage())}</strong></div>`;
 }
 

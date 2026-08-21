@@ -82,13 +82,23 @@ describe('usage manager display source regressions', () => {
         expect(source).not.toContain('官方未返回重置时间');
     });
 
-    test('account usage summary renders estimated weekly quota beside the recent request', () => {
+    test('account usage summary renders estimated weekly quota below the recent request', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
         const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
 
         expect(source).toContain('renderEstimatedWeeklyQuota(accountSummary, usage)');
         expect(source).toContain('account-usage-estimated-weekly');
-        expect(css).toContain('.account-usage-last-used-row');
+        expect(source).toContain('account-usage-recent-request-row');
+        expect(source).toContain('account-usage-estimated-weekly-row');
+        expect(css).toContain('.account-usage-recent-request-row');
+        expect(css).toContain('.account-usage-estimated-weekly-row');
+    });
+
+    test('single-sample estimate explains its low-confidence source', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain('single-sample-period-extrapolation');
+        expect(source).toContain('单日低置信度估算');
     });
 
     test('account usage summary renders total cost without pricing estimate badges', () => {

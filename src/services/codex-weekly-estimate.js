@@ -54,6 +54,18 @@ export function estimateWeeklyQuotaFromSnapshots(snapshots = []) {
     }
 
     if (estimates.length === 0) {
+        const latest = normalized.at(-1);
+        if (normalized.length === 1 && latest?.resetAt && latest.usedPercent > 0 && latest.costUsd > 0) {
+            return {
+                status: 'estimated',
+                estimatedUsd: Math.round((latest.costUsd * 100 / latest.usedPercent) * 100) / 100,
+                sampleCount: 1,
+                confidence: 'low',
+                method: 'single-sample-period-extrapolation',
+                observedFrom: latest.observedAt,
+                observedTo: latest.observedAt
+            };
+        }
         return {
             status: 'insufficient-data',
             estimatedUsd: null,
@@ -71,6 +83,7 @@ export function estimateWeeklyQuotaFromSnapshots(snapshots = []) {
         estimatedUsd: Math.round(weightedUsd * 100) / 100,
         sampleCount: estimates.length,
         confidence: estimates.length >= 4 ? 'high' : estimates.length >= 2 ? 'medium' : 'low',
+        method: 'multi-sample-delta',
         observedFrom: estimates[0].from,
         observedTo: estimates.at(-1).to
     };
