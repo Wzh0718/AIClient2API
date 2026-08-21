@@ -383,6 +383,10 @@ describe('api potluck key usage summary', () => {
             actualUsd: 0.048,
             missingPriceTokens: 0
         });
+        expect(account.latestDay).toMatchObject({
+            date: expect.any(String),
+            cost: expect.objectContaining({ usd: expect.any(Number) })
+        });
         expect(account.lastUsedAt).toBe('2026-06-26T02:00:00.000Z');
         expect(account.today.lastUsedAt).toBe('2026-06-26T02:00:00.000Z');
     });

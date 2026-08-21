@@ -954,7 +954,7 @@ function renderUsageDetails(usage, accountSummary = null) {
     const { summary, items } = usage;
 
     if (accountSummary) {
-        container.appendChild(renderAccountUsageSummary(accountSummary));
+        container.appendChild(renderAccountUsageSummary(accountSummary, usage));
     }
     
     if (summary?.usedPercent !== undefined) {
@@ -1084,12 +1084,15 @@ function renderUsageDetails(usage, accountSummary = null) {
     return container;
 }
 
-function renderAccountUsageSummary(accountSummary) {
+function renderAccountUsageSummary(accountSummary, usage = {}) {
     const section = document.createElement('div');
     section.className = 'usage-section account-usage-summary';
     const lastUsedAt = accountSummary.lastUsedAt || accountSummary.today?.lastUsedAt || accountSummary.week?.lastUsedAt || accountSummary.month?.lastUsedAt || null;
     section.innerHTML = `
-        ${lastUsedAt ? `<div class="account-usage-last-used"><i class="fas fa-clock"></i> 最近请求 ${formatDate(lastUsedAt)}</div>` : ''}
+        ${(lastUsedAt || usage.weeklyQuotaEstimate) ? `<div class="account-usage-last-used-row">
+            ${lastUsedAt ? `<div class="account-usage-last-used"><i class="fas fa-clock"></i> 最近请求 ${formatDate(lastUsedAt)}</div>` : '<div></div>'}
+            ${renderEstimatedWeeklyQuota(accountSummary, usage)}
+        </div>` : ''}
             <div class="account-usage-period-grid">
                 ${renderAccountUsagePeriod('今日', accountSummary.today)}
                 ${renderAccountUsagePeriod('近1周', accountSummary.week)}
@@ -1097,6 +1100,16 @@ function renderAccountUsageSummary(accountSummary) {
             </div>
         `;
     return section;
+}
+
+function renderEstimatedWeeklyQuota(accountSummary, usage = {}) {
+    const estimate = usage.weeklyQuotaEstimate;
+    if (!estimate || estimate.status !== 'estimated' || !Number.isFinite(Number(estimate.estimatedUsd))) {
+        return '<div class="account-usage-estimated-weekly" title="需要更多官方额度变化样本后才能估算"><i class="fas fa-chart-line"></i><span>预估周额度</span><strong>采样中</strong></div>';
+    }
+    const amount = Math.round(Number(estimate.estimatedUsd));
+    const tooltip = `基于 ${estimate.sampleCount} 次周额度变化样本，${estimate.observedFrom ? `起始 ${formatDate(estimate.observedFrom)}，` : ''}当前为本地金额增量反推值`;
+    return `<div class="account-usage-estimated-weekly" title="${escapeHtml(tooltip)}"><i class="fas fa-chart-line"></i><span>预估周额度</span><strong>$${amount.toLocaleString(getCurrentLanguage())}</strong></div>`;
 }
 
 function renderAccountUsagePeriod(label, usage = {}) {

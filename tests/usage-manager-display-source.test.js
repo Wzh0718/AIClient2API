@@ -82,6 +82,15 @@ describe('usage manager display source regressions', () => {
         expect(source).not.toContain('官方未返回重置时间');
     });
 
+    test('account usage summary renders estimated weekly quota beside the recent request', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+        const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain('renderEstimatedWeeklyQuota(accountSummary, usage)');
+        expect(source).toContain('account-usage-estimated-weekly');
+        expect(css).toContain('.account-usage-last-used-row');
+    });
+
     test('account usage summary renders total cost without pricing estimate badges', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
 

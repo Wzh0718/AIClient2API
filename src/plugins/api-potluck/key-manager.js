@@ -718,6 +718,19 @@ function addAccountSummaryRange(target, rangeName, account) {
     addCost(target[rangeName], account?.summary?.cost);
 }
 
+function mergeLatestAccountDay(target, dateKey, account) {
+    if (!target || !dateKey || !account?.summary) return;
+    const incoming = cloneUsageBucket(account.summary);
+    if (!target.latestDay || dateKey > target.latestDay.date) {
+        target.latestDay = { date: dateKey, ...incoming };
+        return;
+    }
+    if (dateKey === target.latestDay.date) {
+        addUsage(target.latestDay, incoming);
+        addCost(target.latestDay, incoming.cost);
+    }
+}
+
 function isEmailLike(value) {
     return typeof value === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 }
@@ -840,7 +853,8 @@ function createAccountSummaryEntry(accountKey, account = {}) {
         providerName: account.providerName || null,
         today: createUsageBucket(),
         week: createUsageBucket(),
-        month: createUsageBucket()
+        month: createUsageBucket(),
+        latestDay: null
     };
 }
 
@@ -2448,6 +2462,7 @@ export async function getAccountUsageSummary(now = new Date()) {
             if (inToday) addAccountSummaryRange(current, 'today', account);
             if (inWeek) addAccountSummaryRange(current, 'week', account);
             if (inMonth) addAccountSummaryRange(current, 'month', account);
+            mergeLatestAccountDay(current, dateKey, account);
 
             for (const alias of getAccountSummaryAliases(current.accountKey, current, { ambiguousProviderAliases })) {
                 aliasIndex.set(alias, targetKey);
@@ -2475,7 +2490,11 @@ export async function getAccountUsageSummary(now = new Date()) {
                 ),
                 today,
                 week,
-                month
+                month,
+                latestDay: account.latestDay ? {
+                    ...cloneUsageBucket(account.latestDay),
+                    date: account.latestDay.date
+                } : null
             };
         })
         .sort((a, b) => (

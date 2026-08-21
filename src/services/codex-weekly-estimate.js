@@ -1,0 +1,101 @@
+const SNAPSHOT_LIMIT = 60;
+
+function finiteNumber(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+function normalizeSnapshot(snapshot = {}) {
+    const observedAt = typeof snapshot.observedAt === 'string' ? snapshot.observedAt : null;
+    const observedMs = observedAt ? Date.parse(observedAt) : NaN;
+    const resetAt = typeof snapshot.resetAt === 'string' ? snapshot.resetAt : null;
+    const usedPercent = finiteNumber(snapshot.usedPercent);
+    const costUsd = finiteNumber(snapshot.costUsd);
+    if (!Number.isFinite(observedMs) || usedPercent === null || costUsd === null || costUsd < 0) {
+        return null;
+    }
+    return { observedAt, observedMs, resetAt, usedPercent, costUsd };
+}
+
+export function getWeeklyQuotaPercent(items = []) {
+    const weeklyItem = (Array.isArray(items) ? items : []).find(item => (
+        item?.id === 'secondary_window'
+        || item?.windowKind === 'weekly'
+        || /weekly/i.test(String(item?.label || ''))
+    ));
+    const percent = finiteNumber(weeklyItem?.percent ?? weeklyItem?.used ?? weeklyItem?.usedPercent);
+    return percent !== null && percent >= 0 && percent <= 100 ? percent : null;
+}
+
+export function estimateWeeklyQuotaFromSnapshots(snapshots = []) {
+    const normalized = (Array.isArray(snapshots) ? snapshots : [])
+        .map(normalizeSnapshot)
+        .filter(Boolean)
+        .sort((left, right) => left.observedMs - right.observedMs);
+    const estimates = [];
+
+    for (let index = 1; index < normalized.length; index += 1) {
+        const previous = normalized[index - 1];
+        const current = normalized[index];
+        if (previous.resetAt !== current.resetAt) continue;
+
+        const percentDelta = current.usedPercent - previous.usedPercent;
+        const costDelta = current.costUsd - previous.costUsd;
+        if (percentDelta <= 0 || costDelta < 0) continue;
+
+        const estimatedUsd = costDelta * 100 / percentDelta;
+        if (!Number.isFinite(estimatedUsd) || estimatedUsd <= 0) continue;
+        estimates.push({
+            estimatedUsd,
+            weight: percentDelta,
+            from: previous.observedAt,
+            to: current.observedAt
+        });
+    }
+
+    if (estimates.length === 0) {
+        return {
+            status: 'insufficient-data',
+            estimatedUsd: null,
+            sampleCount: 0,
+            confidence: 'low',
+            observedFrom: normalized[0]?.observedAt || null,
+            observedTo: normalized.at(-1)?.observedAt || null
+        };
+    }
+
+    const totalWeight = estimates.reduce((sum, item) => sum + item.weight, 0);
+    const weightedUsd = estimates.reduce((sum, item) => sum + item.estimatedUsd * item.weight, 0) / totalWeight;
+    return {
+        status: 'estimated',
+        estimatedUsd: Math.round(weightedUsd * 100) / 100,
+        sampleCount: estimates.length,
+        confidence: estimates.length >= 4 ? 'high' : estimates.length >= 2 ? 'medium' : 'low',
+        observedFrom: estimates[0].from,
+        observedTo: estimates.at(-1).to
+    };
+}
+
+export function appendQuotaSnapshot(existingSnapshots = [], snapshot = {}, limit = SNAPSHOT_LIMIT) {
+    const normalized = normalizeSnapshot(snapshot);
+    if (!normalized) return Array.isArray(existingSnapshots) ? existingSnapshots : [];
+    const next = (Array.isArray(existingSnapshots) ? existingSnapshots : [])
+        .filter(item => normalizeSnapshot(item))
+        .filter(item => !(
+            item.observedAt === normalized.observedAt
+            && Number(item.usedPercent) === normalized.usedPercent
+            && Number(item.costUsd) === normalized.costUsd
+            && (item.resetAt || null) === normalized.resetAt
+        ));
+    next.push({
+        observedAt: normalized.observedAt,
+        resetAt: normalized.resetAt,
+        usedPercent: normalized.usedPercent,
+        costUsd: normalized.costUsd
+    });
+    return next
+        .sort((left, right) => Date.parse(left.observedAt) - Date.parse(right.observedAt))
+        .slice(-Math.max(1, Number(limit) || SNAPSHOT_LIMIT));
+}
+
+export { SNAPSHOT_LIMIT };

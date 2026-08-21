@@ -6,7 +6,12 @@ import { readUsageCache, readUsageDisplayCache, writeUsageCache, readProviderUsa
 import { PROVIDER_MAPPINGS } from '../utils/provider-utils.js';
 import { MODEL_PROVIDER, getRequestBody } from '../utils/common.js';
 import path from 'path';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+import {
+    appendQuotaSnapshot,
+    estimateWeeklyQuotaFromSnapshots,
+    getWeeklyQuotaPercent
+} from '../services/codex-weekly-estimate.js';
 
 function sendJson(res, statusCode, payload) {
     res.writeHead(statusCode, {
@@ -31,6 +36,7 @@ const USAGE_API_SLOW_PHASE_MS = 200;
 const USAGE_API_LARGE_RESPONSE_BYTES = 300 * 1024;
 const DEFAULT_USAGE_REFRESH_ACCOUNT_TIMEOUT_MS = 15_000;
 const DEFAULT_USAGE_REFRESH_CONCURRENCY_PER_PROVIDER = 2;
+const CODEX_WEEKLY_ESTIMATE_FILE = path.join(process.cwd(), 'configs', 'codex-weekly-estimate-snapshots.json');
 
 function normalizePositiveInteger(value, fallback) {
     const parsed = Number(value);
@@ -96,6 +102,68 @@ function sendUsageResponse(res, payload, timings, requestStartedAt) {
     res.end(body);
 }
 
+function readCodexWeeklyEstimateStore() {
+    if (!existsSync(CODEX_WEEKLY_ESTIMATE_FILE)) return { version: 1, accounts: {} };
+    try {
+        const parsed = JSON.parse(readFileSync(CODEX_WEEKLY_ESTIMATE_FILE, 'utf8'));
+        return parsed && typeof parsed === 'object' ? parsed : { version: 1, accounts: {} };
+    } catch (error) {
+        logger.warn(`[Usage API] Failed to read Codex weekly estimate snapshots: ${error.message}`);
+        return { version: 1, accounts: {} };
+    }
+}
+
+function writeCodexWeeklyEstimateStore(store) {
+    try {
+        writeFileSync(CODEX_WEEKLY_ESTIMATE_FILE, JSON.stringify(store, null, 2), 'utf8');
+    } catch (error) {
+        logger.warn(`[Usage API] Failed to persist Codex weekly estimate snapshots: ${error.message}`);
+    }
+}
+
+function findAccountSummaryForInstance(accountSummary, instance) {
+    const accounts = Array.isArray(accountSummary?.accounts) ? accountSummary.accounts : [];
+    const candidates = [instance.codexAccountKey, instance.codexAccountId, instance.uuid].filter(Boolean);
+    return accounts.find(account => candidates.some(candidate => (
+        account.accountKey === candidate
+        || account.providerUuid === candidate
+        || account.accountIdentity === candidate
+        || (account.providerUuids || []).includes(candidate)
+    ))) || null;
+}
+
+function enrichCodexWeeklyEstimates(providerData, accountSummary, observedAt = new Date().toISOString()) {
+    if (!providerData || providerData.providerType !== MODEL_PROVIDER.CODEX_API) return providerData;
+    const store = readCodexWeeklyEstimateStore();
+    store.version = 1;
+    store.accounts = store.accounts && typeof store.accounts === 'object' ? store.accounts : {};
+
+    for (const instance of providerData.instances || []) {
+        if (!instance?.success || !instance.usage) continue;
+        const usedPercent = getWeeklyQuotaPercent(instance.usage.items);
+        const account = findAccountSummaryForInstance(accountSummary, instance);
+        const costUsd = Number(
+            account?.month?.cost?.usd
+            ?? account?.week?.cost?.usd
+            ?? account?.latestDay?.cost?.usd
+        );
+        if (usedPercent === null || !Number.isFinite(costUsd) || costUsd < 0) continue;
+
+        const key = String(instance.uuid || instance.codexAccountId || instance.codexAccountKey || 'unknown');
+        const snapshots = appendQuotaSnapshot(store.accounts[key] || [], {
+            observedAt,
+            resetAt: instance.usage.items.find(item => item?.id === 'secondary_window')?.resetAt || null,
+            usedPercent,
+            costUsd
+        });
+        store.accounts[key] = snapshots;
+        instance.weeklyQuotaEstimate = estimateWeeklyQuotaFromSnapshots(snapshots);
+    }
+
+    writeCodexWeeklyEstimateStore(store);
+    return providerData;
+}
+
 function isUsageRefreshPending() {
     try {
         return globalThis.getUsageCacheAutoRefreshStatus?.()?.isRunning === true;
@@ -143,6 +211,17 @@ export async function getAllProvidersUsage(currentConfig, providerPoolManager) {
     // 将结果整合到 results.providers 中
     for (const result of usageResults) {
         results.providers[result.providerType] = result.data;
+    }
+
+    const codexUsage = results.providers[MODEL_PROVIDER.CODEX_API];
+    if (codexUsage?.instances?.some(instance => instance?.success)) {
+        try {
+            const { getAccountUsageSummary } = await import('../plugins/api-potluck/key-manager.js');
+            const accountSummary = await getAccountUsageSummary();
+            enrichCodexWeeklyEstimates(codexUsage, accountSummary, results.timestamp || new Date().toISOString());
+        } catch (error) {
+            logger.warn(`[Usage API] Failed to enrich Codex weekly quota estimates: ${error.message}`);
+        }
     }
 
     // timestamp 表示完整快照生成完成时间，而不是开始采集时间。
@@ -929,6 +1008,11 @@ export async function handleGetSingleInstanceUsage(req, res, currentConfig, prov
                 const usage = await usageService.getFormattedUsage(providerType, provider.uuid);
                 instanceResult.success = true;
                 instanceResult.usage = usage;
+                if (providerType === MODEL_PROVIDER.CODEX_API) {
+                    const { getAccountUsageSummary } = await import('../plugins/api-potluck/key-manager.js');
+                    const accountSummary = await getAccountUsageSummary();
+                    enrichCodexWeeklyEstimates({ providerType, instances: [instanceResult] }, accountSummary);
+                }
                 instanceResult.codexQuotaHealth = deriveCodexQuotaHealthFromUsage(instanceResult.codexQuotaHealth, usage);
                 providerPoolManager?.syncCodexQuotaHealth?.(providerType, provider, instanceResult.codexQuotaHealth);
                 instanceResult.antigravityQuotaHealth = deriveAntigravityQuotaHealthFromUsage(instanceResult.antigravityQuotaHealth, usage, provider);
@@ -1128,6 +1212,15 @@ export async function handleGetProviderUsage(req, res, currentConfig, providerPo
             // Cache does not exist or refresh required, re-query
             logger.info(`[Usage API] Fetching fresh usage data for ${providerType}`);
             usageResults = await getProviderTypeUsage(providerType, currentConfig, providerPoolManager);
+            if (providerType === MODEL_PROVIDER.CODEX_API && usageResults.instances?.some(instance => instance?.success)) {
+                try {
+                    const { getAccountUsageSummary } = await import('../plugins/api-potluck/key-manager.js');
+                    const accountSummary = await getAccountUsageSummary();
+                    enrichCodexWeeklyEstimates(usageResults, accountSummary);
+                } catch (error) {
+                    logger.warn(`[Usage API] Failed to enrich Codex weekly quota estimates: ${error.message}`);
+                }
+            }
             const lastKnownUsage = await readUsageCache({ maxAgeMs: null, allowStale: true });
             const { providerData, refreshErrors } = mergeProviderUsageWithLastSuccessfulCache(
                 providerType,
