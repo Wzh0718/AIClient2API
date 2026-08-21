@@ -88,6 +88,11 @@ function compactMetadata(context = {}) {
         method: context.method || null,
         path: context.path || null,
         normalizedPath: context.normalizedPath || null,
+        ...(context.REQUEST_AUDIT_NETWORK_METADATA_ENABLED === true ? {
+            clientIp: context.clientIp || null,
+            peerIp: context.peerIp || null,
+            clientIpSource: context.clientIpSource || null
+        } : {}),
         response: context.response ? {
             httpStatus: context.response.httpStatus ?? context.response.statusCode,
             bytes: context.response.bytes,

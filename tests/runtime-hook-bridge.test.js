@@ -1,6 +1,28 @@
 import { RuntimeHookBridge } from '../src/runtime/runtime-hook-bridge.js';
 
 describe('RuntimeHookBridge', () => {
+    test('preserves request network metadata for audit events', async () => {
+        const published = [];
+        const bridge = new RuntimeHookBridge({
+            send: jest.fn(),
+            durableTransport: { publish: event => published.push(event), snapshot: () => ({}) }
+        });
+
+        await bridge.handle('onRequestCompleted', {
+            requestId: 'network-metadata-request',
+            REQUEST_AUDIT_NETWORK_METADATA_ENABLED: true,
+            clientIp: '192.168.1.42',
+            peerIp: '172.21.0.1',
+            clientIpSource: 'trusted-x-real-ip'
+        });
+
+        expect(published[0].args[0]).toMatchObject({
+            clientIp: '192.168.1.42',
+            peerIp: '172.21.0.1',
+            clientIpSource: 'trusted-x-real-ip'
+        });
+    });
+
     test('uses a stable event id for replaying the same terminal request hook', async () => {
         const published = [];
         const durableTransport = { publish: event => { published.push(event); return { streamId: `${published.length}-0` }; }, snapshot: () => ({}) };
