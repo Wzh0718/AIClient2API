@@ -343,6 +343,7 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
             workerMetrics.delete(id);
             providerConfigAcks.remove(id);
             rawCaptureConfigAcks.remove(id);
+            potluckRoutingAcks.remove(id);
             if (!shuttingDown) {
                 logger.error?.(`[Runtime] ${id} exited code=${code} signal=${signal}; restarting`);
                 setTimeout(() => spawnWorker(role, index, port), 1000).unref?.();
@@ -383,6 +384,9 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
     const proxy = http.createServer(createRuntimeProxyHandler({
         controlTarget: { host: '127.0.0.1', port: controlPort },
         executionTargets,
+        isTargetReady: (role, index) => role === 'control'
+            ? ready.has('control-1')
+            : ready.has(`execution-${Number(index) + 1}`),
         onProxyError: (error, detail) => logger.error?.(`[Runtime Proxy] ${detail.role} ${detail.target.port}: ${error.message}`),
         getRuntimeStatus: buildRuntimeStatus
     }));

@@ -44,4 +44,26 @@ describe('runtime proxy', () => {
         expect(response.status).toBe(200);
         await expect(response.json()).resolves.toMatchObject({ status: 'healthy', executionWorkers: 3, persistenceBacklog: 0, metrics: { inFlight: 2 } });
     });
+
+    test('returns startup 503 instead of connecting to an unready worker', async () => {
+        let upstreamCalls = 0;
+        const unreadyProxy = http.createServer(createRuntimeProxyHandler({
+            controlTarget: { host: '127.0.0.1', port: 1 },
+            executionTargets: [{ host: '127.0.0.1', port: 1 }],
+            isTargetReady: () => false,
+            onProxyError: () => { throw new Error('unready proxy attempted an upstream connection'); },
+            onTargetRequest: () => { upstreamCalls += 1; }
+        }));
+        const unreadyPort = await listen(unreadyProxy);
+        try {
+            const response = await fetch(`http://127.0.0.1:${unreadyPort}/api/usage`);
+            expect(response.status).toBe(503);
+            await expect(response.json()).resolves.toMatchObject({
+                error: { code: 'RUNTIME_WORKER_STARTING' }
+            });
+            expect(upstreamCalls).toBe(0);
+        } finally {
+            await new Promise(resolve => unreadyProxy.close(resolve));
+        }
+    });
 });

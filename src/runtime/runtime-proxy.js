@@ -1,7 +1,7 @@
 import http from 'http';
 import { classifyRuntimeRequest } from './worker-topology.js';
 
-export function createRuntimeProxyHandler({ controlTarget, executionTargets, onProxyError, getRuntimeStatus } = {}) {
+export function createRuntimeProxyHandler({ controlTarget, executionTargets, onProxyError, getRuntimeStatus, isTargetReady, onTargetRequest } = {}) {
     let executionIndex = 0;
     return (req, res) => {
         if (req.method === 'GET' && req.url.split('?')[0] === '/runtime/health' && getRuntimeStatus) {
@@ -11,9 +11,16 @@ export function createRuntimeProxyHandler({ controlTarget, executionTargets, onP
             return;
         }
         const role = classifyRuntimeRequest(req.method, req.url);
-        const target = role === 'execution'
-            ? executionTargets[executionIndex++ % executionTargets.length]
-            : controlTarget;
+        const targetIndex = role === 'execution'
+            ? executionIndex++ % executionTargets.length
+            : null;
+        const target = role === 'execution' ? executionTargets[targetIndex] : controlTarget;
+        if (isTargetReady && !isTargetReady(role, targetIndex)) {
+            res.writeHead(503, { 'content-type': 'application/json; charset=utf-8', 'retry-after': '1' });
+            res.end(JSON.stringify({ error: { code: 'RUNTIME_WORKER_STARTING', message: 'Runtime worker is still starting' } }));
+            return;
+        }
+        onTargetRequest?.(role, targetIndex, target);
         const upstream = http.request({
             host: target.host,
             port: target.port,

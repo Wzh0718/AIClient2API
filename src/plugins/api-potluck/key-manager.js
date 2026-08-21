@@ -235,19 +235,23 @@ function normalizeAccountUsageMap(map = {}) {
 function normalizeHourlyUsageMap(map = {}) {
     const normalized = {};
     for (const [hour, hourData] of Object.entries(map || {})) {
-        normalized[hour] = {
+        const normalizedHour = {
             summary: normalizeUsageBucket(hourData?.summary),
             providers: normalizeUsageMap(hourData?.providers),
             models: normalizeUsageMap(hourData?.models),
             providerModels: normalizeProviderModelUsageMap(hourData?.providerModels),
             accounts: normalizeAccountUsageMap(hourData?.accounts)
         };
+        if (Object.keys(normalizedHour.providerModels).length === 0) {
+            addProviderModelsFromAccounts(normalizedHour.providerModels, normalizedHour.accounts);
+        }
+        normalized[hour] = normalizedHour;
     }
     return normalized;
 }
 
 function normalizeUsageHistoryDay(day = {}) {
-    return {
+    const normalized = {
         summary: normalizeUsageBucket(day.summary || {
             requestCount: day.requestCount
         }),
@@ -257,6 +261,10 @@ function normalizeUsageHistoryDay(day = {}) {
         accounts: normalizeAccountUsageMap(day.accounts),
         hours: normalizeHourlyUsageMap(day.hours)
     };
+    if (Object.keys(normalized.providerModels).length === 0) {
+        addProviderModelsFromAccounts(normalized.providerModels, normalized.accounts);
+    }
+    return normalized;
 }
 
 function addCacheHitRatio(bucket) {
@@ -1355,7 +1363,14 @@ function ensureLoaded() {
             for (const [apiKey, keyData] of Object.entries(keyStore.keys || {})) {
                 const storedHistory = loadUsageHistory(apiKey);
                 if (Object.keys(storedHistory).length > 0) {
-                    keyData.usageHistory = storedHistory;
+                    const normalizedHistory = Object.fromEntries(
+                        Object.entries(storedHistory).map(([date, day]) => [date, normalizeUsageHistoryDay(day)])
+                    );
+                    keyData.usageHistory = normalizedHistory;
+                    if (JSON.stringify(normalizedHistory) !== JSON.stringify(storedHistory)) {
+                        dirtyUsageKeys.add(apiKey);
+                        markDirty();
+                    }
                 }
                 const storedTotals = loadUsageTotals(apiKey);
                 keyData.totalModels = Object.keys(storedTotals).length > 0

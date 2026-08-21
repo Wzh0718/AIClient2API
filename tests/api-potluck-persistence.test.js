@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globa
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import crypto from 'crypto';
 import Database from 'better-sqlite3';
 
 const mockAtomicWriteFile = jest.fn();
@@ -140,6 +141,78 @@ afterEach(() => {
 });
 
 describe('api potluck persistence', () => {
+    test('normalizes legacy SQLite day and hour history before provider-model writes', async () => {
+        let plugin = await loadPotluckPlugin();
+        await plugin.init({
+            API_POTLUCK_PERSIST_INTERVAL: 60_000,
+            API_POTLUCK_MAX_DIRTY_AGE: 60_000
+        });
+        const key = await plugin.exports.createKey('Legacy SQLite Shape', 1000);
+        await plugin.exports.incrementUsage(key.id, 'openai-codex-oauth', 'gpt-5.5', {
+            requestCount: 1,
+            promptTokens: 100,
+            completionTokens: 20,
+            totalTokens: 120
+        }, 'legacy-shape-seed', {
+            providerUuid: 'legacy-account',
+            accountEmail: 'legacy@example.com',
+            timestamp: '2026-07-22T02:00:00.000Z'
+        });
+        await plugin.destroy();
+
+        const database = new Database(getUsageDatabasePath());
+        const keyRef = `sha256:${crypto.createHash('sha256').update(String(key.id)).digest('hex').slice(0, 16)}`;
+        try {
+            const row = database.prepare(`
+                SELECT usage_date, day_json
+                FROM potluck_usage_history
+                WHERE key_ref = ?
+                ORDER BY usage_date DESC
+                LIMIT 1
+            `).get(keyRef);
+            const day = JSON.parse(row.day_json);
+            delete day.providerModels;
+            for (const hour of Object.values(day.hours || {})) delete hour.providerModels;
+            database.prepare(`
+                UPDATE potluck_usage_history
+                SET day_json = ?
+                WHERE key_ref = ? AND usage_date = ?
+            `).run(JSON.stringify(day), keyRef, row.usage_date);
+        } finally {
+            database.close();
+        }
+
+        jest.resetModules();
+        plugin = await loadPotluckPlugin();
+        await plugin.init({
+            API_POTLUCK_PERSIST_INTERVAL: 60_000,
+            API_POTLUCK_MAX_DIRTY_AGE: 60_000
+        });
+
+        await expect(plugin.exports.incrementUsage(key.id, 'openai-codex-oauth', 'gpt-5.5', {
+            requestCount: 1,
+            promptTokens: 50,
+            completionTokens: 10,
+            totalTokens: 60
+        }, 'legacy-shape-followup', {
+            providerUuid: 'legacy-account',
+            accountEmail: 'legacy@example.com',
+            timestamp: '2026-07-22T02:05:00.000Z'
+        })).resolves.toEqual(expect.objectContaining({ id: key.id }));
+
+        await plugin.destroy();
+        const row = readUsageHistoryRows().find(item => item.key_ref === keyRef);
+        expect(row.day.providerModels['openai-codex-oauth']['gpt-5.5']).toMatchObject({
+            requestCount: 2,
+            totalTokens: 180
+        });
+        const hour = Object.values(row.day.hours)[0];
+        expect(hour.providerModels['openai-codex-oauth']['gpt-5.5']).toMatchObject({
+            requestCount: 2,
+            totalTokens: 180
+        });
+    });
+
     test('migrates a production-scale 43-50MB legacy key file and shrinks metadata by at least 90%', async () => {
         jest.setTimeout(120_000);
         const accounts = {};
