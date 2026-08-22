@@ -17,21 +17,43 @@ function normalizeSnapshot(snapshot = {}) {
     return { observedAt, observedMs, resetAt, usedPercent, costUsd };
 }
 
+function getWeeklyQuotaItem(items = []) {
+    const list = Array.isArray(items) ? items : [];
+    return list.find(item => item?.windowKind === 'weekly' && item?.resetAt)
+        || list.find(item => item?.windowKind === 'weekly')
+        || list.find(item => item?.id === 'secondary_window' && item?.resetAt)
+        || list.find(item => item?.id === 'secondary_window')
+        || list.find(item => /weekly/i.test(String(item?.label || '')));
+}
+
 export function getWeeklyQuotaPercent(items = []) {
-    const weeklyItem = (Array.isArray(items) ? items : []).find(item => (
-        item?.id === 'secondary_window'
-        || item?.windowKind === 'weekly'
-        || /weekly/i.test(String(item?.label || ''))
-    ));
+    const weeklyItem = getWeeklyQuotaItem(items);
     const percent = finiteNumber(weeklyItem?.percent ?? weeklyItem?.used ?? weeklyItem?.usedPercent);
     return percent !== null && percent >= 0 && percent <= 100 ? percent : null;
 }
 
+export function getWeeklyQuotaResetAt(items = [], fallback = null) {
+    const list = Array.isArray(items) ? items : [];
+    return list.find(item => item?.windowKind === 'weekly' && item?.resetAt)?.resetAt
+        || list.find(item => item?.id === 'secondary_window' && item?.resetAt)?.resetAt
+        || list.find(item => item?.windowKind === 'weekly')?.resetAt
+        || fallback
+        || null;
+}
+
+function dedupeSnapshots(snapshots) {
+    const byState = new Map();
+    for (const snapshot of snapshots) {
+        const key = `${snapshot.resetAt || ''}|${snapshot.usedPercent}|${snapshot.costUsd}`;
+        byState.set(key, snapshot);
+    }
+    return [...byState.values()].sort((left, right) => left.observedMs - right.observedMs);
+}
+
 export function estimateWeeklyQuotaFromSnapshots(snapshots = []) {
-    const normalized = (Array.isArray(snapshots) ? snapshots : [])
+    const normalized = dedupeSnapshots((Array.isArray(snapshots) ? snapshots : [])
         .map(normalizeSnapshot)
-        .filter(Boolean)
-        .sort((left, right) => left.observedMs - right.observedMs);
+        .filter(Boolean));
     const estimates = [];
 
     for (let index = 1; index < normalized.length; index += 1) {
@@ -95,8 +117,7 @@ export function appendQuotaSnapshot(existingSnapshots = [], snapshot = {}, limit
     const next = (Array.isArray(existingSnapshots) ? existingSnapshots : [])
         .filter(item => normalizeSnapshot(item))
         .filter(item => !(
-            item.observedAt === normalized.observedAt
-            && Number(item.usedPercent) === normalized.usedPercent
+            Number(item.usedPercent) === normalized.usedPercent
             && Number(item.costUsd) === normalized.costUsd
             && (item.resetAt || null) === normalized.resetAt
         ));

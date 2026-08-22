@@ -6,6 +6,7 @@ const DEFAULT_TIME_ZONE = 'Asia/Shanghai';
 const DEFAULT_HISTORY_DAYS = 7;
 const DEFAULT_UNKNOWN_CAPACITY = 0.5;
 const STORE_VERSION = 1;
+const MAX_CREDENTIALS_PER_GROUP = 2;
 
 function toFiniteNumber(value, fallback = 0) {
     const number = Number(value);
@@ -193,6 +194,14 @@ export function validateCredentialGroupSuggestion(suggestion, options = {}) {
         }
         groupIds.add(group.id);
 
+        if (!group.manualLock && group.credentialUuids.length > MAX_CREDENTIALS_PER_GROUP) {
+            throw createCredentialGroupError(
+                'INVALID_CREDENTIAL_GROUP_CONFIG',
+                'Automatic credential groups may contain at most two credentials',
+                { reason: 'GROUP_EXCEEDS_MAX_SIZE' }
+            );
+        }
+
         for (const uuid of group.credentialUuids) {
             const credential = credentialByUuid.get(uuid);
             if (!credential) {
@@ -283,7 +292,7 @@ export function validateCredentialGroupSuggestion(suggestion, options = {}) {
 export function calculateTargetGroupCount(healthyCredentialCount) {
     const count = Math.max(0, Math.floor(toFiniteNumber(healthyCredentialCount, 0)));
     if (count <= 2) return count;
-    return Math.max(3, Math.ceil(count / 3));
+    return Math.ceil(count / MAX_CREDENTIALS_PER_GROUP);
 }
 
 export function calculateCredentialCapacity(credential = {}) {
@@ -382,9 +391,8 @@ export function summarizeKeyDemand(key = {}, options = {}) {
 }
 
 function chooseGroupForCredential(groups) {
-    const assignableGroups = groups.filter(group => !group.manualLock);
-    const candidates = assignableGroups.length > 0 ? assignableGroups : groups;
-    return candidates.reduce((best, group) => {
+    const assignableGroups = groups.filter(group => !group.manualLock && group.credentialUuids.length < MAX_CREDENTIALS_PER_GROUP);
+    return assignableGroups.reduce((best, group) => {
         if (!best) return group;
         if (group.credentialUuids.length !== best.credentialUuids.length) {
             return group.credentialUuids.length < best.credentialUuids.length ? group : best;
@@ -450,6 +458,26 @@ export function generateCredentialGroupSuggestion(options = {}) {
         })
     );
 
+    const oversizedManualGroups = currentGroups.filter(group => (
+        group.manualLock && group.credentialUuids.length > MAX_CREDENTIALS_PER_GROUP
+    ));
+    if (oversizedManualGroups.length > 0) {
+        return {
+            applicable: false,
+            reason: 'MANUAL_GROUP_EXCEEDS_MAX_SIZE',
+            generatedAt: now.toISOString(),
+            groupCount: currentGroups.length,
+            healthyCredentialCount: credentials.length,
+            groups: currentGroups,
+            keyAssignments: [],
+            anomalies: oversizedManualGroups.map(group => ({
+                groupId: group.id,
+                reason: 'MANUAL_GROUP_EXCEEDS_MAX_SIZE',
+                credentialCount: group.credentialUuids.length
+            }))
+        };
+    }
+
     if (targetGroupCount === 0) {
         return {
             applicable: false,
@@ -461,8 +489,17 @@ export function generateCredentialGroupSuggestion(options = {}) {
         };
     }
 
-    const lockedCurrentGroups = currentGroups.filter(group => group.manualLock);
-    const groupCount = Math.max(targetGroupCount, lockedCurrentGroups.length);
+    const lockedGroupIds = new Set(
+        currentGroups
+            .filter(group => group.manualLock || group.credentialUuids.some(uuid => (
+                credentials.find(credential => getCredentialUuid(credential) === uuid)?.manualLock === true
+            )))
+            .map(group => group.id)
+    );
+    for (const assignment of currentAssignments.values()) {
+        if (assignment.manualLock && assignment.primaryGroupId) lockedGroupIds.add(assignment.primaryGroupId);
+    }
+    const groupCount = Math.max(targetGroupCount, lockedGroupIds.size);
     const groups = [];
     const usedIds = new Set();
     for (let index = 0; index < groupCount; index += 1) {
@@ -513,6 +550,18 @@ export function generateCredentialGroupSuggestion(options = {}) {
             ? findCurrentCredentialGroupId(currentGroups, uuid)
             : null;
         const target = groupById.get(lockedGroupId) || chooseGroupForCredential(groups);
+        if (!target || target.credentialUuids.length >= MAX_CREDENTIALS_PER_GROUP) {
+            return {
+                applicable: false,
+                reason: 'GROUP_CAPACITY_EXCEEDED',
+                generatedAt: now.toISOString(),
+                groupCount: groups.length,
+                healthyCredentialCount: credentials.length,
+                groups: groups.map(group => ({ ...group, _index: undefined, _assignedDemand: undefined })),
+                keyAssignments: [],
+                anomalies: [{ reason: 'GROUP_CAPACITY_EXCEEDED' }]
+            };
+        }
         target.credentialUuids.push(uuid);
         assignedCredentials.add(uuid);
         const capacity = calculateCredentialCapacity(credential);

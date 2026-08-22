@@ -101,6 +101,13 @@ describe('usage manager display source regressions', () => {
         expect(source).toContain('单日低置信度估算');
     });
 
+    test('account usage summary keeps an estimate row visible while sampling', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain('<div class="account-usage-estimated-weekly-row">${renderEstimatedWeeklyQuota(accountSummary, usage)}</div>');
+        expect(source).toContain('需要更多官方额度变化样本后才能估算');
+    });
+
     test('account usage summary renders total cost without pricing estimate badges', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
 

@@ -1,6 +1,8 @@
 import {
+    appendQuotaSnapshot,
     estimateWeeklyQuotaFromSnapshots,
-    getWeeklyQuotaPercent
+    getWeeklyQuotaPercent,
+    getWeeklyQuotaResetAt
 } from '../src/services/codex-weekly-estimate.js';
 
 describe('Codex weekly quota estimation', () => {
@@ -64,5 +66,50 @@ describe('Codex weekly quota estimation', () => {
             { id: 'primary_window', percent: 50, label: 'Request Quota (5h)' },
             { id: 'secondary_window', percent: 8, label: 'Weekly Limit' }
         ])).toBe(8);
+    });
+
+    test('selects weekly reset time from the weekly window before legacy secondary window', () => {
+        expect(getWeeklyQuotaResetAt([
+            { id: 'primary_window', percent: 12, label: 'Weekly Limit', windowKind: 'weekly', resetAt: '2026-08-27T03:34:03.000Z' },
+            { id: 'secondary_window', percent: 12, label: 'legacy', resetAt: '2026-08-20T03:34:03.000Z' }
+        ], '2026-08-28T00:00:00.000Z')).toBe('2026-08-27T03:34:03.000Z');
+    });
+
+    test('falls back to summary reset time when the weekly item omits reset time', () => {
+        expect(getWeeklyQuotaResetAt([
+            { id: 'primary_window', percent: 12, label: 'Weekly Limit', windowKind: 'weekly', resetAt: null }
+        ], '2026-08-27T03:34:03.000Z')).toBe('2026-08-27T03:34:03.000Z');
+    });
+
+    test('folds repeated quota snapshots into one effective sample', () => {
+        const first = appendQuotaSnapshot([], {
+            observedAt: '2026-08-21T12:00:00.000Z',
+            resetAt: '2026-08-27T03:00:00.000Z',
+            usedPercent: 12,
+            costUsd: 200
+        });
+        const repeated = appendQuotaSnapshot(first, {
+            observedAt: '2026-08-21T13:00:00.000Z',
+            resetAt: '2026-08-27T03:00:00.000Z',
+            usedPercent: 12,
+            costUsd: 200
+        });
+
+        expect(repeated).toHaveLength(1);
+        expect(repeated[0].observedAt).toBe('2026-08-21T13:00:00.000Z');
+    });
+
+    test('deduplicates repeated snapshots before single-sample estimation', () => {
+        const result = estimateWeeklyQuotaFromSnapshots([
+            { observedAt: '2026-08-21T12:00:00.000Z', resetAt: '2026-08-27T03:00:00.000Z', usedPercent: 12, costUsd: 200 },
+            { observedAt: '2026-08-21T13:00:00.000Z', resetAt: '2026-08-27T03:00:00.000Z', usedPercent: 12, costUsd: 200 }
+        ]);
+
+        expect(result).toMatchObject({
+            status: 'estimated',
+            estimatedUsd: 1666.67,
+            sampleCount: 1,
+            method: 'single-sample-period-extrapolation'
+        });
     });
 });

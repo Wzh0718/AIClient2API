@@ -1089,10 +1089,10 @@ function renderAccountUsageSummary(accountSummary, usage = {}) {
     section.className = 'usage-section account-usage-summary';
     const lastUsedAt = accountSummary.lastUsedAt || accountSummary.today?.lastUsedAt || accountSummary.week?.lastUsedAt || accountSummary.month?.lastUsedAt || null;
     section.innerHTML = `
-        ${(lastUsedAt || usage.weeklyQuotaEstimate) ? `<div class="account-usage-summary-meta">
+        <div class="account-usage-summary-meta">
             ${lastUsedAt ? `<div class="account-usage-recent-request-row"><div class="account-usage-last-used"><i class="fas fa-clock"></i> 最近请求 ${formatDate(lastUsedAt)}</div></div>` : ''}
-            ${usage.weeklyQuotaEstimate ? `<div class="account-usage-estimated-weekly-row">${renderEstimatedWeeklyQuota(accountSummary, usage)}</div>` : ''}
-        </div>` : ''}
+            <div class="account-usage-estimated-weekly-row">${renderEstimatedWeeklyQuota(accountSummary, usage)}</div>
+        </div>
             <div class="account-usage-period-grid">
                 ${renderAccountUsagePeriod('今日', accountSummary.today)}
                 ${renderAccountUsagePeriod('近1周', accountSummary.week)}

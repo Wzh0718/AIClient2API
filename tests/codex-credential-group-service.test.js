@@ -54,11 +54,12 @@ describe('Codex credential group sizing and capacity', () => {
         [0, 0],
         [1, 1],
         [2, 2],
-        [3, 3],
-        [4, 3],
+        [3, 2],
+        [4, 2],
+        [5, 3],
         [6, 3],
-        [9, 3],
-        [10, 4]
+        [9, 5],
+        [10, 5]
     ])('uses %i healthy credentials to create %i groups', (credentials, groups) => {
         expect(calculateTargetGroupCount(credentials)).toBe(groups);
     });
@@ -87,7 +88,7 @@ describe('Codex credential group sizing and capacity', () => {
         });
     });
 
-    test('creates balanced 3/3/2/2 credential groups for ten healthy credentials', () => {
+    test('creates balanced groups with no more than two credentials each', () => {
         const suggestion = generateCredentialGroupSuggestion({
             credentials: createCredentials(10),
             keys: [],
@@ -95,8 +96,36 @@ describe('Codex credential group sizing and capacity', () => {
         });
 
         expect(suggestion.applicable).toBe(true);
-        expect(suggestion.groups.map(group => group.credentialUuids.length)).toEqual([3, 3, 2, 2]);
+        expect(suggestion.groups.map(group => group.credentialUuids.length)).toEqual([2, 2, 2, 2, 2]);
+        expect(suggestion.groups.every(group => group.credentialUuids.length <= 2)).toBe(true);
         expect(new Set(suggestion.groups.flatMap(group => group.credentialUuids)).size).toBe(10);
+    });
+
+    test('keeps a singleton final group for an odd credential count', () => {
+        const suggestion = generateCredentialGroupSuggestion({
+            credentials: createCredentials(5),
+            keys: [],
+            now: NOW
+        });
+
+        expect(suggestion.groups.map(group => group.credentialUuids.length)).toEqual([2, 2, 1]);
+    });
+
+    test('reports an oversized manually locked group instead of silently splitting it', () => {
+        const suggestion = generateCredentialGroupSuggestion({
+            credentials: createCredentials(3),
+            keys: [],
+            currentConfig: {
+                groups: [{ id: 'group-1', manualLock: true, credentialUuids: ['cred-1', 'cred-2', 'cred-3'] }]
+            },
+            now: NOW
+        });
+
+        expect(suggestion.applicable).toBe(false);
+        expect(suggestion.reason).toBe('MANUAL_GROUP_EXCEEDS_MAX_SIZE');
+        expect(suggestion.anomalies).toEqual(expect.arrayContaining([
+            expect.objectContaining({ reason: 'MANUAL_GROUP_EXCEEDS_MAX_SIZE' })
+        ]));
     });
 
     test('excludes credentials with explicitly exhausted quota and returns a non-applicable suggestion when none remain', () => {
@@ -485,6 +514,15 @@ describe('Codex credential group suggestion validation', () => {
                 keyAssignments: []
             },
             'CREDENTIAL_ASSIGNED_TO_MULTIPLE_GROUPS'
+        ],
+        [
+            'automatic group exceeds the maximum size',
+            {
+                applicable: true,
+                groups: [{ id: 'group-1', credentialUuids: ['cred-1', 'cred-2', 'cred-3'] }],
+                keyAssignments: []
+            },
+            'GROUP_EXCEEDS_MAX_SIZE'
         ],
         [
             'unknown keys',

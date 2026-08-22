@@ -238,7 +238,7 @@ describe('Potluck Codex credential group management API', () => {
                 expiresAt: expect.any(String),
                 suggestion: {
                     applicable: true,
-                    groupCount: 3,
+                    groupCount: 2,
                     groups: expect.any(Array)
                 }
             }
@@ -298,11 +298,11 @@ describe('Potluck Codex credential group management API', () => {
         expect(readCredentialGroupStore()).toBeNull();
     });
 
-    test('suggests 3/3/2/2 groups for ten available credentials', async () => {
+    test('suggests groups with at most two credentials for ten available credentials', async () => {
         const response = await createPreview({ credentialCount: 10 });
 
         expect(response.statusCode).toBe(200);
-        expect(response.body.data.suggestion.groups.map(group => group.credentialCount)).toEqual([3, 3, 2, 2]);
+        expect(response.body.data.suggestion.groups.map(group => group.credentialCount)).toEqual([2, 2, 2, 2, 2]);
     });
 
     test('applies a preview as a revision and synchronizes Key routing in one batch', async () => {

@@ -10,7 +10,8 @@ import { existsSync, readFileSync, writeFileSync } from 'fs';
 import {
     appendQuotaSnapshot,
     estimateWeeklyQuotaFromSnapshots,
-    getWeeklyQuotaPercent
+    getWeeklyQuotaPercent,
+    getWeeklyQuotaResetAt
 } from '../services/codex-weekly-estimate.js';
 
 function sendJson(res, statusCode, payload) {
@@ -150,9 +151,17 @@ function enrichCodexWeeklyEstimates(providerData, accountSummary, observedAt = n
         if (usedPercent === null || !Number.isFinite(costUsd) || costUsd < 0) continue;
 
         const key = String(instance.uuid || instance.codexAccountId || instance.codexAccountKey || 'unknown');
-        const snapshots = appendQuotaSnapshot(store.accounts[key] || [], {
+        const resetAt = getWeeklyQuotaResetAt(instance.usage.items, instance.usage.summary?.resetAt);
+        let snapshots = [];
+        for (const storedSnapshot of (store.accounts[key] || [])) {
+            snapshots = appendQuotaSnapshot(snapshots, {
+                ...storedSnapshot,
+                resetAt: storedSnapshot.resetAt || resetAt
+            });
+        }
+        snapshots = appendQuotaSnapshot(snapshots, {
             observedAt,
-            resetAt: instance.usage.items.find(item => item?.id === 'secondary_window')?.resetAt || null,
+            resetAt,
             usedPercent,
             costUsd
         });
