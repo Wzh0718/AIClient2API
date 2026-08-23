@@ -9,9 +9,10 @@ import path from 'path';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import {
     appendQuotaSnapshot,
-    estimateWeeklyQuotaFromSnapshots,
+    estimateCurrentPeriodQuota,
     getWeeklyQuotaPercent,
-    getWeeklyQuotaResetAt
+    getWeeklyQuotaWindow,
+    sumAccountTimelineCost
 } from '../services/codex-weekly-estimate.js';
 
 function sendJson(res, statusCode, payload) {
@@ -143,30 +144,33 @@ function enrichCodexWeeklyEstimates(providerData, accountSummary, observedAt = n
         if (!instance?.success || !instance.usage) continue;
         const usedPercent = getWeeklyQuotaPercent(instance.usage.items);
         const account = findAccountSummaryForInstance(accountSummary, instance);
-        const costUsd = Number(
-            account?.month?.cost?.usd
-            ?? account?.week?.cost?.usd
-            ?? account?.latestDay?.cost?.usd
-        );
-        if (usedPercent === null || !Number.isFinite(costUsd) || costUsd < 0) continue;
+        const window = getWeeklyQuotaWindow(instance.usage.items, instance.usage.summary?.resetAt);
+        const periodUsage = sumAccountTimelineCost(account?.timeline, window.periodStart, observedAt);
+        if (usedPercent === null) continue;
 
         const key = String(instance.uuid || instance.codexAccountId || instance.codexAccountKey || 'unknown');
-        const resetAt = getWeeklyQuotaResetAt(instance.usage.items, instance.usage.summary?.resetAt);
         let snapshots = [];
         for (const storedSnapshot of (store.accounts[key] || [])) {
             snapshots = appendQuotaSnapshot(snapshots, {
                 ...storedSnapshot,
-                resetAt: storedSnapshot.resetAt || resetAt
+                resetAt: storedSnapshot.resetAt || window.resetAt
             });
         }
         snapshots = appendQuotaSnapshot(snapshots, {
             observedAt,
-            resetAt,
+            resetAt: window.resetAt,
             usedPercent,
-            costUsd
+            costUsd: periodUsage.costUsd
         });
         store.accounts[key] = snapshots;
-        instance.weeklyQuotaEstimate = estimateWeeklyQuotaFromSnapshots(snapshots);
+        instance.weeklyQuotaEstimate = estimateCurrentPeriodQuota({
+            observedAt,
+            periodStart: window.periodStart,
+            resetAt: window.resetAt,
+            usedPercent,
+            periodCostUsd: periodUsage.costUsd,
+            granularity: periodUsage.granularity
+        });
     }
 
     writeCodexWeeklyEstimateStore(store);
@@ -226,7 +230,7 @@ export async function getAllProvidersUsage(currentConfig, providerPoolManager) {
     if (codexUsage?.instances?.some(instance => instance?.success)) {
         try {
             const { getAccountUsageSummary } = await import('../plugins/api-potluck/key-manager.js');
-            const accountSummary = await getAccountUsageSummary();
+            const accountSummary = await getAccountUsageSummary(new Date(), { includeTimeline: true });
             enrichCodexWeeklyEstimates(codexUsage, accountSummary, results.timestamp || new Date().toISOString());
         } catch (error) {
             logger.warn(`[Usage API] Failed to enrich Codex weekly quota estimates: ${error.message}`);
@@ -1019,7 +1023,7 @@ export async function handleGetSingleInstanceUsage(req, res, currentConfig, prov
                 instanceResult.usage = usage;
                 if (providerType === MODEL_PROVIDER.CODEX_API) {
                     const { getAccountUsageSummary } = await import('../plugins/api-potluck/key-manager.js');
-                    const accountSummary = await getAccountUsageSummary();
+                    const accountSummary = await getAccountUsageSummary(new Date(), { includeTimeline: true });
                     enrichCodexWeeklyEstimates({ providerType, instances: [instanceResult] }, accountSummary);
                 }
                 instanceResult.codexQuotaHealth = deriveCodexQuotaHealthFromUsage(instanceResult.codexQuotaHealth, usage);
@@ -1224,7 +1228,7 @@ export async function handleGetProviderUsage(req, res, currentConfig, providerPo
             if (providerType === MODEL_PROVIDER.CODEX_API && usageResults.instances?.some(instance => instance?.success)) {
                 try {
                     const { getAccountUsageSummary } = await import('../plugins/api-potluck/key-manager.js');
-                    const accountSummary = await getAccountUsageSummary();
+                    const accountSummary = await getAccountUsageSummary(new Date(), { includeTimeline: true });
                     enrichCodexWeeklyEstimates(usageResults, accountSummary);
                 } catch (error) {
                     logger.warn(`[Usage API] Failed to enrich Codex weekly quota estimates: ${error.message}`);

@@ -4,7 +4,7 @@ import path from 'path';
 describe('usage manager display source regressions', () => {
     test('usage details prefer backend-provided display values for token units', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
-        const renderStart = source.indexOf('function renderUsageDetails(usage, accountSummary = null) {');
+        const renderStart = source.indexOf('function renderUsageDetails(usage, accountSummary = null, instance = {}) {');
         expect(renderStart).toBeGreaterThanOrEqual(0);
 
         const renderEnd = source.indexOf('function getProviderDisplayName', renderStart);
@@ -16,7 +16,7 @@ describe('usage manager display source regressions', () => {
 
     test('Codex usage details render semantic summary labels and no progress bar for telemetry', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
-        const renderStart = source.indexOf('function renderUsageDetails(usage, accountSummary = null) {');
+        const renderStart = source.indexOf('function renderUsageDetails(usage, accountSummary = null, instance = {}) {');
         const renderEnd = source.indexOf('function getProviderDisplayName', renderStart);
         const renderBlock = source.slice(renderStart, renderEnd);
 
@@ -37,7 +37,7 @@ describe('usage manager display source regressions', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
         const i18n = fs.readFileSync(path.join(process.cwd(), 'static/app/i18n.js'), 'utf8').replace(/\r\n/g, '\n');
         const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
-        const renderStart = source.indexOf('function renderUsageDetails(usage, accountSummary = null) {');
+        const renderStart = source.indexOf('function renderUsageDetails(usage, accountSummary = null, instance = {}) {');
         const renderEnd = source.indexOf('function getProviderDisplayName', renderStart);
         const renderBlock = source.slice(renderStart, renderEnd);
 
@@ -82,30 +82,49 @@ describe('usage manager display source regressions', () => {
         expect(source).not.toContain('官方未返回重置时间');
     });
 
+    test('Antigravity quota details do not render internal quota relation labels', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).not.toContain('quotaRelationText');
+        expect(source).not.toContain('官方额度桶');
+        expect(source).not.toContain('共享模型额度观测');
+        expect(source).not.toContain('模型额度观测');
+    });
+
     test('account usage summary renders estimated weekly quota below the recent request', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
         const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
 
-        expect(source).toContain('renderEstimatedWeeklyQuota(accountSummary, usage)');
+        expect(source).toContain('renderEstimatedWeeklyQuota(accountSummary, instance)');
         expect(source).toContain('account-usage-estimated-weekly');
+        expect(source).toContain('预估月额度');
         expect(source).toContain('account-usage-recent-request-row');
         expect(source).toContain('account-usage-estimated-weekly-row');
         expect(css).toContain('.account-usage-recent-request-row');
         expect(css).toContain('.account-usage-estimated-weekly-row');
     });
 
-    test('single-sample estimate explains its low-confidence source', () => {
+    test('weekly and monthly quota estimates use two full-width rows', () => {
+        const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(css).toMatch(/\.account-usage-estimated-weekly-row\s*\{[^}]*flex-direction:\s*column;/s);
+        expect(css).toMatch(/\.account-usage-estimated-weekly-row\s*\{[^}]*gap:\s*0\.375rem;/s);
+        expect(css).toMatch(/\.account-usage-estimated-weekly\s*\{[^}]*width:\s*100%;/s);
+        expect(css).toMatch(/\.account-usage-estimated-weekly strong\s*\{[^}]*margin-left:\s*auto;/s);
+    });
+
+    test('current-period estimate explains its low-confidence source', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
 
-        expect(source).toContain('single-sample-period-extrapolation');
-        expect(source).toContain('单日低置信度估算');
+        expect(source).toContain('当前周期低置信度估算');
+        expect(source).toContain('本地金额');
     });
 
     test('account usage summary keeps an estimate row visible while sampling', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
 
-        expect(source).toContain('<div class="account-usage-estimated-weekly-row">${renderEstimatedWeeklyQuota(accountSummary, usage)}</div>');
-        expect(source).toContain('需要更多官方额度变化样本后才能估算');
+        expect(source).toContain('<div class="account-usage-estimated-weekly-row">${renderEstimatedWeeklyQuota(accountSummary, instance)}</div>');
+        expect(source).toContain('当前周期金额或官方额度不足，继续采样中');
     });
 
     test('account usage summary renders total cost without pricing estimate badges', () => {
@@ -222,7 +241,7 @@ describe('usage manager display source regressions', () => {
         expect(usageCacheSource).toContain('mergeUsageDataWithExistingLastSuccessfulUsage');
         expect(usageCacheSource).toContain('lastRefreshError: incomingInstance.error');
         expect(usageManagerSource).toContain('const hasVisibleUsage = Boolean(instance.usage);');
-        expect(usageManagerSource).toContain('contentArea.appendChild(renderUsageDetails(instance.usage, accountUsageSummary));');
+        expect(usageManagerSource).toContain('contentArea.appendChild(renderUsageDetails(instance.usage, accountUsageSummary, instance));');
         expect(usageManagerSource).toContain('renderUsageRefreshWarning(instance)');
         expect(usageManagerSource).toContain('showUsageRefreshErrors(data.refreshErrors)');
     });

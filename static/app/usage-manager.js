@@ -866,7 +866,7 @@ function createInstanceUsageCard(instance, providerType) {
         contentArea.appendChild(refreshWarning);
     }
     if (instance.usage) {
-        contentArea.appendChild(renderUsageDetails(instance.usage, accountUsageSummary));
+        contentArea.appendChild(renderUsageDetails(instance.usage, accountUsageSummary, instance));
     } else if (instance.error) {
         contentArea.innerHTML = `<div class="usage-error-message"><i class="fas fa-exclamation-triangle"></i> <span>${escapeHtml(instance.error)}</span></div>`;
     }
@@ -947,14 +947,14 @@ function isTelemetryUpdateOutlier(updatedAt, commonUpdatedAt, toleranceMs = 5 * 
 /**
  * 渲染用量详情 (全面适配新结构)
  */
-function renderUsageDetails(usage, accountSummary = null) {
+function renderUsageDetails(usage, accountSummary = null, instance = {}) {
     const container = document.createElement('div');
     container.className = 'usage-details';
 
     const { summary, items } = usage;
 
     if (accountSummary) {
-        container.appendChild(renderAccountUsageSummary(accountSummary, usage));
+        container.appendChild(renderAccountUsageSummary(accountSummary, instance));
     }
     
     if (summary?.usedPercent !== undefined) {
@@ -1084,14 +1084,14 @@ function renderUsageDetails(usage, accountSummary = null) {
     return container;
 }
 
-function renderAccountUsageSummary(accountSummary, usage = {}) {
+function renderAccountUsageSummary(accountSummary, instance = {}) {
     const section = document.createElement('div');
     section.className = 'usage-section account-usage-summary';
     const lastUsedAt = accountSummary.lastUsedAt || accountSummary.today?.lastUsedAt || accountSummary.week?.lastUsedAt || accountSummary.month?.lastUsedAt || null;
     section.innerHTML = `
         <div class="account-usage-summary-meta">
             ${lastUsedAt ? `<div class="account-usage-recent-request-row"><div class="account-usage-last-used"><i class="fas fa-clock"></i> 最近请求 ${formatDate(lastUsedAt)}</div></div>` : ''}
-            <div class="account-usage-estimated-weekly-row">${renderEstimatedWeeklyQuota(accountSummary, usage)}</div>
+            <div class="account-usage-estimated-weekly-row">${renderEstimatedWeeklyQuota(accountSummary, instance)}</div>
         </div>
             <div class="account-usage-period-grid">
                 ${renderAccountUsagePeriod('今日', accountSummary.today)}
@@ -1102,16 +1102,18 @@ function renderAccountUsageSummary(accountSummary, usage = {}) {
     return section;
 }
 
-function renderEstimatedWeeklyQuota(accountSummary, usage = {}) {
-    const estimate = usage.weeklyQuotaEstimate;
-    if (!estimate || estimate.status !== 'estimated' || !Number.isFinite(Number(estimate.estimatedUsd))) {
-        return '<div class="account-usage-estimated-weekly" title="需要更多官方额度变化样本后才能估算"><i class="fas fa-chart-line"></i><span>预估周额度</span><strong>采样中</strong></div>';
+function renderEstimatedWeeklyQuota(accountSummary, instance = {}) {
+    const estimate = instance.weeklyQuotaEstimate;
+    if (!estimate || estimate.status !== 'estimated' || !Number.isFinite(Number(estimate.estimatedWeeklyUsd))) {
+        return '<div class="account-usage-estimated-weekly" title="当前周期金额或官方额度不足，继续采样中"><i class="fas fa-chart-line"></i><span>预估周额度</span><strong>采样中</strong></div><div class="account-usage-estimated-weekly account-usage-estimated-monthly" title="周额度可估算后按 4 周推算"><i class="fas fa-calendar-alt"></i><span>预估月额度</span><strong>采样中</strong></div>';
     }
-    const amount = Math.round(Number(estimate.estimatedUsd));
-        const tooltip = estimate.method === 'single-sample-period-extrapolation'
-            ? `单日低置信度估算：基于当前额度周期累计金额和官方已用百分比反推，${estimate.observedFrom ? `采样于 ${formatDate(estimate.observedFrom)}` : ''}`
-            : `基于 ${estimate.sampleCount} 次周额度变化样本，${estimate.observedFrom ? `起始 ${formatDate(estimate.observedFrom)}，` : ''}当前为本地金额增量反推值`;
-    return `<div class="account-usage-estimated-weekly" title="${escapeHtml(tooltip)}"><i class="fas fa-chart-line"></i><span>预估周额度</span><strong>$${amount.toLocaleString(getCurrentLanguage())}</strong></div>`;
+    const weeklyAmount = Math.round(Number(estimate.estimatedWeeklyUsd));
+    const monthlyAmount = Math.round(Number(estimate.estimatedMonthlyUsd));
+    const range = Number.isFinite(Number(estimate.lowerBoundUsd)) && Number.isFinite(Number(estimate.upperBoundUsd))
+        ? `，区间 $${Math.round(Number(estimate.lowerBoundUsd)).toLocaleString(getCurrentLanguage())}–$${Math.round(Number(estimate.upperBoundUsd)).toLocaleString(getCurrentLanguage())}`
+        : '';
+    const tooltip = `当前周期低置信度估算：${estimate.periodStart ? `自 ${formatDate(estimate.periodStart)} 起，` : ''}本地金额 ${formatUsd(estimate.periodCostUsd)} ÷ 官方已用 ${Number(estimate.usedPercent).toFixed(1)}%${range}`;
+    return `<div class="account-usage-estimated-weekly" title="${escapeHtml(tooltip)}"><i class="fas fa-chart-line"></i><span>预估周额度</span><strong>$${weeklyAmount.toLocaleString(getCurrentLanguage())}</strong></div><div class="account-usage-estimated-weekly account-usage-estimated-monthly" title="按预估周额度 × 4 推算，不代表官方月度限额"><i class="fas fa-calendar-alt"></i><span>预估月额度</span><strong>$${monthlyAmount.toLocaleString(getCurrentLanguage())}</strong></div>`;
 }
 
 function renderAccountUsagePeriod(label, usage = {}) {

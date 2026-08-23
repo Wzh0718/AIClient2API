@@ -41,12 +41,16 @@ describe('Antigravity usage formatting', () => {
         expect(formatted.items[0]).toMatchObject({
             label: 'Shared quota (2 models)',
             percent: 25,
-            modelIds: ['gemini-2.5-flash', 'gemini-3.1-flash-image']
+            modelIds: ['gemini-2.5-flash', 'gemini-3.1-flash-image'],
+            source: 'fetchAvailableModels',
+            authoritative: false,
+            quotaRelation: 'shared-pool'
         });
         expect(formatted.items[1]).toMatchObject({
             label: 'gemini-claude-sonnet-4-6',
             percent: 50,
-            modelIds: ['gemini-claude-sonnet-4-6']
+            modelIds: ['gemini-claude-sonnet-4-6'],
+            quotaRelation: 'model-observed'
         });
         expect(formatted.summary.usedPercent).toBe(37.5);
         expect(formatted.summary.plan).toBe('Quota(free)');
@@ -111,7 +115,9 @@ describe('Antigravity usage formatting', () => {
                 remainingPercent: 75,
                 displayValue: '25.0%',
                 windowKind: 'short',
-                resetAt: '2026-08-06T22:01:21.000Z'
+                resetAt: '2026-08-06T22:01:21.000Z',
+                authoritative: true,
+                quotaRelation: 'official-bucket'
             }),
             expect.objectContaining({
                 id: 'quota-group:gemini-weekly',

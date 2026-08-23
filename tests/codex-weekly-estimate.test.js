@@ -1,11 +1,102 @@
 import {
     appendQuotaSnapshot,
+    estimateCurrentPeriodQuota,
     estimateWeeklyQuotaFromSnapshots,
+    getWeeklyQuotaWindow,
     getWeeklyQuotaPercent,
-    getWeeklyQuotaResetAt
+    getWeeklyQuotaResetAt,
+    sumAccountTimelineCost
 } from '../src/services/codex-weekly-estimate.js';
 
 describe('Codex weekly quota estimation', () => {
+    test('derives the active weekly period from reset time and official duration', () => {
+        expect(getWeeklyQuotaWindow([
+            {
+                id: 'primary_window',
+                windowKind: 'weekly',
+                durationSeconds: 604800,
+                resetAt: '2026-08-27T03:34:03.000Z'
+            }
+        ])).toMatchObject({
+            resetAt: '2026-08-27T03:34:03.000Z',
+            periodStart: '2026-08-20T03:34:03.000Z',
+            durationSeconds: 604800
+        });
+    });
+
+    test('falls back to a seven day duration for a weekly item', () => {
+        expect(getWeeklyQuotaWindow([
+            {
+                id: 'secondary_window',
+                windowKind: 'weekly',
+                resetAt: '2026-08-27T03:34:03.000Z'
+            }
+        ])).toMatchObject({
+            periodStart: '2026-08-20T03:34:03.000Z',
+            durationSeconds: 604800
+        });
+    });
+
+    test('estimates weekly and four-week monthly quota from current-period cost', () => {
+        const result = estimateCurrentPeriodQuota({
+            observedAt: '2026-08-23T03:00:00.000Z',
+            periodStart: '2026-08-20T03:34:03.000Z',
+            resetAt: '2026-08-27T03:34:03.000Z',
+            usedPercent: 13,
+            periodCostUsd: 773.27328936,
+            granularity: 'hour'
+        });
+
+        expect(result).toMatchObject({
+            status: 'estimated',
+            estimatedWeeklyUsd: 5948.26,
+            estimatedMonthlyUsd: 23793.04,
+            periodCostUsd: 773.27,
+            usedPercent: 13,
+            method: 'current-period-extrapolation',
+            granularity: 'hour'
+        });
+        expect(result.lowerBoundUsd).toBeLessThan(result.estimatedWeeklyUsd);
+        expect(result.upperBoundUsd).toBeGreaterThan(result.estimatedWeeklyUsd);
+    });
+
+    test('does not estimate at zero or fully exhausted percentage', () => {
+        for (const usedPercent of [0, 100]) {
+            expect(estimateCurrentPeriodQuota({
+                observedAt: '2026-08-23T03:00:00.000Z',
+                periodStart: '2026-08-20T03:34:03.000Z',
+                resetAt: '2026-08-27T03:34:03.000Z',
+                usedPercent,
+                periodCostUsd: 100
+            })).toMatchObject({ status: 'insufficient-data' });
+        }
+    });
+
+    test('sums only account timeline buckets that overlap the active period', () => {
+        const result = sumAccountTimelineCost({
+            '2026-08-19': { summary: { cost: { usd: 1000 } }, hours: {} },
+            '2026-08-20': {
+                summary: { cost: { usd: 240 } },
+                hours: {
+                    '02': { cost: { usd: 10 } },
+                    '03': { cost: { usd: 20 } },
+                    '04': { cost: { usd: 30 } }
+                }
+            },
+            '2026-08-21': { summary: { cost: { usd: 400 } }, hours: {} },
+            '2026-08-23': {
+                summary: { cost: { usd: 90 } },
+                hours: {
+                    '01': { cost: { usd: 10 } },
+                    '02': { cost: { usd: 20 } },
+                    '03': { cost: { usd: 30 } }
+                }
+            }
+        }, '2026-08-20T03:34:03+08:00', '2026-08-23T03:00:00+08:00');
+
+        expect(result).toMatchObject({ costUsd: 480, granularity: 'hour' });
+    });
+
     test('estimates quota from local cost delta and weekly percent delta', () => {
         const result = estimateWeeklyQuotaFromSnapshots([
             { observedAt: '2026-08-20T12:00:00.000Z', resetAt: '2026-08-27T03:00:00.000Z', usedPercent: 1, costUsd: 100 },

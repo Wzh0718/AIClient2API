@@ -731,6 +731,32 @@ function mergeLatestAccountDay(target, dateKey, account) {
     }
 }
 
+function addAccountTimelineUsage(target, dateKey, hourKey, usage) {
+    if (!target.timeline) target.timeline = {};
+    if (!target.timeline[dateKey]) {
+        target.timeline[dateKey] = { summary: createUsageBucket(), hours: {} };
+    }
+    const dateBucket = target.timeline[dateKey];
+    const targetBucket = hourKey === null
+        ? dateBucket.summary
+        : (dateBucket.hours[hourKey] ||= createUsageBucket());
+    addUsage(targetBucket, usage?.summary);
+    addCost(targetBucket, usage?.summary?.cost);
+}
+
+function mergeAccountTimeline(target, dateKey, accountKey, account, hours = {}, options = {}) {
+    addAccountTimelineUsage(target, dateKey, null, account);
+    const accountAliases = new Set(getAccountSummaryAliases(accountKey, account, options));
+    for (const [hourKey, hourData] of Object.entries(hours || {})) {
+        for (const [hourAccountKey, hourAccount] of Object.entries(hourData?.accounts || {})) {
+            const hourAliases = getAccountSummaryAliases(hourAccountKey, hourAccount, options);
+            if (hourAliases.some(alias => accountAliases.has(alias))) {
+                addAccountTimelineUsage(target, dateKey, hourKey, hourAccount);
+            }
+        }
+    }
+}
+
 function isEmailLike(value) {
     return typeof value === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 }
@@ -2356,6 +2382,17 @@ export async function getStats(options = {}) {
                         addAccountUsage(aggregatedHistory[date].accounts, account);
                     });
                 }
+
+                if (!compactHistory && !options.compactAccounts && options.includeAccountTimeline && history.hours) {
+                    for (const [hourKey, hour] of Object.entries(history.hours)) {
+                        if (!aggregatedHistory[date].hours[hourKey]) {
+                            aggregatedHistory[date].hours[hourKey] = normalizeHourlyUsageMap({ [hourKey]: {} })[hourKey];
+                        }
+                        for (const account of Object.values(hour.accounts || {})) {
+                            addAccountUsage(aggregatedHistory[date].hours[hourKey].accounts, account);
+                        }
+                    }
+                }
             });
         }
     }
@@ -2409,10 +2446,10 @@ export async function getStats(options = {}) {
  * 获取按真实账号聚合的今日 / 本周 / 本月使用量。
  * 用量查询页只需要轻量摘要，避免拉取全部 Potluck Key 历史。
  */
-export async function getAccountUsageSummary(now = new Date()) {
+export async function getAccountUsageSummary(now = new Date(), options = {}) {
     const { conversionModel } = getCostOptions();
     const starts = getBeijingPeriodStarts(now);
-    const stats = await getStats({ conversionModel });
+    const stats = await getStats({ conversionModel, includeAccountTimeline: options.includeTimeline === true });
     const potluckUsageHistory = stats.usageHistory || {};
     const usePotluckHistory = hasAccountUsageInSummaryWindow(potluckUsageHistory, starts);
     const modelUsageHistory = usePotluckHistory ? null : readModelUsageDailyHistory(conversionModel);
@@ -2463,6 +2500,9 @@ export async function getAccountUsageSummary(now = new Date()) {
             if (inWeek) addAccountSummaryRange(current, 'week', account);
             if (inMonth) addAccountSummaryRange(current, 'month', account);
             mergeLatestAccountDay(current, dateKey, account);
+            if (options.includeTimeline) {
+                mergeAccountTimeline(current, dateKey, accountKey, account, day.hours, { ambiguousProviderAliases });
+            }
 
             for (const alias of getAccountSummaryAliases(current.accountKey, current, { ambiguousProviderAliases })) {
                 aliasIndex.set(alias, targetKey);
@@ -2494,7 +2534,8 @@ export async function getAccountUsageSummary(now = new Date()) {
                 latestDay: account.latestDay ? {
                     ...cloneUsageBucket(account.latestDay),
                     date: account.latestDay.date
-                } : null
+                } : null,
+                ...(options.includeTimeline ? { timeline: account.timeline || {} } : {})
             };
         })
         .sort((a, b) => (

@@ -34,6 +34,43 @@ afterEach(() => {
 });
 
 describe('api potluck key usage summary', () => {
+    test('optionally exposes an account daily and hourly timeline for quota-period estimation', async () => {
+        jest.setSystemTime(new Date('2026-06-22T04:30:00.000Z'));
+        const { createKey, incrementUsage, getAccountUsageSummary } = await loadKeyManager();
+        const key = await createKey('Timeline Client', 1000);
+        for (const [requestId, timestamp] of [
+            ['req-timeline-1', '2026-06-22T02:15:00.000Z'],
+            ['req-timeline-2', '2026-06-22T03:15:00.000Z']
+        ]) {
+            await incrementUsage(key.id, 'openai-codex-oauth', 'gpt-5.5', {
+                requestCount: 1,
+                promptTokens: 1000,
+                completionTokens: 100,
+                totalTokens: 1100
+            }, requestId, {
+                providerUuid: 'timeline-account',
+                accountIdentity: 'timeline-account',
+                accountEmail: 'timeline@example.com',
+                providerName: 'timeline@example.com',
+                timestamp
+            });
+        }
+
+        const defaultSummary = await getAccountUsageSummary(new Date('2026-06-22T04:30:00.000Z'));
+        const internalSummary = await getAccountUsageSummary(
+            new Date('2026-06-22T04:30:00.000Z'),
+            { includeTimeline: true }
+        );
+        expect(defaultSummary.accounts[0].timeline).toBeUndefined();
+        expect(internalSummary.accounts[0].timeline['2026-06-22']).toMatchObject({
+            summary: { requestCount: 2, cost: { usd: expect.any(Number) } },
+            hours: {
+                '10': { requestCount: 1, cost: { usd: expect.any(Number) } },
+                '11': { requestCount: 1, cost: { usd: expect.any(Number) } }
+            }
+        });
+    });
+
     test('does not double count duplicate request ids and only applies usage deltas', async () => {
         jest.setSystemTime(new Date('2026-06-22T02:15:30.000Z'));
         const { createKey, incrementUsage, listKeys, getStats } = await loadKeyManager();

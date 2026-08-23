@@ -509,7 +509,10 @@ export function formatAntigravityUsage(usageData) {
                 status: getStatus(percent),
                 resetAt: formatTimestamp(group.resetTime),
                 modelIds,
-                shared
+                shared,
+                source: 'fetchAvailableModels',
+                authoritative: false,
+                quotaRelation: shared ? 'shared-pool' : 'model-observed'
             };
         }).sort((a, b) => a.modelIds[0].localeCompare(b.modelIds[0]));
 
@@ -547,6 +550,8 @@ export function formatAntigravityUsage(usageData) {
                     resetAt: formatTimestamp(bucket.resetTime),
                     windowKind: bucket.window === 'weekly' ? 'weekly' : bucket.window === '5h' ? 'short' : 'custom',
                     source: 'retrieveUserQuotaSummary',
+                    authoritative: true,
+                    quotaRelation: 'official-bucket',
                     quotaGroup: groupName,
                     bucketId
                 });

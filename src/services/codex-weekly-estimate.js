@@ -1,4 +1,5 @@
 const SNAPSHOT_LIMIT = 60;
+const WEEKLY_DURATION_SECONDS = 7 * 24 * 60 * 60;
 
 function finiteNumber(value) {
     const number = Number(value);
@@ -24,6 +25,133 @@ function getWeeklyQuotaItem(items = []) {
         || list.find(item => item?.id === 'secondary_window' && item?.resetAt)
         || list.find(item => item?.id === 'secondary_window')
         || list.find(item => /weekly/i.test(String(item?.label || '')));
+}
+
+function roundCurrency(value) {
+    return Math.round(Number(value) * 100) / 100;
+}
+
+function getBucketCostUsd(bucket = {}) {
+    const cost = bucket?.cost || {};
+    const value = finiteNumber(cost.usd ?? (Number(cost.actualUsd || 0) + Number(cost.estimatedUsd || 0)));
+    return value !== null && value > 0 ? value : 0;
+}
+
+function getBeijingDayStartMs(dateKey) {
+    const timestamp = Date.parse(`${dateKey}T00:00:00+08:00`);
+    return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+export function getWeeklyQuotaWindow(items = [], fallbackResetAt = null) {
+    const weeklyItem = getWeeklyQuotaItem(items);
+    const resetAt = weeklyItem?.resetAt || fallbackResetAt || null;
+    const resetMs = resetAt ? Date.parse(resetAt) : NaN;
+    const officialDuration = finiteNumber(weeklyItem?.durationSeconds);
+    const durationSeconds = officialDuration !== null && officialDuration > 0
+        ? officialDuration
+        : (weeklyItem ? WEEKLY_DURATION_SECONDS : null);
+    if (!Number.isFinite(resetMs) || !durationSeconds) {
+        return { resetAt, periodStart: null, durationSeconds };
+    }
+    return {
+        resetAt: new Date(resetMs).toISOString(),
+        periodStart: new Date(resetMs - durationSeconds * 1000).toISOString(),
+        durationSeconds
+    };
+}
+
+export function sumAccountTimelineCost(timeline = {}, periodStart = null, observedAt = null) {
+    const fromMs = Date.parse(periodStart || '');
+    const toMs = Date.parse(observedAt || '');
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
+        return { costUsd: 0, granularity: 'unavailable' };
+    }
+
+    let costUsd = 0;
+    let usedHourlyBoundary = false;
+    for (const [dateKey, day] of Object.entries(timeline || {})) {
+        const dayStartMs = getBeijingDayStartMs(dateKey);
+        if (dayStartMs === null) continue;
+        const dayEndMs = dayStartMs + 24 * 60 * 60 * 1000;
+        if (dayEndMs <= fromMs || dayStartMs >= toMs) continue;
+
+        if (dayStartMs >= fromMs && dayEndMs <= toMs) {
+            costUsd += getBucketCostUsd(day?.summary);
+            continue;
+        }
+
+        usedHourlyBoundary = true;
+        for (const [hourKey, hourBucket] of Object.entries(day?.hours || {})) {
+            const hour = Number(hourKey);
+            if (!Number.isInteger(hour) || hour < 0 || hour > 23) continue;
+            const hourStartMs = dayStartMs + hour * 60 * 60 * 1000;
+            const hourEndMs = hourStartMs + 60 * 60 * 1000;
+            if (hourEndMs <= fromMs || hourStartMs >= toMs) continue;
+            costUsd += getBucketCostUsd(hourBucket);
+        }
+    }
+
+    return {
+        costUsd: roundCurrency(costUsd),
+        granularity: usedHourlyBoundary ? 'hour' : 'day'
+    };
+}
+
+export function estimateCurrentPeriodQuota({
+    observedAt,
+    periodStart,
+    resetAt,
+    usedPercent,
+    periodCostUsd,
+    granularity = 'day'
+} = {}) {
+    const observedMs = Date.parse(observedAt || '');
+    const startMs = Date.parse(periodStart || '');
+    const resetMs = Date.parse(resetAt || '');
+    const percent = finiteNumber(usedPercent);
+    const cost = finiteNumber(periodCostUsd);
+    const base = {
+        status: 'insufficient-data',
+        estimatedWeeklyUsd: null,
+        estimatedMonthlyUsd: null,
+        lowerBoundUsd: null,
+        upperBoundUsd: null,
+        periodCostUsd: cost !== null ? roundCurrency(cost) : null,
+        periodStart: Number.isFinite(startMs) ? new Date(startMs).toISOString() : null,
+        resetAt: Number.isFinite(resetMs) ? new Date(resetMs).toISOString() : null,
+        usedPercent: percent,
+        confidence: 'low',
+        method: 'current-period-extrapolation',
+        granularity
+    };
+    if (
+        !Number.isFinite(observedMs)
+        || !Number.isFinite(startMs)
+        || !Number.isFinite(resetMs)
+        || observedMs < startMs
+        || observedMs >= resetMs
+        || percent === null
+        || percent <= 0
+        || percent >= 100
+        || cost === null
+        || cost <= 0
+    ) {
+        return base;
+    }
+
+    const estimatedWeeklyUsd = cost * 100 / percent;
+    const roundedWeeklyUsd = roundCurrency(estimatedWeeklyUsd);
+    const lowerPercent = Math.max(0.1, percent - 0.5);
+    const upperPercent = Math.min(99.9, percent + 0.5);
+    return {
+        ...base,
+        status: 'estimated',
+        estimatedWeeklyUsd: roundedWeeklyUsd,
+        estimatedMonthlyUsd: roundCurrency(roundedWeeklyUsd * 4),
+        lowerBoundUsd: roundCurrency(cost * 100 / upperPercent),
+        upperBoundUsd: roundCurrency(cost * 100 / lowerPercent),
+        confidence: percent >= 20 && granularity !== 'unavailable' ? 'medium' : 'low'
+    };
 }
 
 export function getWeeklyQuotaPercent(items = []) {
