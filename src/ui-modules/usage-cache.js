@@ -57,8 +57,8 @@ function mergeInstanceWithLastSuccessfulUsage(incomingInstance, cachedByUuid, ca
     if (incomingInstance?.success || !incomingInstance?.error) {
         return {
             ...incomingInstance,
-            antigravityModelAvailability: incomingInstance?.antigravityModelAvailability
-                || cachedInstance?.antigravityModelAvailability
+            antigravityModelStatus: incomingInstance?.antigravityModelStatus
+                || cachedInstance?.antigravityModelStatus
                 || null
         };
     }
@@ -75,7 +75,7 @@ function mergeInstanceWithLastSuccessfulUsage(incomingInstance, cachedByUuid, ca
         codexEmail: incomingInstance.codexEmail || cachedInstance.codexEmail || null,
         codexQuotaHealth: incomingInstance.codexQuotaHealth || cachedInstance.codexQuotaHealth || null,
         antigravityQuotaHealth: incomingInstance.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null,
-        antigravityModelAvailability: incomingInstance.antigravityModelAvailability || cachedInstance.antigravityModelAvailability || null,
+        antigravityModelStatus: incomingInstance.antigravityModelStatus || cachedInstance.antigravityModelStatus || null,
         configFilePath: incomingInstance.configFilePath || cachedInstance.configFilePath || null,
         isHealthy: incomingInstance.isHealthy,
         isDisabled: incomingInstance.isDisabled,

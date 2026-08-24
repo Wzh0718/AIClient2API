@@ -498,8 +498,8 @@ function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderDa
         if (instance.success) {
             return {
                 ...instance,
-                antigravityModelAvailability: instance.antigravityModelAvailability
-                    || cachedByUuid.get(instance.uuid)?.antigravityModelAvailability
+                antigravityModelStatus: instance.antigravityModelStatus
+                    || cachedByUuid.get(instance.uuid)?.antigravityModelStatus
                     || null,
                 lastRefreshError: null
             };
@@ -521,7 +521,7 @@ function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderDa
             codexEmail: instance.codexEmail || cachedInstance.codexEmail || null,
             codexQuotaHealth: instance.codexQuotaHealth || cachedInstance.codexQuotaHealth || null,
             antigravityQuotaHealth: instance.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null,
-            antigravityModelAvailability: instance.antigravityModelAvailability || cachedInstance.antigravityModelAvailability || null,
+            antigravityModelStatus: instance.antigravityModelStatus || cachedInstance.antigravityModelStatus || null,
             configFilePath: instance.configFilePath || cachedInstance.configFilePath || null,
             isHealthy: instance.isHealthy,
             isDisabled: instance.isDisabled,
@@ -582,7 +582,7 @@ function getCachedInstanceUsageFallback(providerType, uuid, instanceResult, cach
         codexEmail: instanceResult.codexEmail || cachedInstance.codexEmail || null,
         codexQuotaHealth: instanceResult.codexQuotaHealth || cachedInstance.codexQuotaHealth || null,
         antigravityQuotaHealth: instanceResult.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null,
-        antigravityModelAvailability: instanceResult.antigravityModelAvailability || cachedInstance.antigravityModelAvailability || null,
+        antigravityModelStatus: instanceResult.antigravityModelStatus || cachedInstance.antigravityModelStatus || null,
         configFilePath: instanceResult.configFilePath || cachedInstance.configFilePath || null,
         isHealthy: instanceResult.isHealthy,
         isDisabled: instanceResult.isDisabled,
@@ -638,7 +638,7 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
             codexEmail: getProviderCodexEmail(provider),
             codexQuotaHealth: provider.codexQuotaHealth || null,
             antigravityQuotaHealth: provider.antigravityQuotaHealth || null,
-            antigravityModelAvailability: provider.antigravityModelAvailability || null,
+            antigravityModelStatus: provider.antigravityModelStatus || null,
             configFilePath: getProviderConfigFilePath(provider, providerType),
             isHealthy: provider.isHealthy !== false,
             isDisabled: provider.isDisabled === true,
@@ -776,7 +776,7 @@ function enrichProviderDataWithProviderConfig(providerType, providerData, curren
             codexEmail: instance.codexEmail || getProviderCodexEmail(provider),
             codexQuotaHealth: instance.codexQuotaHealth || provider.codexQuotaHealth || null,
             antigravityQuotaHealth: instance.antigravityQuotaHealth || provider.antigravityQuotaHealth || null,
-            antigravityModelAvailability: instance.antigravityModelAvailability || provider.antigravityModelAvailability || null,
+            antigravityModelStatus: instance.antigravityModelStatus || provider.antigravityModelStatus || null,
             configFilePath: instance.configFilePath || getProviderConfigFilePath(provider, providerType),
             isHealthy: provider.isHealthy !== false,
             isDisabled: provider.isDisabled === true
@@ -844,7 +844,7 @@ async function resolveProviderInstance(currentConfig, providerPoolManager, provi
         codexEmail: getProviderCodexEmail(provider),
         codexQuotaHealth: provider.codexQuotaHealth || null,
         antigravityQuotaHealth: provider.antigravityQuotaHealth || null,
-        antigravityModelAvailability: provider.antigravityModelAvailability || null,
+        antigravityModelStatus: provider.antigravityModelStatus || null,
         configFilePath: getProviderConfigFilePath(provider, providerType),
         isHealthy: provider.isHealthy !== false,
         isDisabled: provider.isDisabled === true,
@@ -1072,11 +1072,11 @@ export async function handleGetSingleInstanceUsage(req, res, currentConfig, prov
     }
 }
 
-export async function handlePostAntigravityModelAvailability(req, res, currentConfig, providerPoolManager, providerType, uuid) {
+export async function handlePostAntigravityModelStatusCheck(req, res, currentConfig, providerPoolManager, providerType, uuid) {
     try {
         if (providerType !== MODEL_PROVIDER.ANTIGRAVITY) {
             sendJson(res, 400, {
-                error: { message: 'Model availability checks are only supported for gemini-antigravity credentials' }
+                error: { message: 'Model status checks are only supported for gemini-antigravity credentials' }
             });
             return true;
         }
@@ -1093,31 +1093,37 @@ export async function handlePostAntigravityModelAvailability(req, res, currentCo
             return true;
         }
 
-        const availability = await probeAntigravityModelAvailability({
+        const modelStatus = await probeAntigravityModelAvailability({
             adapter,
             quotaHealth: provider.antigravityQuotaHealth || null
         });
+        const cachedUsage = await readUsageCache({ maxAgeMs: null, allowStale: true });
+        const cachedInstance = cachedUsage?.providers?.[providerType]?.instances
+            ?.find(instance => instance?.uuid === uuid);
         const refreshedInstanceResult = {
+            ...(cachedInstance || {}),
             ...baseInstanceResult,
+            usage: cachedInstance?.usage || baseInstanceResult.usage || null,
             success: true,
             error: null,
             antigravityQuotaHealth: provider.antigravityQuotaHealth || null,
-            antigravityModelAvailability: availability
+            antigravityModelStatus: modelStatus
         };
         await updateSingleInstanceInCache(providerType, uuid, refreshedInstanceResult);
 
         sendJson(res, 200, {
             success: true,
             uuid,
-            availability,
+            modelStatus,
+            instance: refreshedInstanceResult,
             serverTime: new Date().toISOString()
         });
         return true;
     } catch (error) {
-        logger.error(`[UI API] Failed to check Antigravity model availability for ${providerType}:${uuid}:`, error);
+        logger.error(`[UI API] Failed to check Antigravity model status for ${providerType}:${uuid}:`, error);
         sendJson(res, 500, {
             error: {
-                message: `Failed to check model availability for ${providerType}:${uuid}: ${error.message}`
+                message: `Failed to check model status for ${providerType}:${uuid}: ${error.message}`
             }
         });
         return true;

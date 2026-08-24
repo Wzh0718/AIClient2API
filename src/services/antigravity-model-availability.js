@@ -32,7 +32,10 @@ export function classifyAntigravityProbeError(error) {
         status,
         httpStatus,
         message: safeErrorMessage(httpStatus),
-        scheduledRecoveryTime: error?.scheduledRecoveryTime || error?.recoveryTime || null
+        scheduledRecoveryTime: error?.scheduledRecoveryTime
+            || error?.nextRecoveryTime
+            || error?.recoveryTime
+            || null
     };
 }
 
@@ -76,13 +79,13 @@ export async function probeAntigravityModelAvailability({
     const models = (listed?.models || [])
         .map(normalizeModelName)
         .filter(model => model && !seen.has(model) && seen.add(model));
-    const results = [];
+    const unavailableResults = [];
 
     for (const model of models) {
         const startedAt = Date.now();
         const cooldown = quotaHealth?.models?.[model];
         if (isActiveCooldown(cooldown, now)) {
-            results.push({
+            unavailableResults.push({
                 model,
                 status: 'cooldown',
                 httpStatus: 429,
@@ -95,16 +98,8 @@ export async function probeAntigravityModelAvailability({
 
         try {
             await adapter.generateContent(model, createProbeRequest(model));
-            results.push({
-                model,
-                status: 'available',
-                httpStatus: 200,
-                latencyMs: Date.now() - startedAt,
-                message: null,
-                scheduledRecoveryTime: null
-            });
         } catch (error) {
-            results.push({
+            unavailableResults.push({
                 model,
                 latencyMs: Date.now() - startedAt,
                 ...classifyAntigravityProbeError(error)
@@ -113,14 +108,10 @@ export async function probeAntigravityModelAvailability({
         await wait(delayMs);
     }
 
-    const availableModels = results.filter(result => result.status === 'available').length;
     return {
         checkedAt: new Date().toISOString(),
-        totalModels: results.length,
-        availableModels,
-        availabilityPercent: results.length > 0
-            ? Number(((availableModels / results.length) * 100).toFixed(1))
-            : 0,
-        models: results
+        checkedModels: models.length,
+        unavailableModels: unavailableResults.length,
+        models: unavailableResults
     };
 }

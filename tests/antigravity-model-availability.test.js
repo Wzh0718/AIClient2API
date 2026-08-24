@@ -44,19 +44,17 @@ describe('Antigravity model availability probe', () => {
         expect(maxActive).toBe(1);
         expect(adapter.generateContent).toHaveBeenCalledTimes(2);
         expect(result).toMatchObject({
-            totalModels: 3,
-            availableModels: 2,
-            availabilityPercent: 66.7
+            checkedModels: 3,
+            unavailableModels: 1
         });
         expect(result.models).toEqual([
-            expect.objectContaining({ model: 'gemini-3-flash', status: 'available' }),
             expect.objectContaining({
                 model: 'gemini-2.5-flash',
                 status: 'cooldown',
                 scheduledRecoveryTime: recoveryTime
-            }),
-            expect.objectContaining({ model: 'gemini-3.1-pro-high', status: 'available' })
+            })
         ]);
+        expect(result).not.toHaveProperty('availabilityPercent');
     });
 
     test('classifies temporary capacity and model errors without exposing response bodies', () => {
@@ -78,11 +76,11 @@ describe('Antigravity model availability probe', () => {
         }));
     });
 
-    test('records a 429 as cooldown with the supplied recovery time', async () => {
+    test('records a 429 as cooldown with the recovery time produced by routing', async () => {
         const recoveryTime = '2026-08-24T06:23:59.000Z';
         const error = Object.assign(new Error('quota exhausted'), {
             response: { status: 429 },
-            scheduledRecoveryTime: recoveryTime
+            nextRecoveryTime: recoveryTime
         });
         const adapter = {
             listModels: jest.fn().mockResolvedValue({ models: [{ name: 'gemini-3-flash' }] }),
@@ -91,7 +89,7 @@ describe('Antigravity model availability probe', () => {
 
         const result = await probeAntigravityModelAvailability({ adapter, delayMs: 0 });
 
-        expect(result.availableModels).toBe(0);
+        expect(result.unavailableModels).toBe(1);
         expect(result.models[0]).toEqual(expect.objectContaining({
             model: 'gemini-3-flash',
             status: 'cooldown',

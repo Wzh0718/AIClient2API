@@ -358,11 +358,11 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         return await usageApi.handleResetSingleInstanceUsage(req, res, currentConfig, providerPoolManager, providerType, providerUuid);
     }
 
-    const antigravityModelAvailabilityMatch = pathParam.match(/^\/api\/usage\/(gemini-antigravity)\/([^\/]+)\/model-availability$/);
-    if (method === 'POST' && antigravityModelAvailabilityMatch) {
-        const providerType = decodeURIComponent(antigravityModelAvailabilityMatch[1]);
-        const providerUuid = decodeURIComponent(antigravityModelAvailabilityMatch[2]);
-        return await usageApi.handlePostAntigravityModelAvailability(
+    const antigravityModelStatusMatch = pathParam.match(/^\/api\/usage\/(gemini-antigravity)\/([^\/]+)\/model-status-check$/);
+    if (method === 'POST' && antigravityModelStatusMatch) {
+        const providerType = decodeURIComponent(antigravityModelStatusMatch[1]);
+        const providerUuid = decodeURIComponent(antigravityModelStatusMatch[2]);
+        return await usageApi.handlePostAntigravityModelStatusCheck(
             req,
             res,
             currentConfig,

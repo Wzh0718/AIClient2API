@@ -8,8 +8,8 @@ describe('Antigravity model availability API wiring', () => {
     test('registers a credential-scoped POST route', () => {
         const source = readSource('src/services/ui-manager.js');
 
-        expect(source).toContain('/model-availability');
-        expect(source).toContain('handlePostAntigravityModelAvailability');
+        expect(source).toContain('/model-status-check');
+        expect(source).toContain('handlePostAntigravityModelStatusCheck');
     });
 
     test('probes only Antigravity credentials and updates the single-instance cache', () => {
@@ -17,13 +17,13 @@ describe('Antigravity model availability API wiring', () => {
 
         expect(source).toContain("probeAntigravityModelAvailability");
         expect(source).toContain("providerType !== MODEL_PROVIDER.ANTIGRAVITY");
-        expect(source).toContain('antigravityModelAvailability: availability');
+        expect(source).toContain('antigravityModelStatus: modelStatus');
         expect(source).toContain('await updateSingleInstanceInCache(providerType, uuid, refreshedInstanceResult)');
     });
 
     test('preserves the latest availability scan through usage cache fallback', () => {
         const source = readSource('src/ui-modules/usage-cache.js');
 
-        expect(source).toContain('antigravityModelAvailability: incomingInstance.antigravityModelAvailability || cachedInstance.antigravityModelAvailability || null');
+        expect(source).toContain('antigravityModelStatus: incomingInstance.antigravityModelStatus || cachedInstance.antigravityModelStatus || null');
     });
 });
