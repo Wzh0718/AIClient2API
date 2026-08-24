@@ -106,4 +106,25 @@ describe('usage refresh request', () => {
         });
         expect(globalThis.getUsageCacheAutoRefreshStatus).toHaveBeenCalledTimes(1);
     });
+
+    test('opening the usage page never queries providers when no cache exists', async () => {
+        readUsageDisplayCache.mockResolvedValueOnce(null);
+        const req = { url: '/api/usage', headers: { host: 'localhost' } };
+        const res = createResponse();
+
+        const outcome = await Promise.race([
+            handleGetUsage(req, res, {}, { providerPools: {} }).then(() => 'completed'),
+            new Promise(resolve => setTimeout(() => resolve('timed_out'), 50))
+        ]);
+
+        expect(outcome).toBe('completed');
+        expect(res.statusCode).toBe(200);
+        expect(JSON.parse(res.body)).toMatchObject({
+            fromCache: true,
+            providers: {}
+        });
+        expect(readUsageDisplayCache).toHaveBeenCalledWith({ maxAgeMs: null, allowStale: true });
+        expect(usageService.getFormattedUsage).not.toHaveBeenCalled();
+        expect(readUsageCache).not.toHaveBeenCalled();
+    });
 });

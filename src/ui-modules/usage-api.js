@@ -427,6 +427,7 @@ function recalculateProviderUsageCounts(providerData) {
 
 function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderData = {}, cachedProviderData = {}, cachedAt = null) {
     const refreshErrors = [];
+    const cachedSuccessfulAt = cachedProviderData?.lastSuccessfulRefreshAt || cachedAt || null;
     if (freshProviderData.error && cachedProviderData?.instances?.length) {
         refreshErrors.push({
             providerType,
@@ -441,7 +442,8 @@ function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderDa
                 fromCache: true,
                 stale: true,
                 lastRefreshError: freshProviderData.error,
-                lastSuccessfulUsageAt: cachedAt
+                lastSuccessfulUsageAt: cachedSuccessfulAt,
+                lastSuccessfulRefreshAt: cachedSuccessfulAt
             },
             refreshErrors
         };
@@ -479,13 +481,18 @@ function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderDa
             error: null,
             staleUsage: true,
             lastRefreshError: instance.error,
-            lastSuccessfulUsageAt: cachedAt
+            lastSuccessfulUsageAt: cachedSuccessfulAt
         };
     });
+
+    const lastSuccessfulRefreshAt = refreshErrors.length === 0
+        ? freshProviderData.lastSuccessfulRefreshAt || null
+        : cachedSuccessfulAt;
 
     return {
         providerData: recalculateProviderUsageCounts({
             ...freshProviderData,
+            lastSuccessfulRefreshAt,
             instances,
             refreshErrors
         }),
@@ -649,6 +656,9 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
 
     result.successCount = result.instances.filter(instance => instance.success).length;
     result.errorCount = result.instances.filter(instance => !instance.success && !instance.skipped).length;
+    if (result.errorCount === 0) {
+        result.lastSuccessfulRefreshAt = new Date().toISOString();
+    }
 
     return result;
 }
@@ -907,19 +917,21 @@ export async function handleGetUsage(req, res, currentConfig, providerPoolManage
                 );
             }
         } else {
-            // 优先读取缓存
-            const cachedData = await measureUsagePhase(timings, 'readDisplayMs', () => readUsageDisplayCache());
-            if (cachedData) {
-                logger.debug('[Usage API] Returning cached usage data');
-                usageResults = {
-                    ...cachedData,
-                    fromCache: true,
-                    refreshPending: isUsageRefreshPending()
-                };
-                await measureUsagePhase(timings, 'enrichMs', () =>
-                    enrichUsageResultsWithProviderConfig(usageResults, currentConfig, providerPoolManager)
-                );
-            }
+            // 页面读取永远只展示最后已知缓存，不因进入页面触发上游额度查询。
+            const cachedData = await measureUsagePhase(timings, 'readDisplayMs', () =>
+                readUsageDisplayCache({ maxAgeMs: null, allowStale: true })
+            );
+            logger.debug(cachedData
+                ? '[Usage API] Returning cached usage data'
+                : '[Usage API] No cached usage data available');
+            usageResults = {
+                ...(cachedData || { timestamp: null, providers: {} }),
+                fromCache: true,
+                refreshPending: isUsageRefreshPending()
+            };
+            await measureUsagePhase(timings, 'enrichMs', () =>
+                enrichUsageResultsWithProviderConfig(usageResults, currentConfig, providerPoolManager)
+            );
         }
 
         if (!usageResults) {

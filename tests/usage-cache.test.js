@@ -160,4 +160,32 @@ describe('usage cache TTL', () => {
         expect(cache.providers['openai-codex-oauth'].successCount).toBe(1);
         expect(cache.providers['openai-codex-oauth'].errorCount).toBe(0);
     });
+
+    test('provider refresh stores an independent last successful refresh time', async () => {
+        writeCache({
+            timestamp: '2026-06-16T11:50:00.000Z',
+            providers: {
+                'gemini-antigravity': {
+                    providerType: 'gemini-antigravity',
+                    lastSuccessfulRefreshAt: '2026-06-16T10:00:00.000Z',
+                    instances: []
+                },
+                'openai-codex-oauth': {
+                    providerType: 'openai-codex-oauth',
+                    lastSuccessfulRefreshAt: '2026-06-16T11:00:00.000Z',
+                    instances: []
+                }
+            }
+        });
+
+        const { updateProviderUsageCache, readUsageCache } = await loadUsageCacheModule();
+        await updateProviderUsageCache('gemini-antigravity', {
+            providerType: 'gemini-antigravity',
+            instances: []
+        }, '2026-06-16T12:00:00.000Z');
+
+        const cache = await readUsageCache({ maxAgeMs: null });
+        expect(cache.providers['gemini-antigravity'].lastSuccessfulRefreshAt).toBe('2026-06-16T12:00:00.000Z');
+        expect(cache.providers['openai-codex-oauth'].lastSuccessfulRefreshAt).toBe('2026-06-16T11:00:00.000Z');
+    });
 });

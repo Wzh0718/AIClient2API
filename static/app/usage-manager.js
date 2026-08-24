@@ -876,7 +876,7 @@ function updateSingleProviderGroup(providerType, providerData) {
         return;
     }
 
-    const newGroup = createProviderGroup(providerType, instances);
+    const newGroup = createProviderGroup(providerType, { ...providerData, instances });
     if (existingGroup) {
         // 保留展开/折叠状态
         if (!existingGroup.classList.contains('collapsed')) {
@@ -898,16 +898,6 @@ function updateTimeInfo(data) {
         const el = document.getElementById('serverTimeValue');
         if (el) el.textContent = new Date(data.serverTime).toLocaleString(getCurrentLanguage());
     }
-    
-    const lastUpdateEl = document.getElementById('usageLastUpdate');
-    if (lastUpdateEl) {
-        const timeStr = new Date(data.timestamp || Date.now()).toLocaleString(getCurrentLanguage());
-        const key = data.fromCache ? 'usage.lastUpdateCache' : 'usage.lastUpdate';
-        lastUpdateEl.textContent = t(key, { time: timeStr });
-        // 恢复国际化属性以便动态切换语言
-        lastUpdateEl.setAttribute('data-i18n', key);
-        lastUpdateEl.setAttribute('data-i18n-params', JSON.stringify({ time: timeStr }));
-    }
 }
 
 /**
@@ -922,28 +912,35 @@ function renderUsageData(data, container) {
         return;
     }
 
-    const groupedInstances = {};
+    const groupedProviders = {};
     for (const [type, pData] of Object.entries(data.providers)) {
         if (currentProviderConfigs?.find(c => c.id === type)?.visible === false) continue;
         const valid = (pData.instances || []).filter(i => !i.isDisabled && !i.error?.includes('not initialized'));
-        if (valid.length > 0) groupedInstances[type] = valid;
+        if (valid.length > 0) groupedProviders[type] = { ...pData, instances: valid };
     }
 
-    const displayOrder = currentProviderConfigs ? currentProviderConfigs.map(c => c.id) : Object.keys(groupedInstances);
+    const displayOrder = currentProviderConfigs ? currentProviderConfigs.map(c => c.id) : Object.keys(groupedProviders);
     displayOrder.forEach(type => {
-        if (groupedInstances[type]) container.appendChild(createProviderGroup(type, groupedInstances[type]));
+        if (groupedProviders[type]) container.appendChild(createProviderGroup(type, groupedProviders[type]));
     });
 }
 
 /**
  * 创建分组
  */
-function createProviderGroup(providerType, instances) {
+function createProviderGroup(providerType, providerData) {
     const group = document.createElement('div');
     group.className = 'usage-provider-group collapsed';
     group.setAttribute('data-provider', providerType);
-    
+
+    const instances = providerData.instances || [];
     const successCount = instances.filter(i => i.success).length;
+    const refreshedAt = providerData.lastSuccessfulRefreshAt;
+    const refreshedDate = refreshedAt ? new Date(refreshedAt) : null;
+    const hasValidRefreshTime = refreshedDate && Number.isFinite(refreshedDate.getTime());
+    const refreshTimeText = hasValidRefreshTime
+        ? t('usage.group.lastUpdated', { time: refreshedDate.toLocaleString(getCurrentLanguage()) })
+        : t('usage.group.neverUpdated');
     const poolAlert = renderAntigravityPoolAlert(providerType, instances);
     if (poolAlert) group.classList.add('has-pool-alert');
     group.innerHTML = `
@@ -957,6 +954,7 @@ function createProviderGroup(providerType, instances) {
                 <span class="success-count ${successCount === instances.length ? 'all-success' : ''}">${t('usage.group.success', { count: successCount, total: instances.length })}</span>
             </div>
             <div class="usage-group-actions">
+                <span class="provider-last-update" title="${escapeHtml(refreshTimeText)}">${escapeHtml(refreshTimeText)}</span>
                 <button class="btn-refresh-provider" type="button"></button>
                 <button class="btn-toggle-cards" type="button" aria-label="${t('usage.group.expandAll')}" title="${t('usage.group.expandAll')}"><i class="fas fa-expand-alt" aria-hidden="true"></i></button>
             </div>

@@ -160,4 +160,15 @@ describe('usage refresh feedback', () => {
         expect(css).toMatch(/@media \(max-width: 520px\)[\s\S]*\.btn-refresh-provider\s*\{[^}]*min-height:\s*44px;/s);
         expect(css).toMatch(/@media \(max-width: 520px\)[\s\S]*\.btn-refresh-provider \.button-label\s*\{[^}]*display:\s*none;/s);
     });
+
+    test('shows last successful refresh time per provider instead of globally', () => {
+        const html = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.html'), 'utf8').replace(/\r\n/g, '\n');
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+        const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(html).not.toContain('id="usageLastUpdate"');
+        expect(source).toContain('providerData.lastSuccessfulRefreshAt');
+        expect(source).toContain('class="provider-last-update"');
+        expect(css).toContain('.provider-last-update');
+    });
 });

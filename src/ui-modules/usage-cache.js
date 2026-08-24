@@ -7,7 +7,7 @@ import path from 'path';
 // 用量缓存文件路径
 const USAGE_CACHE_FILE = path.join(process.cwd(), 'configs', 'usage-cache.json');
 const USAGE_DISPLAY_CACHE_FILE = path.join(process.cwd(), 'configs', 'usage-display-cache.json');
-const USAGE_DISPLAY_CACHE_SCHEMA_VERSION = 1;
+const USAGE_DISPLAY_CACHE_SCHEMA_VERSION = 2;
 export const DEFAULT_USAGE_CACHE_TTL_MS = 60 * 60 * 1000;
 
 let inMemoryDisplayCache = null;
@@ -17,6 +17,7 @@ export function buildUsageDisplaySnapshot(usageData = {}) {
     for (const [providerType, providerData] of Object.entries(usageData.providers || {})) {
         providers[providerType] = {
             ...providerData,
+            lastSuccessfulRefreshAt: providerData?.lastSuccessfulRefreshAt || usageData?.timestamp || null,
             instances: Array.isArray(providerData?.instances)
                 ? providerData.instances.map(instance => {
                     if (!instance?.usage || typeof instance.usage !== 'object') return { ...instance };
@@ -82,6 +83,7 @@ function mergeInstanceWithLastSuccessfulUsage(incomingInstance, cachedByUuid, ca
 }
 
 function mergeProviderWithLastSuccessfulUsage(providerType, incomingProviderData = {}, cachedProviderData = {}, cachedAt) {
+    const cachedSuccessfulAt = cachedProviderData?.lastSuccessfulRefreshAt || cachedAt || null;
     if (incomingProviderData.error && Array.isArray(cachedProviderData?.instances) && cachedProviderData.instances.length > 0) {
         return {
             ...cachedProviderData,
@@ -89,7 +91,8 @@ function mergeProviderWithLastSuccessfulUsage(providerType, incomingProviderData
             fromCache: true,
             stale: true,
             lastRefreshError: incomingProviderData.error,
-            lastSuccessfulUsageAt: cachedAt || null
+            lastSuccessfulUsageAt: cachedSuccessfulAt,
+            lastSuccessfulRefreshAt: cachedSuccessfulAt
         };
     }
 
@@ -99,11 +102,12 @@ function mergeProviderWithLastSuccessfulUsage(providerType, incomingProviderData
 
     const cachedByUuid = getCachedInstancesByUuid(cachedProviderData);
     const instances = incomingProviderData.instances.map(instance =>
-        mergeInstanceWithLastSuccessfulUsage(instance, cachedByUuid, cachedAt)
+        mergeInstanceWithLastSuccessfulUsage(instance, cachedByUuid, cachedSuccessfulAt)
     );
 
     return recalculateProviderCounts({
         ...incomingProviderData,
+        lastSuccessfulRefreshAt: incomingProviderData.lastSuccessfulRefreshAt || cachedSuccessfulAt,
         instances
     });
 }
@@ -270,7 +274,7 @@ export async function readProviderUsageCache(providerType, options = {}) {
  * @param {string} providerType - 提供商类型
  * @param {Object} usageData - 用量数据
  */
-export async function updateProviderUsageCache(providerType, usageData) {
+export async function updateProviderUsageCache(providerType, usageData, refreshedAt = null) {
     let cache = await readUsageCache({ maxAgeMs: null });
     if (!cache) {
         cache = {
@@ -278,7 +282,10 @@ export async function updateProviderUsageCache(providerType, usageData) {
             providers: {}
         };
     }
-    cache.providers[providerType] = usageData;
+    cache.providers[providerType] = {
+        ...usageData,
+        lastSuccessfulRefreshAt: refreshedAt || usageData?.lastSuccessfulRefreshAt || new Date().toISOString()
+    };
     cache.timestamp = new Date().toISOString();
     await writeUsageCache(cache);
 }
