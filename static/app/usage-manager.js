@@ -610,43 +610,24 @@ function renderAntigravityQuotaHealthBadges(instance, providerType) {
 function renderAntigravityUnavailableModels(instance, providerType) {
     if (providerType !== 'gemini-antigravity') return null;
 
-    const modelStatus = instance.antigravityModelStatus;
-    const quotaModels = instance.antigravityQuotaHealth?.models || {};
-    const modelsByName = new Map(
-        (Array.isArray(modelStatus?.models) ? modelStatus.models : [])
-            .filter(model => model?.model)
-            .map(model => [model.model, model])
-    );
-    Object.entries(quotaModels)
+    const models = Object.entries(instance.antigravityQuotaHealth?.models || {})
         .filter(([, state]) => state?.isHealthy === false)
-        .forEach(([model, state]) => {
-            modelsByName.set(model, {
-                model,
-                status: 'cooldown',
-                message: state.lastErrorMessage,
-                scheduledRecoveryTime: state.scheduledRecoveryTime
-            });
-        });
-    const models = Array.from(modelsByName.values());
+        .map(([model, state]) => ({
+            model,
+            scheduledRecoveryTime: state.scheduledRecoveryTime
+        }));
 
     if (models.length === 0) return null;
 
     const section = document.createElement('div');
     section.className = 'usage-section antigravity-unavailable-models';
-    const statusLabels = {
-        cooldown: t('usage.antigravity.status.cooldown'),
-        capacity: t('usage.antigravity.status.capacity'),
-        unsupported: t('usage.antigravity.status.unsupported'),
-        error: t('usage.antigravity.status.error'),
-        skipped: t('usage.antigravity.status.skipped')
-    };
     const rows = models.map(model => {
         const recovery = model.scheduledRecoveryTime
             ? `<span class="antigravity-model-recovery">${t('usage.antigravity.recoveryAt', { time: formatDate(model.scheduledRecoveryTime) })}</span>`
             : '';
         return `<div class="antigravity-model-status-row">
             <span class="antigravity-model-name">${escapeHtml(model.model)}</span>
-            <span class="antigravity-model-status antigravity-model-status-${escapeHtml(model.status || 'error')}">${escapeHtml(statusLabels[model.status] || model.status || 'error')}</span>
+            <span class="antigravity-model-status antigravity-model-status-cooldown">${t('usage.antigravity.status.cooldown')}</span>
             ${recovery}
         </div>`;
     }).join('');
@@ -655,45 +636,9 @@ function renderAntigravityUnavailableModels(instance, providerType) {
         <div class="antigravity-unavailable-models-header">
             <span><i class="fas fa-triangle-exclamation"></i> ${t('usage.antigravity.unavailableModels')}</span>
         </div>
-        ${modelStatus?.checkedAt ? `<div class="antigravity-model-checked-at">${t('usage.antigravity.checkedAt', { time: formatDate(modelStatus.checkedAt) })}</div>` : ''}
         <div class="antigravity-model-status-list">${rows}</div>
     `;
     return section;
-}
-
-async function checkAntigravityModelStatus(providerType, uuid, displayName, button) {
-    if (providerType !== 'gemini-antigravity') return;
-    if (!window.confirm(t('usage.antigravity.checkConfirm', { name: displayName }))) return;
-
-    const originalHtml = button?.innerHTML;
-    try {
-        if (button) {
-            button.disabled = true;
-            button.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-        }
-        showToast(t('common.info'), t('usage.antigravity.checking', { name: displayName }), 'info');
-        const response = await fetch(`/api/usage/${providerType}/${encodeURIComponent(uuid)}/model-status-check`, {
-            method: 'POST',
-            headers: getAuthHeaders()
-        });
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error?.message || `HTTP ${response.status}`);
-        }
-        const data = await response.json();
-        if (data?.instance?.uuid) updateSingleInstanceCard(providerType, data.instance);
-        showToast(t('common.success'), t('usage.antigravity.checkSuccess', {
-            count: data.modelStatus?.unavailableModels ?? 0
-        }), 'success');
-    } catch (error) {
-        console.error('检测 Antigravity 模型状态失败:', error);
-        showToast(t('common.error'), error.message || t('common.requestFailed'), 'error');
-    } finally {
-        if (button) {
-            button.disabled = false;
-            button.innerHTML = originalHtml;
-        }
-    }
 }
 
 function renderUsageRefreshWarning(instance) {
@@ -961,7 +906,6 @@ function createInstanceUsageCard(instance, providerType) {
                     <div class="instance-status-badges">
                         ${instance.configFilePath ? `<button class="btn-download-config" title="${t('usage.card.downloadConfig')}"><i class="fas fa-download"></i></button>` : ''}
                         <button class="btn-refresh-usage" title="${t('usage.card.refresh')}"><i class="fas fa-sync-alt"></i></button>
-                        ${providerType === 'gemini-antigravity' ? `<button class="btn-check-model-status" title="${t('usage.antigravity.checkModels')}"><i class="fas fa-vial"></i></button>` : ''}
                         ${renderBaseStatusBadge(instance)}
                         ${renderCodexQuotaHealthBadges(instance, providerType)}
                         ${renderAntigravityQuotaHealthBadges(instance, providerType)}
@@ -986,13 +930,6 @@ function createInstanceUsageCard(instance, providerType) {
         e.stopPropagation(); 
         refreshSingleInstanceUsage(providerType, instance.uuid, displayName); 
     };
-    const modelCheckButton = card.querySelector('.btn-check-model-status');
-    if (modelCheckButton) {
-        modelCheckButton.onclick = (e) => {
-            e.stopPropagation();
-            checkAntigravityModelStatus(providerType, instance.uuid, displayName, modelCheckButton);
-        };
-    }
     const contentArea = card.querySelector('.usage-instance-content');
     const refreshWarning = renderUsageRefreshWarning(instance);
     if (refreshWarning) {

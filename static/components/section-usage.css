@@ -397,7 +397,6 @@
     margin-bottom: 0.4rem;
 }
 
-.antigravity-model-checked-at,
 .antigravity-model-recovery {
     color: var(--text-secondary);
     font-size: 0.78rem;
@@ -429,8 +428,7 @@
     font-size: 0.75rem;
 }
 
-.antigravity-model-status-cooldown,
-.antigravity-model-status-error {
+.antigravity-model-status-cooldown {
     background: var(--danger-bg);
     color: var(--danger-text);
 }

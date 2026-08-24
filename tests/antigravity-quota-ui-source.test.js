@@ -18,7 +18,7 @@ describe('Antigravity quota UI source', () => {
         expect(fields).toContain("id: 'antigravityThirdPartyMaxWeeklyPercent'");
     });
 
-    test('usage cards render family health and active model cooldowns separately', () => {
+    test('usage cards render automatic family health and active model cooldowns without manual probes', () => {
         const source = readSource('static/app/usage-manager.js');
 
         expect(source).toContain('function renderAntigravityQuotaHealthBadges(instance, providerType)');
@@ -27,11 +27,13 @@ describe('Antigravity quota UI source', () => {
         expect(source).toContain('Object.entries(quotaHealth.models || {})');
         expect(source).toContain('renderAntigravityQuotaHealthBadges(instance, providerType)');
         expect(source).toContain('renderAntigravityUnavailableModels(instance, providerType)');
-        expect(source).toContain('const modelsByName = new Map');
+        expect(source).toContain("Object.entries(instance.antigravityQuotaHealth?.models || {})");
         expect(source).not.toContain('availability.availabilityPercent');
         expect(source).toContain('scheduledRecoveryTime');
-        expect(source).toContain('checkAntigravityModelStatus(providerType, instance.uuid, displayName, modelCheckButton)');
-        expect(source).toContain('/model-status-check');
+        expect(source).not.toContain('antigravityModelStatus');
+        expect(source).not.toContain('btn-check-model-status');
+        expect(source).not.toContain('checkAntigravityModelStatus');
+        expect(source).not.toContain('/model-status-check');
     });
 
     test('usage API and cache preserve Antigravity quota health', () => {
@@ -42,5 +44,17 @@ describe('Antigravity quota UI source', () => {
         expect(usageApi).toContain('deriveAntigravityQuotaHealthFromUsage');
         expect(usageApi).toContain('syncAntigravityQuotaHealth');
         expect(usageCache).toContain('antigravityQuotaHealth: incomingInstance.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null');
+    });
+
+    test('usage backend no longer exposes or caches manual Antigravity model scans', () => {
+        const uiManager = readSource('src/services/ui-manager.js');
+        const usageApi = readSource('src/ui-modules/usage-api.js');
+        const usageCache = readSource('src/ui-modules/usage-cache.js');
+
+        expect(uiManager).not.toContain('/model-status-check');
+        expect(uiManager).not.toContain('handlePostAntigravityModelStatusCheck');
+        expect(usageApi).not.toContain('probeAntigravityModelAvailability');
+        expect(usageApi).not.toContain('antigravityModelStatus');
+        expect(usageCache).not.toContain('antigravityModelStatus');
     });
 });
