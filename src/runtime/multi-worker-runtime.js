@@ -209,6 +209,64 @@ export function createProviderConfigAckTracker() {
     };
 }
 
+export function buildKeyConfigSyncAck(result) {
+    return {
+        epoch: typeof result?.epoch === 'string' && result.epoch ? result.epoch : null,
+        revision: Number.isInteger(Number(result?.revision)) ? Number(result.revision) : 0,
+        applied: result?.applied === true
+    };
+}
+
+export function isCurrentWorkerInstance(workers, id, child) {
+    return workers?.get(id)?.child === child;
+}
+
+export function createKeyConfigAckTracker() {
+    let currentEpoch = null;
+    let currentRevision = 0;
+    const workerStates = new Map();
+    return {
+        notePublished(epoch, revision, workerIds = []) {
+            const normalizedEpoch = typeof epoch === 'string' && epoch ? epoch : null;
+            const normalizedRevision = Number(revision || 0);
+            if (!normalizedEpoch || !Number.isInteger(normalizedRevision) || normalizedRevision <= 0) return;
+            if (normalizedEpoch !== currentEpoch || normalizedRevision >= currentRevision) {
+                currentEpoch = normalizedEpoch;
+                currentRevision = normalizedRevision;
+            }
+            for (const workerId of workerIds) {
+                if (!workerStates.has(workerId)) workerStates.set(workerId, { epoch: null, revision: 0 });
+            }
+        },
+        acknowledge(workerId, epoch, revision) {
+            if (!workerId) return;
+            const normalizedEpoch = typeof epoch === 'string' && epoch ? epoch : null;
+            const normalizedRevision = Number(revision || 0);
+            if (!normalizedEpoch || !Number.isInteger(normalizedRevision) || normalizedRevision < 0) return;
+            workerStates.set(workerId, { epoch: normalizedEpoch, revision: normalizedRevision });
+        },
+        remove(workerId) {
+            workerStates.delete(workerId);
+        },
+        snapshot(workerIds = []) {
+            const states = {};
+            const pendingWorkers = [];
+            for (const workerId of workerIds) {
+                const state = workerStates.get(workerId) || { epoch: null, revision: 0 };
+                states[workerId] = { ...state };
+                if (state.epoch !== currentEpoch || state.revision < currentRevision) pendingWorkers.push(workerId);
+            }
+            return {
+                currentEpoch,
+                currentRevision,
+                pendingWorkerCount: pendingWorkers.length,
+                pendingWorkers,
+                workerStates: states
+            };
+        }
+    };
+}
+
 export function startMultiWorkerRuntime({ env = process.env, args = process.argv.slice(2), logger = console } = {}) {
     const topology = resolveWorkerTopology(env);
     const publicPort = Number(env.RUNTIME_PUBLIC_PORT || 3000);
@@ -218,10 +276,10 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
     const workerMetrics = new Map();
     const providerConfigAcks = createProviderConfigAckTracker();
     const rawCaptureConfigAcks = createProviderConfigAckTracker();
-    const potluckRoutingAcks = createProviderConfigAckTracker();
+    const potluckKeyConfigAcks = createKeyConfigAckTracker();
     const latestProviderConfigEvents = new Map();
     let latestRawCaptureConfigEvent = null;
-    let latestPotluckRoutingEvent = null;
+    let latestPotluckKeyConfigEvent = null;
     const ready = new Set();
     let shuttingDown = false;
 
@@ -239,11 +297,16 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
         });
         workers.set(id, { id, role, port, child });
         child.on('message', message => {
+            if (!isCurrentWorkerInstance(workers, id, child)) return;
             if (message?.type === 'ready') {
                 ready.add(id);
                 if (role === 'execution') {
                     providerConfigAcks.acknowledge(id, Number(message.providerConfigRevision || 0));
-                    potluckRoutingAcks.acknowledge(id, Number(message.potluckKeyRoutingRevision || 0));
+                    potluckKeyConfigAcks.acknowledge(
+                        id,
+                        message.potluckKeyConfigEpoch || null,
+                        Number(message.potluckKeyConfigRevision || message.potluckKeyRoutingRevision || 0)
+                    );
                     const replayEvents = [...latestProviderConfigEvents.values()].sort((left, right) => left.revision - right.revision);
                     for (const event of replayEvents) {
                         if (child.connected) child.send({ ...event, targetWorkerId: id });
@@ -252,9 +315,9 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
                         rawCaptureConfigAcks.notePublished(latestRawCaptureConfigEvent.revision, [id]);
                         child.send({ ...latestRawCaptureConfigEvent, targetWorkerId: id });
                     }
-                    if (latestPotluckRoutingEvent && child.connected) {
-                        potluckRoutingAcks.notePublished(latestPotluckRoutingEvent.revision, [id]);
-                        child.send({ ...latestPotluckRoutingEvent, targetWorkerId: id });
+                    if (latestPotluckKeyConfigEvent && child.connected) {
+                        potluckKeyConfigAcks.notePublished(latestPotluckKeyConfigEvent.epoch, latestPotluckKeyConfigEvent.revision, [id]);
+                        child.send({ ...latestPotluckKeyConfigEvent, targetWorkerId: id });
                     }
                 }
                 if (role === 'control') {
@@ -313,20 +376,20 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
                     ...rawCaptureConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id))
                 });
             }
-            if (message?.type === 'potluck_key_routing_sync' && role === 'control') {
-                latestPotluckRoutingEvent = { ...message };
+            if (message?.type === 'potluck_key_config_sync' && role === 'control') {
+                latestPotluckKeyConfigEvent = { ...message };
                 const executionIds = [...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id);
-                potluckRoutingAcks.notePublished(message.revision, executionIds);
+                potluckKeyConfigAcks.notePublished(message.epoch, message.revision, executionIds);
                 for (const worker of workers.values()) {
                     if (worker.role === 'execution' && worker.child.connected) worker.child.send(message);
                 }
             }
-            if (message?.type === 'potluck_key_routing_sync_ack' && role === 'execution') {
-                potluckRoutingAcks.acknowledge(id, message.revision);
+            if (message?.type === 'potluck_key_config_sync_ack' && role === 'execution') {
+                potluckKeyConfigAcks.acknowledge(id, message.epoch, message.revision);
                 const control = workers.get('control-1');
                 if (control?.child.connected) control.child.send({
-                    type: 'potluck_key_routing_sync_status',
-                    ...potluckRoutingAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id))
+                    type: 'potluck_key_config_sync_status',
+                    ...potluckKeyConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id))
                 });
             }
             if (message?.type === 'runtime_metrics' && message.snapshot) {
@@ -338,12 +401,13 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
             }
         });
         child.on('exit', (code, signal) => {
+            if (!isCurrentWorkerInstance(workers, id, child)) return;
             ready.delete(id);
             workers.delete(id);
             workerMetrics.delete(id);
             providerConfigAcks.remove(id);
             rawCaptureConfigAcks.remove(id);
-            potluckRoutingAcks.remove(id);
+            potluckKeyConfigAcks.remove(id);
             if (!shuttingDown) {
                 logger.error?.(`[Runtime] ${id} exited code=${code} signal=${signal}; restarting`);
                 setTimeout(() => spawnWorker(role, index, port), 1000).unref?.();
@@ -375,7 +439,8 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
             persistenceBacklog: metrics.hooks.pending + metrics.hooks.spooled + metrics.hooks.consumerLag,
             providerConfig: providerConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
             rawCapture: rawCaptureConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
-            potluckRouting: potluckRoutingAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
+            potluckKeyConfig: potluckKeyConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
+            potluckRouting: potluckKeyConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
             runtimeHooks: metrics.hooks,
             metrics
         };

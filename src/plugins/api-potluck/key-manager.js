@@ -99,24 +99,41 @@ let currentMaxDirtyAge = DEFAULT_CONFIG.maxDirtyAge;
 let dirtySince = null;
 let mutationVersion = 0;
 let lastPersistedVersion = 0;
-let routingConfigRevision = 0;
+let keyConfigSyncEpoch = null;
+let keyConfigSyncRevision = 0;
 let keyStoreSyncPublisher = null;
+let pendingKeyConfigSync = null;
+let lastPublishedKeyConfigMutationVersion = 0;
+let lastPersistedKeyConfigSnapshot = { version: 0, records: [] };
 let persistPromise = null;
 let retryNotBefore = 0;
 
 const rateManager = new RateManager(60);
 
-export function setKeyStoreSyncPublisher(publisher) {
+export function setKeyStoreSyncPublisher(publisher, options = {}) {
     keyStoreSyncPublisher = typeof publisher === 'function' ? publisher : null;
+    if (typeof options.epoch === 'string' && options.epoch.trim()) {
+        keyConfigSyncEpoch = options.epoch.trim();
+        keyConfigSyncRevision = 0;
+    } else if (keyStoreSyncPublisher && !keyConfigSyncEpoch) {
+        keyConfigSyncEpoch = `control-${process.pid}-${Date.now()}-${crypto.randomUUID()}`;
+    }
 }
 
 export function getKeyRoutingRevision() {
-    return routingConfigRevision;
+    return keyConfigSyncRevision;
 }
 
-function routingSnapshot(keyData) {
+export function getKeyConfigSyncState() {
+    return { epoch: keyConfigSyncEpoch, revision: keyConfigSyncRevision };
+}
+
+function keyConfigSnapshot(keyData) {
     return {
         keyId: keyData.id,
+        name: typeof keyData.name === 'string' ? keyData.name : '',
+        enabled: keyData.enabled !== false,
+        dailyLimit: Math.max(0, toNumber(keyData.dailyLimit)),
         routingMode: keyData.routingMode || 'pool',
         primaryGroupId: keyData.routingMode === 'auto' ? (keyData.primaryGroupId || null) : null,
         fixedCredential: keyData.routingMode === 'fixed' && keyData.fixedCredential ? { ...keyData.fixedCredential } : null,
@@ -124,32 +141,140 @@ function routingSnapshot(keyData) {
     };
 }
 
-function publishRoutingSync(keyIds, reason) {
-    if (!keyStoreSyncPublisher || !Array.isArray(keyIds) || keyIds.length === 0) return;
-    const records = keyIds.map(keyId => keyStore.keys[keyId]).filter(Boolean).map(routingSnapshot);
-    if (records.length === 0) return;
-    const revision = ++routingConfigRevision;
-    keyStoreSyncPublisher({ type: 'potluck_key_routing_sync', revision, reason, records });
+function keyConfigRecordsFromKeys(keys = {}) {
+    return Object.values(keys).map(keyConfigSnapshot);
+}
+
+function publishKeyConfigSync(reason, targetVersion, records) {
+    if (!keyStoreSyncPublisher) return;
+    if (!keyConfigSyncEpoch) {
+        keyConfigSyncEpoch = `control-${process.pid}-${Date.now()}-${crypto.randomUUID()}`;
+    }
+    const revision = ++keyConfigSyncRevision;
+    keyStoreSyncPublisher({
+        type: 'potluck_key_config_sync',
+        epoch: keyConfigSyncEpoch,
+        revision,
+        reason,
+        records: records.map(record => ({
+            ...record,
+            fixedCredential: record.fixedCredential ? { ...record.fixedCredential } : null
+        }))
+    });
+    lastPublishedKeyConfigMutationVersion = Math.max(lastPublishedKeyConfigMutationVersion, Number(targetVersion || 0));
+    if (pendingKeyConfigSync && pendingKeyConfigSync.targetVersion <= lastPublishedKeyConfigMutationVersion) {
+        pendingKeyConfigSync = null;
+    }
+}
+
+function publishPendingKeyConfigIfReady() {
+    if (!pendingKeyConfigSync) return;
+    if (lastPersistedKeyConfigSnapshot.version < pendingKeyConfigSync.targetVersion) return;
+    publishKeyConfigSync(
+        pendingKeyConfigSync.reason,
+        lastPersistedKeyConfigSnapshot.version,
+        lastPersistedKeyConfigSnapshot.records
+    );
+}
+
+function normalizeKeyConfigRecord(record) {
+    if (!record || typeof record !== 'object') return null;
+    const keyId = typeof record.keyId === 'string' ? record.keyId.trim() : '';
+    if (!keyId.startsWith(KEY_PREFIX)) return null;
+    if (typeof record.name !== 'string' || typeof record.enabled !== 'boolean') return null;
+    const dailyLimit = Number(record.dailyLimit);
+    if (!Number.isFinite(dailyLimit) || dailyLimit < 0) return null;
+    try {
+        return {
+            keyId,
+            name: record.name,
+            enabled: record.enabled,
+            dailyLimit,
+            ...normalizeKeyRouting(record, { strict: true })
+        };
+    } catch {
+        return null;
+    }
 }
 
 export function applyKeyStoreSyncEvent(event = {}) {
     ensureLoaded();
+    const epoch = typeof event.epoch === 'string' ? event.epoch.trim() : '';
     const revision = Number(event.revision || 0);
-    if (!Number.isInteger(revision) || revision <= routingConfigRevision) {
-        return { applied: false, revision: routingConfigRevision, stale: true };
+    if (!epoch || !Number.isInteger(revision) || revision <= 0 || !Array.isArray(event.records)) {
+        return {
+            applied: false,
+            epoch: keyConfigSyncEpoch,
+            revision: keyConfigSyncRevision,
+            malformed: true
+        };
     }
-    if (!Array.isArray(event.records)) return { applied: false, revision: routingConfigRevision, malformed: true };
+    if (epoch === keyConfigSyncEpoch && revision <= keyConfigSyncRevision) {
+        return { applied: false, epoch: keyConfigSyncEpoch, revision: keyConfigSyncRevision, stale: true };
+    }
+
+    const normalizedRecords = [];
+    const seenKeyIds = new Set();
     for (const record of event.records) {
-        const keyData = keyStore.keys[record?.keyId];
-        if (!keyData || !record?.keyId) continue;
-        const routingMode = ['pool', 'auto', 'fixed'].includes(record.routingMode) ? record.routingMode : 'pool';
-        keyData.routingMode = routingMode;
-        keyData.primaryGroupId = routingMode === 'auto' ? (record.primaryGroupId || null) : null;
-        keyData.fixedCredential = routingMode === 'fixed' && record.fixedCredential ? { ...record.fixedCredential } : null;
-        if (typeof record.manualLock === 'boolean') keyData.manualLock = record.manualLock;
+        const normalized = normalizeKeyConfigRecord(record);
+        if (!normalized || seenKeyIds.has(normalized.keyId)) {
+            return {
+                applied: false,
+                epoch: keyConfigSyncEpoch,
+                revision: keyConfigSyncRevision,
+                malformed: true
+            };
+        }
+        seenKeyIds.add(normalized.keyId);
+        normalizedRecords.push(normalized);
     }
-    routingConfigRevision = revision;
-    return { applied: true, revision, records: event.records.length };
+
+    const previousKeys = keyStore.keys;
+    const nextKeys = {};
+    for (const record of normalizedRecords) {
+        const existing = previousKeys[record.keyId];
+        const next = existing
+            ? normalizeKeyData({
+                ...existing,
+                id: record.keyId,
+                name: record.name,
+                enabled: record.enabled,
+                dailyLimit: record.dailyLimit,
+                routingMode: record.routingMode,
+                primaryGroupId: record.primaryGroupId,
+                fixedCredential: record.fixedCredential,
+                manualLock: record.manualLock
+            })
+            : normalizeKeyData({
+                id: record.keyId,
+                name: record.name,
+                createdAt: new Date().toISOString(),
+                dailyLimit: record.dailyLimit,
+                todayUsage: 0,
+                totalUsage: 0,
+                lastResetDate: getTodayDateString(),
+                lastUsedAt: null,
+                enabled: record.enabled,
+                routingMode: record.routingMode,
+                primaryGroupId: record.primaryGroupId,
+                fixedCredential: record.fixedCredential,
+                manualLock: record.manualLock,
+                usageHistory: {}
+            });
+        nextKeys[record.keyId] = next;
+    }
+
+    let removed = 0;
+    for (const keyId of Object.keys(previousKeys)) {
+        if (!nextKeys[keyId]) {
+            removed += 1;
+            rateManager.remove(`key:${keyId}`);
+        }
+    }
+    keyStore.keys = nextKeys;
+    keyConfigSyncEpoch = epoch;
+    keyConfigSyncRevision = revision;
+    return { applied: true, epoch, revision, records: normalizedRecords.length, removed };
 }
 
 function createUsageBucket() {
@@ -1530,9 +1655,12 @@ async function persistIfDirty() {
     const dirtySinceAtStart = dirtySince;
     const serializeStartedAt = performance.now();
     let snapshot;
+    let persistedConfigRecords;
     try {
         persistDirtyUsageHistories();
-        snapshot = JSON.stringify(buildMetadataSnapshot());
+        const metadataSnapshot = buildMetadataSnapshot();
+        snapshot = JSON.stringify(metadataSnapshot);
+        persistedConfigRecords = keyConfigRecordsFromKeys(metadataSnapshot.keys);
     } catch (error) {
         retryNotBefore = Date.now() + PERSIST_RETRY_DELAY_MS;
         logger.error('[API Potluck] Usage history or snapshot preparation failed:', error.message);
@@ -1557,6 +1685,12 @@ async function persistIfDirty() {
             await atomicWriteFile(KEYS_STORE_FILE, snapshot, { encoding: 'utf8', mode: 0o600 });
 
             lastPersistedVersion = Math.max(lastPersistedVersion, versionAtStart);
+            if (versionAtStart >= lastPersistedKeyConfigSnapshot.version) {
+                lastPersistedKeyConfigSnapshot = {
+                    version: versionAtStart,
+                    records: persistedConfigRecords
+                };
+            }
             if (mutationVersion === versionAtStart) {
                 dirtyUsageKeys.clear();
                 legacyUsageMigrationPending = false;
@@ -1571,6 +1705,7 @@ async function persistIfDirty() {
                 `heapUsedMiB=${toMiB(memory.heapUsed)}, externalMiB=${toMiB(memory.external)}, rssMiB=${toMiB(memory.rss)}, ` +
                 `dirtyAfterWrite=${mutationVersion !== versionAtStart}`
             );
+            publishPendingKeyConfigIfReady();
             return true;
         } catch (error) {
             isDirty = true;
@@ -1634,6 +1769,23 @@ function attachPersistenceStatus(result, persistencePending) {
 async function buildManagementMutationResult(targetVersion, result) {
     const persisted = await flushPendingChanges({ targetVersion });
     return attachPersistenceStatus(result, !persisted);
+}
+
+function publishPersistedKeyConfig(result, reason, targetVersion) {
+    if (result?.persistencePending === false) {
+        if (lastPublishedKeyConfigMutationVersion < targetVersion
+            && lastPersistedKeyConfigSnapshot.version >= targetVersion) {
+            publishKeyConfigSync(
+                reason,
+                lastPersistedKeyConfigSnapshot.version,
+                lastPersistedKeyConfigSnapshot.records
+            );
+        }
+        return;
+    }
+    if (!pendingKeyConfigSync || targetVersion >= pendingKeyConfigSync.targetVersion) {
+        pendingKeyConfigSync = { reason, targetVersion };
+    }
 }
 
 /**
@@ -1729,6 +1881,7 @@ export async function createKey(name = '', dailyLimit = null) {
     keyStore.keys[apiKey] = keyData;
     const targetVersion = markDirty();
     const result = await buildManagementMutationResult(targetVersion, keyData);
+    publishPersistedKeyConfig(result, 'key-created', targetVersion);
 
     logger.info(`[API Potluck] Created key: ${apiKey.substring(0, 12)}...`);
     return result;
@@ -1813,6 +1966,7 @@ export async function deleteKey(keyId) {
         deleted: true,
         keyId
     });
+    publishPersistedKeyConfig(result, 'key-deleted', targetVersion);
     logger.info(`[API Potluck] Deleted key: ${keyId.substring(0, 12)}...`);
     return result;
 }
@@ -1825,7 +1979,9 @@ export async function updateKeyLimit(keyId, newLimit) {
     if (!keyStore.keys[keyId]) return null;
     keyStore.keys[keyId].dailyLimit = newLimit;
     const targetVersion = markDirty();
-    return buildManagementMutationResult(targetVersion, keyStore.keys[keyId]);
+    const result = await buildManagementMutationResult(targetVersion, keyStore.keys[keyId]);
+    publishPersistedKeyConfig(result, 'key-limit-updated', targetVersion);
+    return result;
 }
 
 /**
@@ -1926,7 +2082,9 @@ export async function toggleKey(keyId) {
     if (!keyStore.keys[keyId]) return null;
     keyStore.keys[keyId].enabled = !keyStore.keys[keyId].enabled;
     const targetVersion = markDirty();
-    return buildManagementMutationResult(targetVersion, keyStore.keys[keyId]);
+    const result = await buildManagementMutationResult(targetVersion, keyStore.keys[keyId]);
+    publishPersistedKeyConfig(result, 'key-enabled-updated', targetVersion);
+    return result;
 }
 
 /**
@@ -1937,7 +2095,9 @@ export async function updateKeyName(keyId, newName) {
     if (!keyStore.keys[keyId]) return null;
     keyStore.keys[keyId].name = newName;
     const targetVersion = markDirty();
-    return buildManagementMutationResult(targetVersion, keyStore.keys[keyId]);
+    const result = await buildManagementMutationResult(targetVersion, keyStore.keys[keyId]);
+    publishPersistedKeyConfig(result, 'key-name-updated', targetVersion);
+    return result;
 }
 
 /**
@@ -1952,7 +2112,7 @@ export async function updateKeyRouting(keyId, routing = {}) {
     Object.assign(keyData, normalizedRouting);
     const targetVersion = markDirty();
     const result = await buildManagementMutationResult(targetVersion, keyData);
-    publishRoutingSync([keyId], 'key-routing-updated');
+    publishPersistedKeyConfig(result, 'key-routing-updated', targetVersion);
     return result;
 }
 
@@ -2028,7 +2188,7 @@ export async function applyKeyRoutingAssignments(assignments) {
 
     const targetVersion = markDirty();
     const result = await buildManagementMutationResult(targetVersion, summary);
-    publishRoutingSync(normalizedAssignments.filter(({ keyId }) => keyStore.keys[keyId] && keyStore.keys[keyId].manualLock !== true).map(({ keyId }) => keyId), 'key-routing-assignments-updated');
+    publishPersistedKeyConfig(result, 'key-routing-assignments-updated', targetVersion);
     return result;
 }
 
@@ -2577,6 +2737,7 @@ export async function applyDailyLimitToAllKeys(newLimit) {
     const result = targetVersion === null
         ? attachPersistenceStatus({ total: keys.length, updated }, false)
         : await buildManagementMutationResult(targetVersion, { total: keys.length, updated });
+    if (updated > 0) publishPersistedKeyConfig(result, 'all-key-limits-updated', targetVersion);
     
     logger.info(`[API Potluck] Applied daily limit ${newLimit} to ${updated}/${keys.length} keys`);
     return result;
@@ -2627,7 +2788,9 @@ export async function validateKey(apiKey) {
         primaryGroupId: updated.primaryGroupId,
         fixedCredential: updated.fixedCredential ? { ...updated.fixedCredential } : null,
         manualLock: updated.manualLock === true,
-        routingConfigRevision
+        configSyncEpoch: keyConfigSyncEpoch,
+        configSyncRevision: keyConfigSyncRevision,
+        routingConfigRevision: keyConfigSyncRevision
     };
     if (updated.dailyLimit > 0 && updated.todayUsage >= updated.dailyLimit) {
         return { valid: false, reason: 'quota_exceeded', keyData: validationKeyData };
@@ -2682,6 +2845,7 @@ export async function regenerateKey(oldKeyId) {
 
     const targetVersion = markDirty();
     const persistence = await buildManagementMutationResult(targetVersion, {});
+    publishPersistedKeyConfig(persistence, 'key-regenerated', targetVersion);
     
     return attachPersistenceStatus({
         oldKey: oldKeyId,

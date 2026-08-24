@@ -24,6 +24,7 @@ import { RuntimeUsageProjector } from '../runtime/runtime-usage-projector.js';
 import { migrateCodexFingerprintProviderPoolsFile } from '../utils/codex-fingerprint-migration.js';
 import { invalidateServiceAdapter } from '../providers/adapter.js';
 import { runtimeImageCapacity } from '../runtime/runtime-image-capacity.js';
+import { buildKeyConfigSyncAck } from '../runtime/multi-worker-runtime.js';
 import { getPricingDiagnostics } from '../plugins/api-potluck/cost-estimator.js';
 import { getTemporaryRouteScheduleDiagnostics } from '../utils/temporary-key-model-routing.js';
 
@@ -445,7 +446,8 @@ async function startServer() {
     const pluginManager = getPluginManager();
     if (!IS_EXECUTION_WORKER && IS_WORKER_PROCESS && process.send) {
         CONFIG._requestAuditRawCaptureEventSink = event => sendToMaster(event);
-        CONFIG._potluckKeyRoutingEventSink = event => sendToMaster(event);
+        CONFIG._potluckKeyConfigEpoch = `${process.env.RUNTIME_DEPLOYMENT_EPOCH || 'default'}:${process.pid}:${Date.now()}`;
+        CONFIG._potluckKeyConfigEventSink = event => sendToMaster(event);
     }
     await pluginManager.initAll(CONFIG);
     if (IS_WORKER_PROCESS && ['execution', 'control'].includes(RUNTIME_WORKER_ROLE)) {
@@ -821,6 +823,10 @@ async function startServer() {
         }
         if (IS_WORKER_PROCESS) {
             const potluckPlugin = getPluginManager()?.getEnabledPlugins?.().find(plugin => plugin.name === 'api-potluck');
+            const potluckKeyConfigState = potluckPlugin?.getKeyConfigSyncState?.() || {
+                epoch: null,
+                revision: potluckPlugin?.getKeyRoutingRevision?.() || 0
+            };
             sendToMaster({ type: 'runtime_metrics', snapshot: buildRuntimeMetricsSnapshot() });
             runtimeMetricsTimerId = setInterval(() => {
                 sendToMaster({ type: 'runtime_metrics', snapshot: buildRuntimeMetricsSnapshot() });
@@ -830,7 +836,9 @@ async function startServer() {
                 type: 'ready',
                 pid: process.pid,
                 providerConfigRevision: getProviderPoolManager()?.providerConfigRevision || 0,
-                potluckKeyRoutingRevision: potluckPlugin?.getKeyRoutingRevision?.() || 0
+                potluckKeyConfigEpoch: potluckKeyConfigState.epoch,
+                potluckKeyConfigRevision: potluckKeyConfigState.revision,
+                potluckKeyRoutingRevision: potluckKeyConfigState.revision
             });
         }
                 finishStartup();
@@ -867,13 +875,18 @@ const shutdownHandlers = registerWorkerShutdownHandlers({
             globalThis.providerConfigSyncStatus = message;
             return true;
         }
-        if (message.type === 'potluck_key_routing_sync' && IS_EXECUTION_WORKER) {
+        if (message.type === 'potluck_key_config_sync' && IS_EXECUTION_WORKER) {
             const plugin = getPluginManager()?.getEnabledPlugins?.().find(candidate => candidate.name === 'api-potluck');
-            const result = plugin?.applyKeyRoutingSync?.(message);
-            sendToMaster({ type: 'potluck_key_routing_sync_ack', revision: result?.revision || message.revision, applied: result?.applied === true });
+            const result = plugin?.applyKeyConfigSync?.(message);
+            const ack = buildKeyConfigSyncAck(result);
+            sendToMaster({
+                type: 'potluck_key_config_sync_ack',
+                ...ack
+            });
             return true;
         }
-        if (message.type === 'potluck_key_routing_sync_status' && RUNTIME_WORKER_ROLE === 'control') {
+        if (message.type === 'potluck_key_config_sync_status' && RUNTIME_WORKER_ROLE === 'control') {
+            globalThis.potluckKeyConfigSyncStatus = message;
             globalThis.potluckKeyRoutingSyncStatus = message;
             return true;
         }
