@@ -1,4 +1,4 @@
-import { runRequestAuditAnalyzer } from '../src/plugins/request-audit/analyzer-runner.js';
+import { createRequestAuditAnalyzerRunner, runRequestAuditAnalyzer } from '../src/plugins/request-audit/analyzer-runner.js';
 import plugin from '../src/plugins/request-audit/index.js';
 
 describe('request audit analyzer runner', () => {
@@ -63,6 +63,28 @@ describe('request audit analyzer runner', () => {
     expect(result).toBe('returned');
     resolveQuery([]);
     await plugin.destroy();
+  });
+
+  test('reports bounded analyzer scan metrics after a completed run', async () => {
+    const auditStore = {
+      query: jest.fn(async () => [event({ requestId: 'low', cachedTokens: 100, prefix: 'changed' })]),
+      getLastQueryStats: jest.fn(() => ({ scannedFiles: 2, scannedBytes: 4096 }))
+    };
+    const analysisStore = { writeDiagnostics: jest.fn() };
+    const runner = createRequestAuditAnalyzerRunner({ auditStore, analysisStore, intervalMs: 60000 });
+
+    await runner.run();
+
+    expect(runner.snapshot()).toMatchObject({
+      runs: 1,
+      failures: 0,
+      active: false,
+      lastRunMs: expect.any(Number),
+      lastScannedFiles: 2,
+      lastScannedBytes: 4096,
+      lastEventCount: 1,
+      lastCompletedAt: expect.any(String)
+    });
   });
 });
 

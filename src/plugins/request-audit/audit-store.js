@@ -17,6 +17,14 @@ function isAuditFile(name) {
     return /^audit-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name);
 }
 
+function auditFileTimeRange(filePath) {
+    const match = path.basename(filePath).match(/^audit-(\d{4}-\d{2}-\d{2})\.jsonl$/);
+    if (!match) return null;
+    const start = Date.parse(`${match[1]}T00:00:00.000Z`);
+    if (!Number.isFinite(start)) return null;
+    return { start, end: start + 24 * 60 * 60 * 1000 };
+}
+
 function archiveTimestamp(value = new Date()) {
     return value.toISOString().replace(/[-:]/g, '').replace('.', '');
 }
@@ -40,6 +48,7 @@ export class RequestAuditStore {
         this.recentEventIdLimit = Math.max(1, Number(recentEventIdLimit) || DEFAULT_RECENT_EVENT_ID_LIMIT);
         this.eventIdTailBytes = Math.max(1024, Number(eventIdTailBytes) || DEFAULT_EVENT_ID_TAIL_BYTES);
         this.eventIdsByFile = new Map();
+        this.lastQueryStats = { scannedFiles: 0, scannedBytes: 0 };
     }
 
     getFilePath(timestamp = new Date()) {
@@ -129,12 +138,14 @@ export class RequestAuditStore {
     async query(filters = {}) {
         const since = toDate(filters.since);
         const until = toDate(filters.until);
-        const files = await this.listFiles();
+        const files = await this.listFiles({ since, until });
         const rows = [];
         const limit = Math.min(Math.max(Number(filters.limit) || 2000, 0), 2000);
+        let scannedBytes = 0;
 
         for (const filePath of files) {
             try {
+                scannedBytes += Number((await fsp.stat(filePath)).size || 0);
                 for await (const event of this.readEvents(filePath)) {
                     if (!this.matches(event, { ...filters, since, until })) continue;
                     rows.push(event);
@@ -145,9 +156,14 @@ export class RequestAuditStore {
             }
             if (limit && rows.length >= limit) break;
         }
+        this.lastQueryStats = { scannedFiles: files.length, scannedBytes };
 
         rows.sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
         return limit ? rows.slice(0, limit) : rows;
+    }
+
+    getLastQueryStats() {
+        return { ...this.lastQueryStats };
     }
 
     async rotateIfNeeded(filePath, incomingBytes = 0) {
@@ -211,12 +227,19 @@ export class RequestAuditStore {
         return true;
     }
 
-    async listFiles() {
+    async listFiles({ since = null, until = null } = {}) {
         if (!fs.existsSync(this.dir)) return [];
         const entries = await fsp.readdir(this.dir, { withFileTypes: true });
         return entries
             .filter(entry => entry.isFile() && isAuditFile(entry.name))
             .map(entry => path.join(this.dir, entry.name))
+            .filter(filePath => {
+                const range = auditFileTimeRange(filePath);
+                if (!range) return true;
+                if (since && range.end <= since.getTime()) return false;
+                if (until && range.start >= until.getTime()) return false;
+                return true;
+            })
             .sort();
     }
 

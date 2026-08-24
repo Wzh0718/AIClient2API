@@ -184,4 +184,36 @@ describe('request audit store', () => {
       fs.promises.readFile = originalReadFile;
     }
   });
+
+  test('opens only audit files whose UTC day overlaps the requested time window', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-window-files-'));
+    const store = new RequestAuditStore({ dir, retentionHours: 24 });
+    const files = [
+      ['audit-2026-08-22.jsonl', '2026-08-22T09:00:00.000Z', 'old'],
+      ['audit-2026-08-23.jsonl', '2026-08-23T23:50:00.000Z', 'first'],
+      ['audit-2026-08-24.jsonl', '2026-08-24T00:10:00.000Z', 'second'],
+      ['audit-2026-08-25.jsonl', '2026-08-25T09:00:00.000Z', 'future']
+    ];
+    for (const [name, timestamp, requestId] of files) {
+      fs.writeFileSync(path.join(dir, name), `${JSON.stringify({ timestamp, requestId })}\n`);
+    }
+
+    const openedFiles = [];
+    const readEvents = store.readEvents.bind(store);
+    store.readEvents = async function* trackedReadEvents(filePath) {
+      openedFiles.push(path.basename(filePath));
+      yield* readEvents(filePath);
+    };
+
+    const rows = await store.query({
+      since: '2026-08-23T23:00:00.000Z',
+      until: '2026-08-24T01:00:00.000Z'
+    });
+
+    expect(openedFiles).toEqual([
+      'audit-2026-08-23.jsonl',
+      'audit-2026-08-24.jsonl'
+    ]);
+    expect(rows.map(row => row.requestId)).toEqual(['first', 'second']);
+  });
 });

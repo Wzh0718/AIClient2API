@@ -47,9 +47,13 @@ RUN printf '%s\n' "$APP_REVISION" > /app/REVISION
 # 复制package.json和package-lock.json（如果存在）
 COPY package*.json ./
 
-# 构建时代理（如果提供了的话）
-RUN npm install || npm install --ignore-scripts
-RUN node -e "import('sharp').then(() => console.log('sharp runtime ok'))"
+# 构建时代理（如果提供了的话）。better-sqlite3 在 Alpine 上可能需要本地编译，
+# 安装失败时不能跳过 lifecycle scripts，否则镜像会构建成功但 control worker 无法启动。
+RUN apk add --no-cache --virtual .native-build-deps python3 make g++ \
+    && npm install \
+    && node -e "require('better-sqlite3')(':memory:').close(); console.log('better-sqlite3 runtime ok')" \
+    && node -e "import('sharp').then(() => console.log('sharp runtime ok'))" \
+    && apk del .native-build-deps
 
 # 复制源代码
 COPY . .

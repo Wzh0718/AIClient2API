@@ -18,7 +18,11 @@ export async function runRequestAuditAnalyzer({
     });
     const diagnostics = buildDiagnostics(events);
     await analysisStore.writeDiagnostics(diagnostics, { generatedAt });
-    return { diagnosticsCount: diagnostics.length };
+    return {
+        diagnosticsCount: diagnostics.length,
+        eventCount: events.length,
+        queryStats: auditStore.getLastQueryStats?.() || { scannedFiles: 0, scannedBytes: 0 }
+    };
 }
 
 export function createRequestAuditAnalyzerRunner({
@@ -32,15 +36,40 @@ export function createRequestAuditAnalyzerRunner({
     let timer = null;
     let activeRun = null;
     let failureCount = 0;
+    const metrics = {
+        runs: 0,
+        failures: 0,
+        skippedRuns: 0,
+        lastRunMs: 0,
+        lastScannedFiles: 0,
+        lastScannedBytes: 0,
+        lastEventCount: 0,
+        lastCompletedAt: null
+    };
 
     const run = () => {
-        if (activeRun) return activeRun;
+        if (activeRun) {
+            metrics.skippedRuns += 1;
+            return activeRun;
+        }
+        const startedAt = performance.now();
         activeRun = runRequestAuditAnalyzer({ auditStore, analysisStore, lookbackMinutes, maxEvents })
+            .then(result => {
+                metrics.runs += 1;
+                metrics.lastScannedFiles = Number(result?.queryStats?.scannedFiles || 0);
+                metrics.lastScannedBytes = Number(result?.queryStats?.scannedBytes || 0);
+                metrics.lastEventCount = Number(result?.eventCount || 0);
+                metrics.lastCompletedAt = new Date().toISOString();
+                return result;
+            })
             .catch(() => {
                 failureCount += 1;
+                metrics.runs += 1;
+                metrics.failures = failureCount;
                 logger.warn('[Request Audit] analyzer failure');
             })
             .finally(() => {
+                metrics.lastRunMs = performance.now() - startedAt;
                 activeRun = null;
             });
         return activeRun;
@@ -63,5 +92,7 @@ export function createRequestAuditAnalyzerRunner({
         return { failureCount };
     };
 
-    return { start, stop, run };
+    const snapshot = () => ({ ...metrics, failures: failureCount, active: Boolean(activeRun) });
+
+    return { start, stop, run, snapshot };
 }

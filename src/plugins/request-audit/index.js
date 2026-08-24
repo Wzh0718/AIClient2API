@@ -470,6 +470,10 @@ const requestAuditPlugin = {
     _builtin: true,
     _priority: 8990,
 
+    getRuntimeMetrics() {
+        return analyzerRunner?.snapshot?.() || null;
+    },
+
     beginUsageProjectionBatch() {
         if (runtimeProjectionBatch) throw new Error('Request audit projection batch is already active');
         runtimeProjectionBatch = [];

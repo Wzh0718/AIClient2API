@@ -235,8 +235,13 @@ const metrics = {
     bytesWritten: 0,
     lastBatchSize: 0,
     lastCommitMs: 0,
-    lastCommittedAt: null
+    lastCommittedAt: null,
+    eventCountLoads: 1,
+    snapshotCount: 0,
+    lastSnapshotMs: 0,
+    maxSnapshotMs: 0
 };
+let eventCount = Number(countEvents.get()?.count || 0);
 
 function getBeijingDateKey(value) {
     const date = new Date(value);
@@ -248,6 +253,7 @@ function appendBatch(events = []) {
     const normalized = events.filter(event => event?.eventId);
     const startedAt = performance.now();
     const { insertedEventIds, payloadBytes } = appendTransaction(normalized);
+    eventCount += insertedEventIds.length;
     const pendingEventIds = normalized
         .filter(event => findPendingRawEvent.get(event.eventId))
         .map(event => event.eventId);
@@ -267,7 +273,7 @@ function appendBatch(events = []) {
 }
 
 function snapshot() {
-    const events = Number(countEvents.get()?.count || 0);
+    const startedAt = performance.now();
     const rawEvents = Number(countRawEvents.get()?.count || 0);
     const pending = Number(countPendingEvents.get()?.count || 0);
     const oldestPendingAt = oldestPendingEvent.get()?.created_at || null;
@@ -291,7 +297,16 @@ function snapshot() {
                 : 0
         };
     }
-    return { ...metrics, events, rawEvents, pending, oldestPendingAt, projections, databaseBytes, dbPath };
+    metrics.snapshotCount += 1;
+    metrics.lastSnapshotMs = performance.now() - startedAt;
+    metrics.maxSnapshotMs = Math.max(metrics.maxSnapshotMs, metrics.lastSnapshotMs);
+    return { ...metrics, events: eventCount, rawEvents, pending, oldestPendingAt, projections, databaseBytes, dbPath };
+}
+
+function prune(before) {
+    const deleted = pruneDedupe.run(before).changes;
+    eventCount = Math.max(0, eventCount - deleted);
+    return { deleted };
 }
 
 function refreshProjectedAt(eventId) {
@@ -343,9 +358,9 @@ parentPort.on('message', message => {
             const eventIds = [...new Set((payload?.eventIds || []).filter(Boolean))];
             result = { updated: markProjectedTransaction(eventIds) };
         }
-        else if (action === 'countEvents') result = Number(countEvents.get()?.count || 0);
+        else if (action === 'countEvents') result = eventCount;
         else if (action === 'snapshot') result = snapshot();
-        else if (action === 'prune') result = { deleted: pruneDedupe.run(payload.before).changes };
+        else if (action === 'prune') result = prune(payload.before);
         else if (action === 'checkpoint') {
             db.pragma('wal_checkpoint(TRUNCATE)');
             result = snapshot();

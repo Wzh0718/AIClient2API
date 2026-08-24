@@ -175,6 +175,18 @@ describe('runtime observability baseline', () => {
                     fallbacks: 0,
                     byModel: {}
                 }
+            },
+            requestAudit: {
+                runs: 0,
+                failures: 0,
+                skippedRuns: 0,
+                lastRunMs: 0,
+                lastScannedFiles: 0,
+                lastScannedBytes: 0,
+                lastEventCount: 0,
+                lastCompletedAt: null,
+                activeWorkers: [],
+                byWorker: {}
             }
         });
         expect(JSON.stringify(aggregateWorkerMetrics(snapshots))).not.toMatch(/prompt|imageData|credential/i);
@@ -266,6 +278,50 @@ describe('runtime observability baseline', () => {
             missingPriceTokens: 50,
             lastEstimatedAt: '2026-08-18T02:00:00.000Z'
         });
+    });
+
+    test('aggregates request audit analyzer cost without exposing audit rows', () => {
+        const snapshots = new Map([
+            ['control-1', { requestAudit: {
+                runs: 4,
+                failures: 1,
+                skippedRuns: 2,
+                active: true,
+                lastRunMs: 120,
+                lastScannedFiles: 2,
+                lastScannedBytes: 4096,
+                lastEventCount: 500,
+                lastCompletedAt: '2026-08-24T09:00:00.000Z'
+            } }],
+            ['execution-1', { requestAudit: {
+                runs: 3,
+                failures: 0,
+                skippedRuns: 0,
+                active: false,
+                lastRunMs: 80,
+                lastScannedFiles: 1,
+                lastScannedBytes: 1024,
+                lastEventCount: 100,
+                lastCompletedAt: '2026-08-24T09:01:00.000Z'
+            } }]
+        ]);
+
+        expect(aggregateWorkerMetrics(snapshots).requestAudit).toEqual({
+            runs: 7,
+            failures: 1,
+            skippedRuns: 2,
+            lastRunMs: 120,
+            lastScannedFiles: 3,
+            lastScannedBytes: 5120,
+            lastEventCount: 600,
+            lastCompletedAt: '2026-08-24T09:01:00.000Z',
+            activeWorkers: ['control-1'],
+            byWorker: {
+                'control-1': snapshots.get('control-1').requestAudit,
+                'execution-1': snapshots.get('execution-1').requestAudit
+            }
+        });
+        expect(JSON.stringify(aggregateWorkerMetrics(snapshots).requestAudit)).not.toMatch(/requestId|prompt|keyHash/i);
     });
 
     test('aggregates local image pressure while taking the maximum shared Redis usage', () => {

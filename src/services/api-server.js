@@ -247,6 +247,12 @@ function getRuntimeHookSnapshot() {
     };
 }
 
+function getRequestAuditMetrics() {
+    const plugin = getPluginManager()?.getEnabledPlugins?.()
+        .find(candidate => candidate.name === 'request-audit');
+    return plugin?.getRuntimeMetrics?.() || null;
+}
+
 function buildRuntimeMetricsSnapshot() {
     return {
         ...runtimeMetrics.snapshot(),
@@ -255,6 +261,7 @@ function buildRuntimeMetricsSnapshot() {
         pricingDiagnostics: getPricingDiagnostics(),
         temporaryRouting: getTemporaryRouteScheduleDiagnostics(),
         providerCoordination: getProviderPoolManager()?.coordination?.getStatus?.() || null,
+        requestAudit: getRequestAuditMetrics(),
         hooks: getRuntimeHookSnapshot()
     };
 }

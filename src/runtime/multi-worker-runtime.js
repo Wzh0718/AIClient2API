@@ -57,6 +57,18 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
                 fallbacks: 0,
                 byModel: {}
             }
+        },
+        requestAudit: {
+            runs: 0,
+            failures: 0,
+            skippedRuns: 0,
+            lastRunMs: 0,
+            lastScannedFiles: 0,
+            lastScannedBytes: 0,
+            lastEventCount: 0,
+            lastCompletedAt: null,
+            activeWorkers: [],
+            byWorker: {}
         }
     };
     for (const [workerId, snapshot] of workerSnapshots.entries()) {
@@ -148,6 +160,21 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
                     aggregate[field] = Math.max(aggregate[field], Number(modelSnapshot?.[field] || 0));
                 }
                 result.providerCoordination.geminiScheduling.byModel[model] = aggregate;
+            }
+        }
+        if (snapshot?.requestAudit) {
+            result.requestAudit.byWorker[workerId] = snapshot.requestAudit;
+            for (const field of ['runs', 'failures', 'skippedRuns', 'lastScannedFiles', 'lastScannedBytes', 'lastEventCount']) {
+                result.requestAudit[field] += Number(snapshot.requestAudit[field] || 0);
+            }
+            result.requestAudit.lastRunMs = Math.max(
+                result.requestAudit.lastRunMs,
+                Number(snapshot.requestAudit.lastRunMs || 0)
+            );
+            if (snapshot.requestAudit.active === true) result.requestAudit.activeWorkers.push(workerId);
+            const completedAt = snapshot.requestAudit.lastCompletedAt;
+            if (completedAt && (!result.requestAudit.lastCompletedAt || completedAt > result.requestAudit.lastCompletedAt)) {
+                result.requestAudit.lastCompletedAt = completedAt;
             }
         }
     }

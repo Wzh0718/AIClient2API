@@ -165,6 +165,30 @@ describe('runtime usage event store', () => {
         expect(snapshot.lastCommitMs).toBeGreaterThanOrEqual(0);
     });
 
+    test('loads the durable event count once and maintains it without rescanning on snapshots', async () => {
+        store = createUsageEventStore({ dbPath: path.join(dir, 'usage.sqlite') });
+        await store.appendBatch([
+            { ...event('cached-old'), createdAt: '2026-06-01T00:00:00.000Z' },
+            { ...event('cached-recent'), createdAt: '2026-08-16T00:00:00.000Z' }
+        ]);
+
+        expect(await store.snapshot()).toMatchObject({
+            events: 2,
+            eventCountLoads: 1,
+            snapshotCount: 1,
+            lastSnapshotMs: expect.any(Number),
+            maxSnapshotMs: expect.any(Number)
+        });
+        expect(await store.snapshot()).toMatchObject({ events: 2, eventCountLoads: 1, snapshotCount: 2 });
+        expect(await store.countEvents()).toBe(2);
+
+        await store.markProjected(['cached-old']);
+        await store.prune({ before: '2026-07-01T00:00:00.000Z' });
+
+        expect(await store.snapshot()).toMatchObject({ events: 1, eventCountLoads: 1 });
+        expect(await store.countEvents()).toBe(1);
+    });
+
     test('prunes only compacted dedupe rows older than retention and never drops pending payloads', async () => {
         store = createUsageEventStore({ dbPath: path.join(dir, 'usage.sqlite') });
         await store.appendBatch([

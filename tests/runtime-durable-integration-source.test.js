@@ -29,6 +29,8 @@ describe('runtime durable hook integration source', () => {
         expect(runtime).toContain("if (message?.type === 'runtime_metrics' && message.snapshot)");
         expect(runtime).toContain('ready.add(id)');
         expect(server).toContain('runtimeHookBridge?.snapshot?.()');
+        expect(server).toContain("candidate.name === 'request-audit'");
+        expect(server).toContain('getRuntimeMetrics?.()');
         expect(server).toContain("await runtimeHookStream?.flushSpool?.()");
         expect(plugins).toContain('configureRuntimeHookBridge');
         expect(server).toContain('runtimeHookStreamStatus = { pending: 0, consumerLag: 0, available: false');
