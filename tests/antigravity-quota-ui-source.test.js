@@ -26,6 +26,12 @@ describe('Antigravity quota UI source', () => {
         expect(source).toContain("renderBadge('Claude+GPT', quotaHealth.families?.thirdParty)");
         expect(source).toContain('Object.entries(quotaHealth.models || {})');
         expect(source).toContain('renderAntigravityQuotaHealthBadges(instance, providerType)');
+        expect(source).toContain('renderAntigravityUnavailableModels(instance, providerType)');
+        expect(source).toContain('const modelsByName = new Map');
+        expect(source).not.toContain('availability.availabilityPercent');
+        expect(source).toContain('scheduledRecoveryTime');
+        expect(source).toContain('checkAntigravityModelStatus(providerType, instance.uuid, displayName, modelCheckButton)');
+        expect(source).toContain('/model-status-check');
     });
 
     test('usage API and cache preserve Antigravity quota health', () => {
