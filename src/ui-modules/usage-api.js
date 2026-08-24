@@ -384,16 +384,7 @@ function deriveCodexQuotaHealthFromUsage(currentHealth, usage, now = Date.now())
     return quotaHealth;
 }
 
-function getAntigravityQuotaThreshold(provider, fieldName) {
-    const rawValue = provider?.[fieldName];
-    if (rawValue === undefined || rawValue === null || rawValue === '') return 100;
-    const value = Number(rawValue);
-    if (!Number.isFinite(value) || value < 0) return 100;
-    if (value === 0) return null;
-    return Math.min(value, 100);
-}
-
-function deriveAntigravityQuotaHealthFromUsage(currentHealth, usage, provider = {}, now = Date.now()) {
+function deriveAntigravityQuotaHealthFromUsage(currentHealth) {
     const quotaHealth = currentHealth && typeof currentHealth === 'object'
         ? {
             families: { ...(currentHealth.families || {}) },
@@ -401,44 +392,8 @@ function deriveAntigravityQuotaHealthFromUsage(currentHealth, usage, provider = 
         }
         : { families: {}, models: {} };
 
-    const familyConfigs = {
-        gemini: {
-            short: ['quota-group:gemini-5h', 'antigravityGeminiMax5hPercent'],
-            weekly: ['quota-group:gemini-weekly', 'antigravityGeminiMaxWeeklyPercent']
-        },
-        thirdParty: {
-            short: ['quota-group:3p-5h', 'antigravityThirdPartyMax5hPercent'],
-            weekly: ['quota-group:3p-weekly', 'antigravityThirdPartyMaxWeeklyPercent']
-        }
-    };
-
-    for (const [family, windows] of Object.entries(familyConfigs)) {
-        const exceeded = [];
-        let observedWindow = false;
-        for (const [windowKind, [itemId, fieldName]] of Object.entries(windows)) {
-            const threshold = getAntigravityQuotaThreshold(provider, fieldName);
-            if (threshold === null) continue;
-            const item = (Array.isArray(usage?.items) ? usage.items : []).find(entry => entry?.id === itemId);
-            const usedPercent = Number(item?.percent ?? item?.used);
-            if (!Number.isFinite(usedPercent)) continue;
-            observedWindow = true;
-            if (usedPercent >= threshold) {
-                exceeded.push({ windowKind, usedPercent, threshold, resetAt: item?.resetAt || null });
-            }
-        }
-
-        if (exceeded.length > 0) {
-            const recoveryTimes = exceeded
-                .map(entry => Date.parse(entry.resetAt || ''))
-                .filter(value => Number.isFinite(value) && value > now);
-            quotaHealth.families[family] = {
-                isHealthy: false,
-                lastErrorTime: quotaHealth.families[family]?.lastErrorTime || new Date(now).toISOString(),
-                lastErrorMessage: exceeded.map(entry => `${entry.windowKind} ${entry.usedPercent.toFixed(1)}%/${entry.threshold}%`).join(', '),
-                scheduledRecoveryTime: recoveryTimes.length > 0 ? new Date(Math.max(...recoveryTimes)).toISOString() : null,
-                source: 'usage_cache'
-            };
-        } else if (observedWindow && quotaHealth.families[family]?.source === 'usage_cache') {
+    for (const [family, familyState] of Object.entries(quotaHealth.families)) {
+        if (familyState?.source === 'usage_cache') {
             delete quotaHealth.families[family];
         }
     }
@@ -681,7 +636,7 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
                 instanceResult.usage = usage;
                 instanceResult.codexQuotaHealth = deriveCodexQuotaHealthFromUsage(instanceResult.codexQuotaHealth, usage);
                 providerPoolManager?.syncCodexQuotaHealth?.(providerType, provider, instanceResult.codexQuotaHealth);
-                instanceResult.antigravityQuotaHealth = deriveAntigravityQuotaHealthFromUsage(instanceResult.antigravityQuotaHealth, usage, provider);
+                instanceResult.antigravityQuotaHealth = deriveAntigravityQuotaHealthFromUsage(instanceResult.antigravityQuotaHealth);
                 providerPoolManager?.syncAntigravityQuotaHealth?.(providerType, provider, instanceResult.antigravityQuotaHealth);
                 providerPoolManager?.syncAntigravityPlan?.(providerType, provider, usage?.summary?.plan);
             } catch (error) {
@@ -804,13 +759,13 @@ function reformatUsageResults(results) {
                     try {
                         instance.usage = usageService.formatUsage(providerType, instance.usage.raw);
                         instance.codexQuotaHealth = deriveCodexQuotaHealthFromUsage(instance.codexQuotaHealth, instance.usage);
-                        instance.antigravityQuotaHealth = deriveAntigravityQuotaHealthFromUsage(instance.antigravityQuotaHealth, instance.usage, instance);
+                        instance.antigravityQuotaHealth = deriveAntigravityQuotaHealthFromUsage(instance.antigravityQuotaHealth);
                     } catch (err) {
                         logger.error(`[Usage API] Failed to re-format cached data for ${providerType}:`, err.message);
                     }
                 } else if (instance.success && instance.usage) {
                     instance.codexQuotaHealth = deriveCodexQuotaHealthFromUsage(instance.codexQuotaHealth, instance.usage);
-                    instance.antigravityQuotaHealth = deriveAntigravityQuotaHealthFromUsage(instance.antigravityQuotaHealth, instance.usage, instance);
+                    instance.antigravityQuotaHealth = deriveAntigravityQuotaHealthFromUsage(instance.antigravityQuotaHealth);
                 }
             }
         }
@@ -1031,7 +986,7 @@ export async function handleGetSingleInstanceUsage(req, res, currentConfig, prov
                 }
                 instanceResult.codexQuotaHealth = deriveCodexQuotaHealthFromUsage(instanceResult.codexQuotaHealth, usage);
                 providerPoolManager?.syncCodexQuotaHealth?.(providerType, provider, instanceResult.codexQuotaHealth);
-                instanceResult.antigravityQuotaHealth = deriveAntigravityQuotaHealthFromUsage(instanceResult.antigravityQuotaHealth, usage, provider);
+                instanceResult.antigravityQuotaHealth = deriveAntigravityQuotaHealthFromUsage(instanceResult.antigravityQuotaHealth);
                 providerPoolManager?.syncAntigravityQuotaHealth?.(providerType, provider, instanceResult.antigravityQuotaHealth);
                 providerPoolManager?.syncAntigravityPlan?.(providerType, provider, usage?.summary?.plan);
             } catch (error) {
