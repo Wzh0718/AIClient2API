@@ -358,6 +358,20 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         return await usageApi.handleResetSingleInstanceUsage(req, res, currentConfig, providerPoolManager, providerType, providerUuid);
     }
 
+    const antigravityModelAvailabilityMatch = pathParam.match(/^\/api\/usage\/(gemini-antigravity)\/([^\/]+)\/model-availability$/);
+    if (method === 'POST' && antigravityModelAvailabilityMatch) {
+        const providerType = decodeURIComponent(antigravityModelAvailabilityMatch[1]);
+        const providerUuid = decodeURIComponent(antigravityModelAvailabilityMatch[2]);
+        return await usageApi.handlePostAntigravityModelAvailability(
+            req,
+            res,
+            currentConfig,
+            providerPoolManager,
+            providerType,
+            providerUuid
+        );
+    }
+
     // Get supported providers for usage query
     if (method === 'GET' && pathParam === '/api/usage/supported-providers') {
         return await usageApi.handleGetSupportedProviders(req, res);

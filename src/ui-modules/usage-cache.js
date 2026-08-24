@@ -53,11 +53,16 @@ function recalculateProviderCounts(providerData = {}) {
 }
 
 function mergeInstanceWithLastSuccessfulUsage(incomingInstance, cachedByUuid, cachedAt) {
+    const cachedInstance = cachedByUuid.get(incomingInstance?.uuid);
     if (incomingInstance?.success || !incomingInstance?.error) {
-        return incomingInstance;
+        return {
+            ...incomingInstance,
+            antigravityModelAvailability: incomingInstance?.antigravityModelAvailability
+                || cachedInstance?.antigravityModelAvailability
+                || null
+        };
     }
 
-    const cachedInstance = cachedByUuid.get(incomingInstance.uuid);
     if (!cachedInstance?.success || !cachedInstance.usage) {
         return incomingInstance;
     }
@@ -70,6 +75,7 @@ function mergeInstanceWithLastSuccessfulUsage(incomingInstance, cachedByUuid, ca
         codexEmail: incomingInstance.codexEmail || cachedInstance.codexEmail || null,
         codexQuotaHealth: incomingInstance.codexQuotaHealth || cachedInstance.codexQuotaHealth || null,
         antigravityQuotaHealth: incomingInstance.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null,
+        antigravityModelAvailability: incomingInstance.antigravityModelAvailability || cachedInstance.antigravityModelAvailability || null,
         configFilePath: incomingInstance.configFilePath || cachedInstance.configFilePath || null,
         isHealthy: incomingInstance.isHealthy,
         isDisabled: incomingInstance.isDisabled,
