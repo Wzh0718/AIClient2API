@@ -1,6 +1,6 @@
 // 用量管理模块
 
-import { showToast, bindOnce, escapeHtml, getBaseProviderConfigs } from './utils.js';
+import { showToast, escapeHtml, getBaseProviderConfigs } from './utils.js';
 import { getAuthHeaders } from './auth.js';
 import { t, getCurrentLanguage } from './i18n.js';
 
@@ -63,6 +63,26 @@ export function setUsageRefreshButtonState(button, refreshing) {
     }
 }
 
+export function buildProviderUsageRefreshUrl(providerType) {
+    return `/api/usage/${encodeURIComponent(providerType)}?refresh=true`;
+}
+
+export function setProviderUsageRefreshButtonState(button, refreshing) {
+    if (!button) return;
+
+    if (refreshing) {
+        if (!button.dataset.idleHtml) button.dataset.idleHtml = button.innerHTML;
+        button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
+        button.innerHTML = `<i class="fas fa-rotate fa-spin" aria-hidden="true"></i><span class="button-label">${t('usage.refreshing')}</span>`;
+        return;
+    }
+
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+    if (button.dataset.idleHtml) button.innerHTML = button.dataset.idleHtml;
+}
+
 /**
  * 更新提供商配置
  * @param {Array} configs - 提供商配置列表
@@ -75,8 +95,7 @@ export function updateUsageProviderConfigs(configs) {
  * 初始化用量管理功能
  */
 export function initUsageManager() {
-    const refreshBtn = document.getElementById('refreshUsageBtn');
-    bindOnce(refreshBtn, 'click', refreshUsage, 'refreshUsage');
+    // 页面不再暴露全量刷新按钮；refreshUsage 继续导出以兼容已有调用方。
 }
 
 /**
@@ -126,8 +145,6 @@ async function loadSupportedProviders() {
             const tag = document.createElement('span');
             tag.className = 'provider-tag';
             tag.textContent = getProviderDisplayName(providerId);
-            tag.title = t('usage.doubleClickToRefresh');
-            tag.addEventListener('dblclick', () => refreshProviderUsage(providerId));
             listEl.appendChild(tag);
         });
     } catch (error) {
@@ -333,11 +350,12 @@ function updateSingleInstanceCard(providerType, instanceData) {
 /**
  * 刷新单个提供商
  */
-export async function refreshProviderUsage(providerType) {
+export async function refreshProviderUsage(providerType, refreshButton = null) {
+    setProviderUsageRefreshButtonState(refreshButton, true);
     try {
         showToast(t('usage.refreshingProvider', { name: getProviderDisplayName(providerType) }), 'info');
         const [response, accountUsageSummary] = await Promise.all([
-            fetch(`/api/usage/${providerType}?refresh=true`, { method: 'GET', headers: getAuthHeaders() }),
+            fetch(buildProviderUsageRefreshUrl(providerType), { method: 'GET', headers: getAuthHeaders() }),
             loadAccountUsageSummary()
         ]);
         if (!response.ok) {
@@ -348,9 +366,10 @@ export async function refreshProviderUsage(providerType) {
         updateAccountUsageSummaryCache(accountUsageSummary);
         showUsageRefreshErrors(data.refreshErrors);
         
-        // 如果返回了全量数据或该提供商的数据，尝试局部更新
-        if (data.providers && data.providers[providerType]) {
-            updateSingleProviderGroup(providerType, data.providers[providerType]);
+        const providerData = data.providers?.[providerType]
+            || (Array.isArray(data.instances) ? data : null);
+        if (providerData) {
+            updateSingleProviderGroup(providerType, providerData);
             updateTimeInfo(data);
         } else {
             await loadUsage();
@@ -360,6 +379,8 @@ export async function refreshProviderUsage(providerType) {
     } catch (error) {
         console.error('刷新提供商用量失败:', error);
         showToast(error.message || t('common.requestFailed'), 'error');
+    } finally {
+        setProviderUsageRefreshButtonState(refreshButton, false);
     }
 }
 
@@ -757,13 +778,25 @@ function createProviderGroup(providerType, instances) {
                 <span class="success-count ${successCount === instances.length ? 'all-success' : ''}">${t('usage.group.success', { count: successCount, total: instances.length })}</span>
             </div>
             <div class="usage-group-actions">
-                <button class="btn-toggle-cards"><i class="fas fa-expand-alt"></i></button>
+                <button class="btn-refresh-provider" type="button"></button>
+                <button class="btn-toggle-cards" type="button" aria-label="${t('usage.group.expandAll')}" title="${t('usage.group.expandAll')}"><i class="fas fa-expand-alt" aria-hidden="true"></i></button>
             </div>
         </div>
         <div class="usage-group-content"><div class="usage-cards-grid"></div></div>
     `;
     
     group.querySelector('.usage-group-title').onclick = () => group.classList.toggle('collapsed');
+
+    const refreshButton = group.querySelector('.btn-refresh-provider');
+    const providerName = getProviderDisplayName(providerType);
+    const refreshLabel = t('usage.group.refreshAria', { name: providerName });
+    refreshButton.innerHTML = `<i class="fas fa-rotate" aria-hidden="true"></i><span class="button-label">${t('usage.group.refresh')}</span>`;
+    refreshButton.setAttribute('aria-label', escapeHtml(refreshLabel));
+    refreshButton.setAttribute('title', escapeHtml(refreshLabel));
+    refreshButton.addEventListener('click', async event => {
+        event.stopPropagation();
+        await refreshProviderUsage(providerType, refreshButton);
+    });
     
     const toggleBtn = group.querySelector('.btn-toggle-cards');
     toggleBtn.onclick = (e) => {
@@ -773,6 +806,9 @@ function createProviderGroup(providerType, instances) {
         cards.forEach(card => card.classList.toggle('collapsed', !allCollapsed));
         const icon = toggleBtn.querySelector('i');
         icon.className = allCollapsed ? 'fas fa-compress-alt' : 'fas fa-expand-alt';
+        const labelKey = allCollapsed ? 'usage.group.collapseAll' : 'usage.group.expandAll';
+        toggleBtn.setAttribute('aria-label', t(labelKey));
+        toggleBtn.setAttribute('title', t(labelKey));
     };
     
     const grid = group.querySelector('.usage-cards-grid');

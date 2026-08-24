@@ -85,9 +85,9 @@ describe('usage refresh feedback', () => {
         expect(button.innerHTML).not.toContain('fa-spin');
     });
 
-    test('styles the disabled refresh button as an active wait state', () => {
+    test('styles a disabled provider refresh button as an active wait state', () => {
         const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
-        expect(css).toContain('#refreshUsageBtn:disabled');
+        expect(css).toContain('.btn-refresh-provider:disabled');
         expect(css).toContain('cursor: wait');
     });
 
@@ -110,5 +110,54 @@ describe('usage refresh feedback', () => {
 
         delete globalThis.document;
         jest.useRealTimers();
+    });
+
+    test('builds an encoded provider-only refresh URL', async () => {
+        const usageManager = await import('../static/app/usage-manager.js');
+
+        expect(typeof usageManager.buildProviderUsageRefreshUrl).toBe('function');
+        expect(usageManager.buildProviderUsageRefreshUrl('gemini custom/provider')).toBe(
+            '/api/usage/gemini%20custom%2Fprovider?refresh=true'
+        );
+    });
+
+    test('shows and restores provider refresh button busy state', async () => {
+        const usageManager = await import('../static/app/usage-manager.js');
+        const button = {
+            disabled: false,
+            innerHTML: '<i class="fas fa-rotate"></i><span>刷新</span>',
+            dataset: {},
+            setAttribute: jest.fn(),
+            removeAttribute: jest.fn()
+        };
+
+        usageManager.setProviderUsageRefreshButtonState(button, true);
+        expect(button.disabled).toBe(true);
+        expect(button.innerHTML).toContain('fa-spin');
+        expect(button.innerHTML).toContain('正在刷新');
+        expect(button.setAttribute).toHaveBeenCalledWith('aria-busy', 'true');
+
+        usageManager.setProviderUsageRefreshButtonState(button, false);
+        expect(button.disabled).toBe(false);
+        expect(button.innerHTML).toContain('刷新');
+        expect(button.innerHTML).not.toContain('fa-spin');
+        expect(button.removeAttribute).toHaveBeenCalledWith('aria-busy');
+    });
+
+    test('exposes visible provider refresh controls instead of a page-wide or gesture-only action', () => {
+        const html = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.html'), 'utf8').replace(/\r\n/g, '\n');
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+        const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(html).not.toContain('id="refreshUsageBtn"');
+        expect(source).toContain('class="btn-refresh-provider"');
+        expect(source).toContain("refreshButton.addEventListener('click'");
+        expect(source).toContain('event.stopPropagation()');
+        expect(source).toContain('Array.isArray(data.instances) ? data : null');
+        expect(source).not.toContain("tag.addEventListener('dblclick'");
+        expect(css).toMatch(/\.btn-refresh-provider\s*\{[^}]*min-height:\s*36px;/s);
+        expect(css).toContain('.btn-refresh-provider:focus-visible');
+        expect(css).toMatch(/@media \(max-width: 520px\)[\s\S]*\.btn-refresh-provider\s*\{[^}]*min-height:\s*44px;/s);
+        expect(css).toMatch(/@media \(max-width: 520px\)[\s\S]*\.btn-refresh-provider \.button-label\s*\{[^}]*display:\s*none;/s);
     });
 });

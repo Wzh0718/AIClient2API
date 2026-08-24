@@ -8,11 +8,23 @@
 
 .usage-controls {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-end;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem;
     margin-bottom: 1.5rem;
     padding-bottom: 1rem;
     border-bottom: 1px solid var(--border-color);
+}
+
+.usage-time-info {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    margin-left: auto;
+    text-align: right;
 }
 
 .usage-last-update {
@@ -115,11 +127,11 @@
     margin-left: 1rem;
 }
 
-.btn-toggle-cards {
+.btn-toggle-cards,
+.btn-refresh-provider {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 32px; height: 32px; padding: 0;
     background: var(--bg-primary);
     color: var(--text-secondary);
     border: 1px solid var(--border-color);
@@ -129,12 +141,40 @@
     transition: var(--transition);
 }
 
-.btn-toggle-cards:hover {
+.btn-toggle-cards {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+}
+
+.btn-refresh-provider {
+    min-height: 36px;
+    padding: 0.45rem 0.75rem;
+    gap: 0.4rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.btn-toggle-cards:hover:not(:disabled),
+.btn-refresh-provider:hover:not(:disabled) {
     background: var(--primary-color);
     color: white;
     border-color: var(--primary-color);
     transform: translateY(-1px);
     box-shadow: var(--shadow-sm);
+}
+
+.btn-toggle-cards:focus-visible,
+.btn-refresh-provider:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+}
+
+.btn-refresh-provider:disabled {
+    opacity: 0.7;
+    cursor: wait;
+    transform: none;
+    box-shadow: none;
 }
 
 .usage-group-title .toggle-icon {
@@ -364,13 +404,6 @@
     text-transform: uppercase; letter-spacing: 0.05em;
 }
 
-#refreshUsageBtn:disabled {
-    opacity: 0.72;
-    cursor: wait;
-    transform: none;
-    box-shadow: none;
-}
-
 .account-usage-summary {
     background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
 }
@@ -501,6 +534,20 @@
 
 @media (max-width: 520px) {
     .account-usage-summary-meta { align-items: stretch; }
+    .usage-controls,
+    .usage-time-info { align-items: flex-end; }
+    .usage-time-info { flex-direction: column; gap: 0.25rem; }
+    .usage-group-header { align-items: flex-start; gap: 0.5rem; padding: 0.75rem; }
+    .usage-group-title { min-width: 0; flex-wrap: wrap; gap: 0.5rem; }
+    .usage-group-title .success-count { margin-left: 0; }
+    .usage-group-actions { margin-left: 0; gap: 0.375rem; }
+    .btn-refresh-provider {
+        min-width: 44px;
+        min-height: 44px;
+        padding: 0;
+    }
+    .btn-toggle-cards { width: 44px; height: 44px; }
+    .btn-refresh-provider .button-label { display: none; }
 }
 
 .usage-section .info-grid {
