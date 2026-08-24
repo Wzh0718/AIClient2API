@@ -94,11 +94,6 @@ function getAntigravityPlanStatusForProvider(providerType, uuid, usageCache, pro
     return { ...lastKnown, source: lastKnown.plan === 'unknown' ? 'unknown' : 'last_known' };
 }
 
-const ANTIGRAVITY_QUOTA_FAMILY = {
-    GEMINI: 'gemini',
-    THIRD_PARTY: 'thirdParty'
-};
-
 function normalizeAntigravityQuotaModel(modelName) {
     let model = String(modelName || '').trim();
     if (model.startsWith(`${MODEL_PROVIDER.ANTIGRAVITY}:`)) {
@@ -107,98 +102,6 @@ function normalizeAntigravityQuotaModel(modelName) {
     if (model.startsWith('models/')) model = model.slice('models/'.length);
     if (model.startsWith('gemini-claude-')) model = model.replace(/^gemini-/, '');
     return model;
-}
-
-function resolveAntigravityQuotaFamily(modelName) {
-    const model = normalizeAntigravityQuotaModel(modelName).toLowerCase();
-    return model.startsWith('claude-') || model.startsWith('gpt-')
-        ? ANTIGRAVITY_QUOTA_FAMILY.THIRD_PARTY
-        : ANTIGRAVITY_QUOTA_FAMILY.GEMINI;
-}
-
-function getCachedAntigravityUsage(providerType, uuid, usageCache) {
-    const instances = usageCache?.providers?.[providerType]?.instances;
-    const instance = Array.isArray(instances)
-        ? instances.find(entry => (entry?.uuid || entry?.config?.uuid || entry?.providerUuid) === uuid)
-        : null;
-    return instance?.usage || null;
-}
-
-function getAntigravityQuotaLimits(config = {}, family) {
-    const getLimit = value => {
-        if (value === 0 || value === '0') return null;
-        return getPercentLimit(value, 100);
-    };
-    if (family === ANTIGRAVITY_QUOTA_FAMILY.THIRD_PARTY) {
-        return {
-            short: getLimit(config.antigravityThirdPartyMax5hPercent),
-            weekly: getLimit(config.antigravityThirdPartyMaxWeeklyPercent)
-        };
-    }
-    return {
-        short: getLimit(config.antigravityGeminiMax5hPercent),
-        weekly: getLimit(config.antigravityGeminiMaxWeeklyPercent)
-    };
-}
-
-function getAntigravityQuotaItem(usage, family, windowKind) {
-    const bucketId = family === ANTIGRAVITY_QUOTA_FAMILY.THIRD_PARTY
-        ? (windowKind === 'short' ? '3p-5h' : '3p-weekly')
-        : (windowKind === 'short' ? 'gemini-5h' : 'gemini-weekly');
-    return (Array.isArray(usage?.items) ? usage.items : []).find(item =>
-        item?.id === `quota-group:${bucketId}` || item?.bucketId === bucketId
-    ) || null;
-}
-
-function getAntigravityFamilyQuotaStatus(providerType, provider, requestedModel, usageCache, now = Date.now()) {
-    const config = provider?.config || provider || {};
-    const family = resolveAntigravityQuotaFamily(requestedModel);
-    const uuid = config.uuid || provider?.uuid;
-    const usage = getCachedAntigravityUsage(providerType, uuid, usageCache);
-    const limits = getAntigravityQuotaLimits(config, family);
-    const exceeded = [];
-    const warnings = [];
-
-    for (const [windowKind, limit] of Object.entries(limits)) {
-        if (!limit) continue;
-        const item = getAntigravityQuotaItem(usage, family, windowKind);
-        const usedPercent = normalizePercentValue(item?.percent ?? item?.used);
-        if (usedPercent === null) {
-            warnings.push(`${family} ${windowKind} usage unavailable`);
-            continue;
-        }
-        if (usedPercent >= limit) {
-            const resetMs = Date.parse(item?.resetAt || '');
-            exceeded.push({
-                windowKind,
-                usedPercent,
-                limit,
-                recoveryTime: Number.isFinite(resetMs) && resetMs > now ? new Date(resetMs).toISOString() : null
-            });
-        }
-    }
-
-    const validRecoveries = exceeded
-        .map(entry => Date.parse(entry.recoveryTime || ''))
-        .filter(value => Number.isFinite(value) && value > now);
-    return {
-        family,
-        exceeded: exceeded.length > 0,
-        reason: exceeded.map(entry => `${entry.windowKind} ${entry.usedPercent.toFixed(1)}%/${entry.limit}%`).join(', ') || warnings.join('; '),
-        recoveryTime: validRecoveries.length > 0 ? new Date(Math.max(...validRecoveries)).toISOString() : null
-    };
-}
-
-function isAntigravityQuotaProbeRequired(providerType, provider, requestedModel) {
-    if (!isAntigravityProviderType(providerType) || !requestedModel) return false;
-    const status = getAntigravityFamilyQuotaStatus(
-        providerType,
-        provider,
-        requestedModel,
-        readFreshUsageCacheSync(),
-        Date.now()
-    );
-    return !status.exceeded && /usage unavailable/i.test(String(status.reason || ''));
 }
 
 function getActiveAntigravityQuotaState(state, now = Date.now()) {
@@ -1854,7 +1757,7 @@ export class ProviderPoolManager {
                 uuid: provider.uuid || provider.config?.uuid,
                 concurrencyLimit: parseInt(provider.config?.concurrencyLimit || 0),
                 preferred: hasStickyAffinity && index === 0,
-                probeRequired: isAntigravityQuotaProbeRequired(provider.type, provider, requestedModel)
+                probeRequired: false
             }));
             const leaseStartedAt = performance.now();
             const lease = hasStickyAffinity
@@ -2231,7 +2134,7 @@ export class ProviderPoolManager {
                     uuid: provider.uuid || provider.config?.uuid,
                     concurrencyLimit: parseInt(provider.config?.concurrencyLimit || 0),
                     preferred: hasStickyAffinity && index === 0,
-                    probeRequired: isAntigravityQuotaProbeRequired(providerType, provider, requestedModel)
+                    probeRequired: false
                 }));
             const leaseStartedAt = performance.now();
             const lease = hasStickyAffinity
@@ -2765,9 +2668,7 @@ export class ProviderPoolManager {
     _filterAntigravityProvidersByQuota(providerType, providers, requestedModel = null, selectionDiagnostics = null) {
         if (!requestedModel) return providers;
 
-        const usageCache = readFreshUsageCacheSync();
         const canonicalModel = normalizeAntigravityQuotaModel(requestedModel);
-        const family = resolveAntigravityQuotaFamily(canonicalModel);
         const now = Date.now();
         const allowed = [];
         const filterReasons = {};
@@ -2785,6 +2686,13 @@ export class ProviderPoolManager {
             quotaHealth.models = quotaHealth.models || {};
             config.antigravityQuotaHealth = quotaHealth;
 
+            for (const [family, familyState] of Object.entries(quotaHealth.families)) {
+                if (familyState?.source === 'usage_cache') {
+                    delete quotaHealth.families[family];
+                    updated = true;
+                }
+            }
+
             const modelState = getActiveAntigravityQuotaState(quotaHealth.models[canonicalModel], now);
             if (modelState) {
                 recordReason('model_cooldown');
@@ -2797,36 +2705,13 @@ export class ProviderPoolManager {
                 updated = true;
             }
 
-            const familyStatus = getAntigravityFamilyQuotaStatus(providerType, provider, canonicalModel, usageCache, now);
-            if (familyStatus.exceeded) {
-                const nextState = {
-                    isHealthy: false,
-                    lastErrorTime: new Date(now).toISOString(),
-                    lastErrorMessage: `${family} quota reached: ${familyStatus.reason}`,
-                    scheduledRecoveryTime: familyStatus.recoveryTime,
-                    source: 'usage_cache'
-                };
-                quotaHealth.families[family] = nextState;
-                updated = true;
-                recordReason(`${family}_quota_exceeded`);
-                const recoveryMs = Date.parse(nextState.scheduledRecoveryTime || '');
-                if (Number.isFinite(recoveryMs) && recoveryMs > now) recoveryTimes.push(recoveryMs);
-                continue;
-            }
-
-            if (quotaHealth.families[family]) {
-                delete quotaHealth.families[family];
-                updated = true;
-            }
             allowed.push(provider);
         }
 
         this.coordination?.updateGeminiSchedulingGauge?.(canonicalModel, {
             schedulable: allowed.length,
             cooling: Number(filterReasons.model_cooldown || 0),
-            quotaUnknown: allowed.filter(provider => (
-                isAntigravityQuotaProbeRequired(providerType, provider, canonicalModel)
-            )).length
+            quotaUnknown: 0
         });
 
         if (updated) this._debouncedSave(providerType);
@@ -2838,16 +2723,11 @@ export class ProviderPoolManager {
         }
 
         if (allowed.length === 0 && providers.length > 0 && Object.keys(filterReasons).length > 0) {
-            const onlyModelCooldown = Object.keys(filterReasons).every(reason => reason === 'model_cooldown');
-            const error = new Error(
-                onlyModelCooldown
-                    ? `All Antigravity providers are cooling down for model ${canonicalModel}`
-                    : `All Antigravity providers exceeded ${family} quota limits`
-            );
+            const error = new Error(`All Antigravity providers are cooling down for model ${canonicalModel}`);
             error.status = 429;
             error.code = 429;
-            error.quotaScope = onlyModelCooldown ? 'model' : 'family';
-            error.quotaKey = onlyModelCooldown ? canonicalModel : family;
+            error.quotaScope = 'model';
+            error.quotaKey = canonicalModel;
             error.filterReasons = filterReasons;
             if (recoveryTimes.length > 0) {
                 error.nextRecoveryTime = new Date(Math.min(...recoveryTimes)).toISOString();

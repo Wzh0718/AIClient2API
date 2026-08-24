@@ -52,7 +52,7 @@ describe('usage api scheduled recovery handling', () => {
         );
     });
 
-    test('derives and syncs Antigravity family quota health without removing model cooldowns', async () => {
+    test('keeps periodic Antigravity quotas observational without removing model cooldowns', async () => {
         const provider = {
             uuid: 'pro-antigravity-quota',
             customName: 'Pro Antigravity quota',
@@ -91,12 +91,7 @@ describe('usage api scheduled recovery handling', () => {
         });
 
         const quotaHealth = usage.providers['gemini-antigravity'].instances[0].antigravityQuotaHealth;
-        expect(quotaHealth.families.gemini).toMatchObject({
-            isHealthy: false,
-            scheduledRecoveryTime: '2099-01-01T00:00:00.000Z',
-            source: 'usage_cache'
-        });
-        expect(quotaHealth.families.thirdParty?.isHealthy).not.toBe(false);
+        expect(quotaHealth.families).toEqual({});
         expect(quotaHealth.models['gemini-3.1-flash-image']).toMatchObject({
             isHealthy: false,
             source: 'upstream_429'

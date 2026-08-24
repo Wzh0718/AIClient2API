@@ -12,7 +12,7 @@ jest.mock('../src/ui-modules/event-broadcast.js', () => ({
 }));
 
 describe('provider pool Redis coordination', () => {
-    test('publishes Antigravity schedulable, cooling, and unknown-quota gauges during selection', async () => {
+    test('publishes Antigravity schedulable and cooling gauges without periodic-quota gating', async () => {
         const coordinator = {
             updateGeminiSchedulingGauge: jest.fn(),
             acquire: jest.fn(async candidates => ({
@@ -41,7 +41,7 @@ describe('provider pool Redis coordination', () => {
         expect(coordinator.updateGeminiSchedulingGauge).toHaveBeenCalledWith('gemini-2.5-flash', {
             schedulable: 1,
             cooling: 0,
-            quotaUnknown: 1
+            quotaUnknown: 0
         });
     });
 

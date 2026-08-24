@@ -148,11 +148,11 @@ describe('provider pool Antigravity quota health', () => {
         });
     });
 
-    test('proactively filters only the Gemini family when its official threshold is reached', async () => {
+    test('keeps Gemini providers schedulable when official 5h or weekly usage reaches 100 percent', async () => {
         writeUsageCache([
             paidUsage('aaa-gemini-over', [
                 { id: 'quota-group:gemini-5h', percent: 100, resetAt: '2026-08-11T00:00:00Z', source: 'retrieveUserQuotaSummary' },
-                { id: 'quota-group:gemini-weekly', percent: 10, resetAt: '2026-08-12T00:00:00Z', source: 'retrieveUserQuotaSummary' },
+                { id: 'quota-group:gemini-weekly', percent: 100, resetAt: '2026-08-12T00:00:00Z', source: 'retrieveUserQuotaSummary' },
                 { id: 'quota-group:3p-5h', percent: 10, resetAt: '2026-08-11T00:00:00Z', source: 'retrieveUserQuotaSummary' }
             ]),
             paidUsage('zzz-gemini-ok', [
@@ -161,12 +161,20 @@ describe('provider pool Antigravity quota health', () => {
             ])
         ]);
         const manager = createManager([
-            provider('aaa-gemini-over', { antigravityGeminiMax5hPercent: 100, lastUsed: '2026-08-01T00:00:00Z' }),
-            provider('zzz-gemini-ok', { antigravityGeminiMax5hPercent: 100, lastUsed: '2026-08-09T00:00:00Z' })
+            provider('aaa-gemini-over', {
+                antigravityGeminiMax5hPercent: 100,
+                antigravityGeminiMaxWeeklyPercent: 100,
+                lastUsed: '2026-08-01T00:00:00Z'
+            }),
+            provider('zzz-gemini-ok', {
+                antigravityGeminiMax5hPercent: 100,
+                antigravityGeminiMaxWeeklyPercent: 100,
+                lastUsed: '2026-08-09T00:00:00Z'
+            })
         ]);
 
         const geminiSelection = await manager.selectProvider('gemini-antigravity', 'gemini-2.5-flash');
-        expect(geminiSelection.uuid).toBe('zzz-gemini-ok');
+        expect(geminiSelection.uuid).toBe('aaa-gemini-over');
 
         const thirdPartyManager = createManager([
             provider('aaa-gemini-over', { antigravityGeminiMax5hPercent: 100, lastUsed: '2026-08-01T00:00:00Z' }),
@@ -174,6 +182,31 @@ describe('provider pool Antigravity quota health', () => {
         ]);
         const thirdPartySelection = await thirdPartyManager.selectProvider('gemini-antigravity', 'gemini-claude-sonnet-4-6');
         expect(thirdPartySelection.uuid).toBe('aaa-gemini-over');
+    });
+
+    test('ignores stale usage-cache family health when the requested model is not cooling down', async () => {
+        writeUsageCache([paidUsage('provider-family-flagged', [
+            { id: 'quota-group:gemini-weekly', percent: 100, resetAt: '2099-01-01T00:00:00.000Z' }
+        ])]);
+        const target = provider('provider-family-flagged', {
+            antigravityGeminiMaxWeeklyPercent: 100,
+            antigravityQuotaHealth: {
+                families: {
+                    gemini: {
+                        isHealthy: false,
+                        scheduledRecoveryTime: '2099-01-01T00:00:00.000Z',
+                        source: 'usage_cache'
+                    }
+                },
+                models: {}
+            }
+        });
+        const manager = createManager([target]);
+
+        const selection = await manager.selectProvider('gemini-antigravity', 'gemini-2.5-flash');
+
+        expect(selection.uuid).toBe('provider-family-flagged');
+        expect(target.antigravityQuotaHealth.families.gemini).toBeUndefined();
     });
 
     test('treats an explicit zero threshold as disabling proactive quota filtering', async () => {
@@ -195,23 +228,17 @@ describe('provider pool Antigravity quota health', () => {
         expect(selection.uuid).toBe('aaa-zero-disabled');
     });
 
-    test('restores a family immediately when refreshed official usage falls below the threshold', async () => {
+    test('does not create family cooldowns from refreshed official usage', async () => {
         const target = provider('provider-recovers', { antigravityGeminiMax5hPercent: 100 });
         writeUsageCache([paidUsage('provider-recovers', [
             { id: 'quota-group:gemini-5h', percent: 100, resetAt: '2026-08-11T00:00:00Z' }
         ])]);
         const manager = createManager([target]);
 
-        await expect(manager.selectProvider('gemini-antigravity', 'gemini-2.5-flash')).rejects.toMatchObject({ status: 429 });
-        expect(target.antigravityQuotaHealth.families.gemini?.isHealthy).toBe(false);
-
-        writeUsageCache([paidUsage('provider-recovers', [
-            { id: 'quota-group:gemini-5h', percent: 25 }
-        ])]);
         const selection = await manager.selectProvider('gemini-antigravity', 'gemini-2.5-flash');
 
         expect(selection.uuid).toBe('provider-recovers');
-        expect(target.antigravityQuotaHealth.families.gemini).toBeUndefined();
+        expect(target.antigravityQuotaHealth?.families?.gemini).toBeUndefined();
     });
 
     test('does not escalate separate model cooldowns into a family cooldown', () => {
