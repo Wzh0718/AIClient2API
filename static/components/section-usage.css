@@ -207,6 +207,91 @@
     border-radius: 9999px;
 }
 
+.usage-provider-group.has-pool-alert {
+    position: relative;
+    overflow: visible;
+    z-index: 2;
+}
+
+.usage-provider-group.has-pool-alert.collapsed .usage-group-header {
+    border-radius: inherit;
+}
+
+.antigravity-pool-alert {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    max-width: min(24rem, 42vw);
+    padding: 0.25rem 0.6rem;
+    border: 1px solid color-mix(in srgb, var(--danger-color) 24%, var(--border-color));
+    border-radius: 9999px;
+    background: color-mix(in srgb, var(--danger-bg) 58%, var(--bg-primary));
+    color: var(--danger-text);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.25;
+    cursor: help;
+    outline: none;
+}
+
+.antigravity-pool-alert > span:not(.antigravity-pool-alert-tooltip) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.antigravity-pool-alert:focus-visible {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger-color) 20%, transparent);
+}
+
+.antigravity-pool-alert-tooltip {
+    position: absolute;
+    top: calc(100% + 0.55rem);
+    left: 0;
+    z-index: 20;
+    display: none;
+    width: min(24rem, calc(100vw - 3rem));
+    padding: 0.65rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    box-shadow: var(--shadow-lg);
+    font-size: 0.75rem;
+    font-weight: 400;
+    cursor: default;
+}
+
+.antigravity-pool-alert:hover .antigravity-pool-alert-tooltip,
+.antigravity-pool-alert:focus .antigravity-pool-alert-tooltip,
+.antigravity-pool-alert:focus-within .antigravity-pool-alert-tooltip {
+    display: grid;
+    gap: 0.4rem;
+}
+
+.antigravity-pool-alert-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.75rem;
+    padding-top: 0.4rem;
+    border-top: 1px solid var(--border-color);
+}
+
+.antigravity-pool-alert-model {
+    overflow: hidden;
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.antigravity-pool-alert-recovery {
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
 .usage-group-title .success-count {
     font-size: 0.75rem;
     color: var(--text-secondary);
@@ -385,6 +470,12 @@
     padding: 0.75rem; flex: 1;
 }
 
+.antigravity-unavailable-models {
+    padding: 0.65rem 0.75rem;
+    border-color: color-mix(in srgb, var(--danger-color) 18%, var(--border-color));
+    background: color-mix(in srgb, var(--danger-bg) 18%, var(--bg-secondary));
+}
+
 .antigravity-unavailable-models-header,
 .antigravity-model-status-row {
     display: flex;
@@ -394,30 +485,72 @@
 
 .antigravity-unavailable-models-header {
     justify-content: space-between;
-    margin-bottom: 0.4rem;
+    color: var(--text-primary);
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
+.antigravity-unavailable-models-header i {
+    color: var(--danger-color);
+}
+
+.antigravity-unavailable-models-count {
+    display: inline-grid;
+    min-width: 1.35rem;
+    height: 1.35rem;
+    place-items: center;
+    border-radius: 9999px;
+    background: var(--danger-bg);
+    color: var(--danger-text);
+    font-size: 0.7rem;
 }
 
 .antigravity-model-recovery {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
     color: var(--text-secondary);
-    font-size: 0.78rem;
+    font-size: 0.72rem;
+    white-space: nowrap;
 }
 
 .antigravity-model-status-list {
     display: grid;
-    gap: 0.35rem;
-    margin-top: 0.5rem;
+    margin-top: 0.4rem;
 }
 
 .antigravity-model-status-row {
-    flex-wrap: wrap;
-    padding-top: 0.35rem;
+    display: grid;
+    grid-template-columns: 0.45rem minmax(0, 1fr) auto auto;
+    min-height: 2rem;
+    padding: 0.35rem 0;
     border-top: 1px solid var(--border-color);
 }
 
+.antigravity-model-status-row.is-extra {
+    display: none;
+}
+
+.antigravity-unavailable-models.is-expanded .antigravity-model-status-row.is-extra {
+    display: grid;
+}
+
+.antigravity-model-status-dot {
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 50%;
+    background: var(--danger-color);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger-color) 12%, transparent);
+}
+
 .antigravity-model-name {
-    flex: 1 1 12rem;
-    font-family: monospace;
-    overflow-wrap: anywhere;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.76rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .antigravity-model-status {
@@ -429,8 +562,33 @@
 }
 
 .antigravity-model-status-cooldown {
-    background: var(--danger-bg);
+    background: color-mix(in srgb, var(--danger-bg) 72%, var(--bg-primary));
     color: var(--danger-text);
+}
+
+.antigravity-model-status-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-top: 0.35rem;
+    padding: 0.25rem 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+}
+
+.antigravity-model-status-toggle:hover,
+.antigravity-model-status-toggle:focus-visible {
+    color: var(--primary-color);
+}
+
+.antigravity-model-status-toggle:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+    border-radius: 0.2rem;
 }
 
 .usage-error-message {
@@ -588,6 +746,16 @@
     .usage-group-header { align-items: flex-start; gap: 0.5rem; padding: 0.75rem; }
     .usage-group-title { min-width: 0; flex-wrap: wrap; gap: 0.5rem; }
     .usage-group-title .success-count { margin-left: 0; }
+    .antigravity-pool-alert { max-width: calc(100vw - 10rem); }
+    .antigravity-pool-alert-tooltip { left: auto; right: 0; }
+    .antigravity-model-status-row {
+        grid-template-columns: 0.45rem minmax(0, 1fr) auto;
+        row-gap: 0.25rem;
+    }
+    .antigravity-model-recovery {
+        grid-column: 2 / -1;
+        justify-self: start;
+    }
     .usage-group-actions { margin-left: 0; gap: 0.375rem; }
     .btn-refresh-provider {
         min-width: 44px;

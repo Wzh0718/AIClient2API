@@ -11,6 +11,8 @@ let accountUsageSummaryByKey = new Map();
 let accountUsageSummaryMeta = null;
 const USAGE_REFRESH_POLL_INTERVAL_MS = 1500;
 const USAGE_REFRESH_WAIT_TIMEOUT_MS = 150000;
+const ANTIGRAVITY_PROVIDER_TYPE = 'gemini-antigravity';
+const ANTIGRAVITY_VISIBLE_MODEL_LIMIT = 3;
 
 function sleepForUsageRefresh(delayMs) {
     return new Promise(resolve => setTimeout(resolve, delayMs));
@@ -579,7 +581,7 @@ function renderCodexQuotaHealthBadges(instance, providerType) {
 }
 
 function renderAntigravityQuotaHealthBadges(instance, providerType) {
-    if (providerType !== 'gemini-antigravity') return '';
+    if (providerType !== ANTIGRAVITY_PROVIDER_TYPE) return '';
 
     const quotaHealth = instance.antigravityQuotaHealth || {};
     const renderBadge = (label, state = {}) => {
@@ -607,37 +609,177 @@ function renderAntigravityQuotaHealthBadges(instance, providerType) {
     ].join('');
 }
 
-function renderAntigravityUnavailableModels(instance, providerType) {
-    if (providerType !== 'gemini-antigravity') return null;
+function getAntigravityRecoveryTimestamp(value) {
+    const timestamp = Date.parse(value || '');
+    return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function sortAntigravityUnavailableModels(models) {
+    return [...models].sort((left, right) => {
+        const leftRecovery = getAntigravityRecoveryTimestamp(left.scheduledRecoveryTime);
+        const rightRecovery = getAntigravityRecoveryTimestamp(right.scheduledRecoveryTime);
+        if (leftRecovery !== null && rightRecovery !== null && leftRecovery !== rightRecovery) {
+            return leftRecovery - rightRecovery;
+        }
+        if (leftRecovery !== null) return -1;
+        if (rightRecovery !== null) return 1;
+        return left.model.localeCompare(right.model);
+    });
+}
+
+export function getAntigravityUnavailableModels(instance, providerType) {
+    if (providerType !== ANTIGRAVITY_PROVIDER_TYPE) return [];
 
     const models = Object.entries(instance.antigravityQuotaHealth?.models || {})
         .filter(([, state]) => state?.isHealthy === false)
         .map(([model, state]) => ({
             model,
-            scheduledRecoveryTime: state.scheduledRecoveryTime
+            scheduledRecoveryTime: state.scheduledRecoveryTime || null,
+            lastErrorMessage: state.lastErrorMessage || null
         }));
+
+    return sortAntigravityUnavailableModels(models);
+}
+
+export function getAntigravityPoolUnavailableModels(providerType, instances) {
+    if (providerType !== ANTIGRAVITY_PROVIDER_TYPE || !Array.isArray(instances) || instances.length === 0) {
+        return [];
+    }
+
+    const eligibleInstances = instances.filter(instance => (
+        !instance?.isDisabled
+        && !instance?.needsRefresh
+        && instance?.isHealthy !== false
+        && !instance?.error?.includes('not initialized')
+    ));
+    if (eligibleInstances.length === 0) return [];
+
+    const candidateModels = new Set();
+    eligibleInstances.forEach(instance => {
+        Object.entries(instance.antigravityQuotaHealth?.models || {}).forEach(([model, state]) => {
+            if (state?.isHealthy === false) candidateModels.add(model);
+        });
+    });
+
+    const unavailableModels = [];
+    candidateModels.forEach(model => {
+        const states = eligibleInstances.map(instance => instance.antigravityQuotaHealth?.models?.[model]);
+        if (!states.every(state => state?.isHealthy === false)) return;
+
+        const earliestRecovery = states
+            .map(state => ({
+                value: state.scheduledRecoveryTime || null,
+                timestamp: getAntigravityRecoveryTimestamp(state.scheduledRecoveryTime)
+            }))
+            .filter(item => item.timestamp !== null)
+            .sort((left, right) => left.timestamp - right.timestamp)[0];
+        unavailableModels.push({
+            model,
+            scheduledRecoveryTime: earliestRecovery?.value || null
+        });
+    });
+
+    return sortAntigravityUnavailableModels(unavailableModels);
+}
+
+function formatAntigravityCompactRecovery(value) {
+    const timestamp = getAntigravityRecoveryTimestamp(value);
+    if (timestamp === null) return t('usage.antigravity.recoveryUnknown');
+
+    const date = new Date(timestamp);
+    const now = new Date();
+    const time = date.toLocaleTimeString(getCurrentLanguage(), {
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+    if (date.toDateString() === now.toDateString()) {
+        return t('usage.antigravity.recoveryToday', { time });
+    }
+    return date.toLocaleString(getCurrentLanguage(), {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+}
+
+function renderAntigravityPoolAlert(providerType, instances) {
+    const models = getAntigravityPoolUnavailableModels(providerType, instances);
+    if (models.length === 0) return '';
+
+    const tooltipRows = models.map(model => {
+        const recoveryText = formatAntigravityCompactRecovery(model.scheduledRecoveryTime);
+        return `<div class="antigravity-pool-alert-row">
+            <span class="antigravity-pool-alert-model" title="${escapeHtml(model.model)}">${escapeHtml(model.model)}</span>
+            <span class="antigravity-pool-alert-recovery">${escapeHtml(recoveryText)}</span>
+        </div>`;
+    }).join('');
+    const accessibleDetails = models
+        .map(model => `${model.model}，${formatAntigravityCompactRecovery(model.scheduledRecoveryTime)}`)
+        .join('；');
+
+    return `<span class="antigravity-pool-alert" tabindex="0" role="status" aria-label="${escapeHtml(`${t('usage.antigravity.poolUnavailable', { count: models.length })}：${accessibleDetails}`)}">
+        <i class="fas fa-triangle-exclamation" aria-hidden="true"></i>
+        <span>${t('usage.antigravity.poolUnavailable', { count: models.length })}</span>
+        <span class="antigravity-pool-alert-tooltip" role="tooltip">
+            <strong>${t('usage.antigravity.poolUnavailableDetails')}</strong>
+            ${tooltipRows}
+        </span>
+    </span>`;
+}
+
+function renderAntigravityUnavailableModels(instance, providerType) {
+    const models = getAntigravityUnavailableModels(instance, providerType);
 
     if (models.length === 0) return null;
 
     const section = document.createElement('div');
     section.className = 'usage-section antigravity-unavailable-models';
-    const rows = models.map(model => {
-        const recovery = model.scheduledRecoveryTime
-            ? `<span class="antigravity-model-recovery">${t('usage.antigravity.recoveryAt', { time: formatDate(model.scheduledRecoveryTime) })}</span>`
-            : '';
-        return `<div class="antigravity-model-status-row">
-            <span class="antigravity-model-name">${escapeHtml(model.model)}</span>
-            <span class="antigravity-model-status antigravity-model-status-cooldown">${t('usage.antigravity.status.cooldown')}</span>
-            ${recovery}
+    const visibleModels = models.slice(0, ANTIGRAVITY_VISIBLE_MODEL_LIMIT);
+    const extraModels = models.slice(ANTIGRAVITY_VISIBLE_MODEL_LIMIT);
+    const renderRow = (model, isExtra = false) => {
+        const recoveryText = formatAntigravityCompactRecovery(model.scheduledRecoveryTime);
+        const statusTitle = [
+            model.lastErrorMessage,
+            model.scheduledRecoveryTime ? t('usage.antigravity.recoveryAt', { time: formatDate(model.scheduledRecoveryTime) }) : null
+        ].filter(Boolean).join('；');
+        return `<div class="antigravity-model-status-row${isExtra ? ' is-extra' : ''}">
+            <span class="antigravity-model-status-dot" aria-hidden="true"></span>
+            <code class="antigravity-model-name" title="${escapeHtml(model.model)}">${escapeHtml(model.model)}</code>
+            <span class="antigravity-model-status antigravity-model-status-cooldown"${statusTitle ? ` title="${escapeHtml(statusTitle)}"` : ''}>${t('usage.antigravity.status.cooldown')}</span>
+            <span class="antigravity-model-recovery" title="${model.scheduledRecoveryTime ? escapeHtml(formatDate(model.scheduledRecoveryTime)) : ''}"><i class="fas fa-clock" aria-hidden="true"></i>${escapeHtml(recoveryText)}</span>
         </div>`;
-    }).join('');
+    };
+    const rows = [
+        ...visibleModels.map(model => renderRow(model)),
+        ...extraModels.map(model => renderRow(model, true))
+    ].join('');
+    const toggle = extraModels.length > 0
+        ? `<button type="button" class="antigravity-model-status-toggle" aria-expanded="false">
+            <span>${t('usage.antigravity.moreModels', { count: extraModels.length })}</span>
+            <i class="fas fa-chevron-down" aria-hidden="true"></i>
+        </button>`
+        : '';
 
     section.innerHTML = `
         <div class="antigravity-unavailable-models-header">
-            <span><i class="fas fa-triangle-exclamation"></i> ${t('usage.antigravity.unavailableModels')}</span>
+            <span><i class="fas fa-triangle-exclamation" aria-hidden="true"></i> ${t('usage.antigravity.unavailableModels')}</span>
+            <span class="antigravity-unavailable-models-count">${models.length}</span>
         </div>
         <div class="antigravity-model-status-list">${rows}</div>
+        ${toggle}
     `;
+    const toggleButton = section.querySelector('.antigravity-model-status-toggle');
+    if (toggleButton) {
+        toggleButton.addEventListener('click', () => {
+            const expanded = section.classList.toggle('is-expanded');
+            toggleButton.setAttribute('aria-expanded', String(expanded));
+            toggleButton.querySelector('span').textContent = expanded
+                ? t('usage.antigravity.collapseModels')
+                : t('usage.antigravity.moreModels', { count: extraModels.length });
+            toggleButton.querySelector('i').className = expanded ? 'fas fa-chevron-up' : 'fas fa-chevron-down';
+        });
+    }
     return section;
 }
 
@@ -802,6 +944,8 @@ function createProviderGroup(providerType, instances) {
     group.setAttribute('data-provider', providerType);
     
     const successCount = instances.filter(i => i.success).length;
+    const poolAlert = renderAntigravityPoolAlert(providerType, instances);
+    if (poolAlert) group.classList.add('has-pool-alert');
     group.innerHTML = `
         <div class="usage-group-header">
             <div class="usage-group-title">
@@ -809,6 +953,7 @@ function createProviderGroup(providerType, instances) {
                 <i class="${getProviderIcon(providerType)} provider-icon"></i>
                 <span class="provider-name">${getProviderDisplayName(providerType)}</span>
                 <span class="instance-count">${t('usage.group.instances', { count: instances.length })}</span>
+                ${poolAlert}
                 <span class="success-count ${successCount === instances.length ? 'all-success' : ''}">${t('usage.group.success', { count: successCount, total: instances.length })}</span>
             </div>
             <div class="usage-group-actions">
@@ -820,6 +965,7 @@ function createProviderGroup(providerType, instances) {
     `;
     
     group.querySelector('.usage-group-title').onclick = () => group.classList.toggle('collapsed');
+    group.querySelector('.antigravity-pool-alert')?.addEventListener('click', event => event.stopPropagation());
 
     const refreshButton = group.querySelector('.btn-refresh-provider');
     const providerName = getProviderDisplayName(providerType);

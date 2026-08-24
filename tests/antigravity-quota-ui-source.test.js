@@ -20,6 +20,8 @@ describe('Antigravity quota UI source', () => {
 
     test('usage cards render automatic family health and active model cooldowns without manual probes', () => {
         const source = readSource('static/app/usage-manager.js');
+        const css = readSource('static/components/section-usage.css');
+        const i18n = readSource('static/app/i18n.js');
 
         expect(source).toContain('function renderAntigravityQuotaHealthBadges(instance, providerType)');
         expect(source).toContain("renderBadge('Gemini', quotaHealth.families?.gemini)");
@@ -28,6 +30,17 @@ describe('Antigravity quota UI source', () => {
         expect(source).toContain('renderAntigravityQuotaHealthBadges(instance, providerType)');
         expect(source).toContain('renderAntigravityUnavailableModels(instance, providerType)');
         expect(source).toContain("Object.entries(instance.antigravityQuotaHealth?.models || {})");
+        expect(source).toContain('getAntigravityPoolUnavailableModels(providerType, instances)');
+        expect(source).toContain('antigravity-pool-alert');
+        expect(source).toContain('antigravity-pool-alert-tooltip');
+        expect(source).toContain('antigravity-model-status-toggle');
+        expect(source).toContain('slice(0, ANTIGRAVITY_VISIBLE_MODEL_LIMIT)');
+        expect(css).toContain('.antigravity-pool-alert');
+        expect(css).toContain('.antigravity-pool-alert:focus-visible');
+        expect(css).toContain('.antigravity-model-status-row.is-extra');
+        expect(css).toMatch(/@media \(max-width: 520px\)[\s\S]*\.antigravity-model-recovery\s*\{[^}]*grid-column:\s*2 \/ -1;/s);
+        expect(i18n).toContain("'usage.antigravity.poolUnavailable': '{count} 个模型全池冷却'");
+        expect(i18n).toContain("'usage.antigravity.moreModels': '另 {count} 个'");
         expect(source).not.toContain('availability.availabilityPercent');
         expect(source).toContain('scheduledRecoveryTime');
         expect(source).not.toContain('antigravityModelStatus');
