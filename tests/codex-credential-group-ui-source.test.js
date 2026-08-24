@@ -157,7 +157,7 @@ describe('Codex credential-group UI source', () => {
     });
 
     test('wraps management requests with timeout and non-JSON/network error handling', () => {
-        expect(potluckHtml).toContain('const API_REQUEST_TIMEOUT_MS = 30_000;');
+        expect(potluckHtml).toContain('const API_REQUEST_TIMEOUT_MS = 120_000;');
         expect(potluckHtml).toContain('new AbortController()');
         expect(potluckHtml).toContain("code: 'REQUEST_TIMEOUT'");
         expect(potluckHtml).toContain("code: 'INVALID_RESPONSE'");
