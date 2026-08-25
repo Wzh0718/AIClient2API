@@ -12,6 +12,28 @@ jest.mock('../src/ui-modules/event-broadcast.js', () => ({
 }));
 
 describe('provider pool Redis coordination', () => {
+    test('execution worker state events capture the state at debounce time, not flush time', async () => {
+        jest.useFakeTimers();
+        const events = [];
+        const manager = new ProviderPoolManager({
+            test: [{ uuid: 'one', lastRefreshAttemptTime: Date.now() }]
+        }, {
+            persistenceEnabled: false,
+            stateEventSink: event => events.push(event),
+            saveDebounceTime: 1000
+        });
+        const config = manager.providerStatus.test[0].config;
+        config.needsRefresh = true;
+
+        manager._debouncedSave('test');
+        config.needsRefresh = false;
+        await jest.advanceTimersByTimeAsync(1000);
+
+        expect(events).toHaveLength(1);
+        expect(events[0].state.needsRefresh).toBe(true);
+        jest.useRealTimers();
+    });
+
     test('publishes Antigravity schedulable and cooling gauges without periodic-quota gating', async () => {
         const coordinator = {
             updateGeminiSchedulingGauge: jest.fn(),

@@ -114,4 +114,23 @@ describe('provider state persistence events', () => {
         })).toBe(true);
         expect(target.lastHealthStateTime).toBe('2026-08-25T07:10:00.000Z');
     });
+
+    test('rejects an older runtime event from restoring needsRefresh after a reset', () => {
+        const target = { uuid: 'one', needsRefresh: false };
+        const newer = createProviderStateEvent('provider', {
+            uuid: 'one',
+            needsRefresh: false
+        });
+        newer.occurredAt = '2026-08-26T10:00:05.000Z';
+        const older = createProviderStateEvent('provider', {
+            uuid: 'one',
+            needsRefresh: true
+        });
+        older.occurredAt = '2026-08-26T10:00:01.000Z';
+
+        expect(applyProviderStateEvent({ provider: [target] }, newer, { stateEventAt: null })).toBe(true);
+        expect(target.needsRefresh).toBe(false);
+        expect(applyProviderStateEvent({ provider: [target] }, older, { stateEventAt: newer.occurredAt })).toBe(false);
+        expect(target.needsRefresh).toBe(false);
+    });
 });

@@ -587,7 +587,7 @@ async function startServer() {
     const services = await initApiService(CONFIG, !IS_EXECUTION_WORKER, {
         coordination: runtimeCoordination,
         persistenceEnabled: !IS_EXECUTION_WORKER,
-        stateEventSink: IS_EXECUTION_WORKER && process.send
+        stateEventSink: IS_WORKER_PROCESS && process.send
             ? event => process.send({ type: 'provider_state', event })
             : null,
         configEventSink: !IS_EXECUTION_WORKER && process.send

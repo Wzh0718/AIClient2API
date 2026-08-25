@@ -51,6 +51,9 @@ export function createProviderStateEvent(providerType, config = {}, configRevisi
 
 export function applyProviderStateEvent(providerPools, event, current = {}) {
     if (Number(event?.configRevision || 0) < Number(current.revision || 0)) return false;
+    const incomingEventAt = toTimestamp(event?.occurredAt);
+    const currentEventAt = toTimestamp(current.stateEventAt);
+    if (currentEventAt !== null && (incomingEventAt === null || incomingEventAt <= currentEventAt)) return false;
     const providers = providerPools?.[event?.providerType];
     if (!Array.isArray(providers)) return false;
     const target = providers.find(provider => provider.uuid === event.uuid);

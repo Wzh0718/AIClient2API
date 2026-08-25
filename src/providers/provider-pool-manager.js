@@ -551,7 +551,8 @@ export class ProviderPoolManager {
         this.identityEventSink = options.identityEventSink || null;
         this.providerConfigRevision = Number(options.providerConfigRevision || 0);
         this.serviceAdapterFactory = options.serviceAdapterFactory || getServiceAdapter;
-        this.pendingStateEvents = new Set();
+        this.pendingStateEvents = new Map();
+        this.providerStateEventTimes = new Map();
         this.stateEventTimer = null;
         this.providerIdentityConflicts = 0;
         
@@ -4741,19 +4742,25 @@ export class ProviderPoolManager {
      * 延迟保存操作，避免频繁的文件 I/O
      * @private
      */
-    _debouncedSave(providerType) {
+    _debouncedSave(providerType, { publishStateEvent = true } = {}) {
+        if (this.stateEventSink && publishStateEvent) {
+            const snapshots = new Map();
+            for (const provider of this.providerStatus[providerType] || []) {
+                const event = createProviderStateEvent(providerType, provider.config, this.providerConfigRevision);
+                snapshots.set(provider.uuid, event);
+                this.providerStateEventTimes.set(`${providerType}/${provider.uuid}`, event.occurredAt);
+            }
+            this.pendingStateEvents.set(providerType, snapshots);
+        }
         if (!this.persistenceEnabled) {
             if (!this.stateEventSink) return;
-            this.pendingStateEvents.add(providerType);
             if (this.stateEventTimer) return;
             this.stateEventTimer = setTimeout(() => {
                 this.stateEventTimer = null;
-                const types = [...this.pendingStateEvents];
+                const pending = [...this.pendingStateEvents.entries()];
                 this.pendingStateEvents.clear();
-                for (const type of types) {
-                    for (const provider of this.providerStatus[type] || []) {
-                        this.stateEventSink(createProviderStateEvent(type, provider.config, this.providerConfigRevision));
-                    }
+                for (const [, snapshots] of pending) {
+                    for (const event of snapshots.values()) this.stateEventSink(event);
                 }
             }, Math.min(this.saveDebounceTime, 1000));
             this.stateEventTimer.unref?.();
@@ -4837,6 +4844,15 @@ export class ProviderPoolManager {
                 // 一次性写入文件（使用原子化写入）
                 await atomicWriteFile(filePath, JSON.stringify(currentPools, null, 2), { encoding: 'utf8', mode: 0o600 });
 
+                if (this.stateEventSink) {
+                    for (const providerType of typesToSave) {
+                        const snapshots = this.pendingStateEvents.get(providerType);
+                        if (!snapshots) continue;
+                        for (const event of snapshots.values()) this.stateEventSink(event);
+                        this.pendingStateEvents.delete(providerType);
+                    }
+                }
+
                 this._log('info', `configs/provider_pools.json updated successfully for types: ${typesToSave.join(', ')}`);
             } catch (error) {
                 this._log('error', `Failed to write provider_pools.json: ${error.message}`);
@@ -4845,14 +4861,20 @@ export class ProviderPoolManager {
     }
 
     applyRemoteProviderState(event) {
-        const applied = applyProviderStateEvent(this.providerPools, event, { revision: this.providerConfigRevision });
+        const stateKey = `${event?.providerType}/${event?.uuid}`;
+        const applied = applyProviderStateEvent(this.providerPools, event, {
+            revision: this.providerConfigRevision,
+            stateEventAt: this.providerStateEventTimes.get(stateKey) || null
+        });
         if (!applied && Number(event?.configRevision || 0) < this.providerConfigRevision) {
             this._log('warn', `Ignored stale provider state for ${event?.providerType}/${event?.uuid}: event revision ${event?.configRevision || 0}, current ${this.providerConfigRevision}`);
             return false;
         }
+        if (!applied) return false;
+        this.providerStateEventTimes.set(stateKey, event.occurredAt);
         const provider = this._findProvider(event?.providerType, event?.uuid);
         if (provider) applyProviderStateEvent({ [event.providerType]: [provider.config] }, event, { revision: this.providerConfigRevision });
-        if (applied && this.persistenceEnabled) this._debouncedSave(event.providerType);
+        if (applied && this.persistenceEnabled) this._debouncedSave(event.providerType, { publishStateEvent: false });
         return applied || Boolean(provider);
     }
 
