@@ -477,6 +477,8 @@ function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderDa
             configFilePath: instance.configFilePath || cachedInstance.configFilePath || null,
             isHealthy: instance.isHealthy,
             isDisabled: instance.isDisabled,
+            needsRefresh: instance.needsRefresh,
+            scheduledRecoveryTime: instance.scheduledRecoveryTime || cachedInstance.scheduledRecoveryTime || null,
             success: true,
             error: null,
             staleUsage: true,
@@ -542,6 +544,8 @@ function getCachedInstanceUsageFallback(providerType, uuid, instanceResult, cach
         configFilePath: instanceResult.configFilePath || cachedInstance.configFilePath || null,
         isHealthy: instanceResult.isHealthy,
         isDisabled: instanceResult.isDisabled,
+        needsRefresh: instanceResult.needsRefresh,
+        scheduledRecoveryTime: instanceResult.scheduledRecoveryTime || cachedInstance.scheduledRecoveryTime || null,
         success: true,
         error: null,
         staleUsage: true,
@@ -597,6 +601,8 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
             configFilePath: getProviderConfigFilePath(provider, providerType),
             isHealthy: provider.isHealthy !== false,
             isDisabled: provider.isDisabled === true,
+            needsRefresh: provider.needsRefresh === true,
+            scheduledRecoveryTime: provider.scheduledRecoveryTime || null,
             success: false,
             usage: null,
             error: null,
@@ -736,7 +742,9 @@ function enrichProviderDataWithProviderConfig(providerType, providerData, curren
             antigravityQuotaHealth: instance.antigravityQuotaHealth || provider.antigravityQuotaHealth || null,
             configFilePath: instance.configFilePath || getProviderConfigFilePath(provider, providerType),
             isHealthy: provider.isHealthy !== false,
-            isDisabled: provider.isDisabled === true
+            isDisabled: provider.isDisabled === true,
+            needsRefresh: provider.needsRefresh === true,
+            scheduledRecoveryTime: instance.scheduledRecoveryTime || provider.scheduledRecoveryTime || null
         };
     });
 
@@ -804,6 +812,8 @@ async function resolveProviderInstance(currentConfig, providerPoolManager, provi
         configFilePath: getProviderConfigFilePath(provider, providerType),
         isHealthy: provider.isHealthy !== false,
         isDisabled: provider.isDisabled === true,
+        needsRefresh: provider.needsRefresh === true,
+        scheduledRecoveryTime: provider.scheduledRecoveryTime || null,
         success: false,
         usage: null,
         error: null,

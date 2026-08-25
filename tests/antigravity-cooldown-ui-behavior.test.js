@@ -65,6 +65,74 @@ describe('Antigravity cooldown UI behavior', () => {
         expect(usageManager.getAntigravityPoolUnavailableModels('gemini-antigravity', [])).toEqual([]);
     });
 
+    test('summarizes only models with unavailable credentials and exposes earliest recovery when none are schedulable', async () => {
+        const usageManager = await import('../static/app/usage-manager.js');
+        expect(typeof usageManager.getAntigravityModelAvailabilitySummaries).toBe('function');
+
+        const instances = [
+            {
+                isHealthy: true,
+                antigravityQuotaHealth: {
+                    models: {
+                        'gemini-2.5-flash': { isHealthy: false, scheduledRecoveryTime: '2026-08-25T10:30:00.000Z' },
+                        'gemini-2.5-pro': { isHealthy: false, scheduledRecoveryTime: '2026-08-25T11:30:00.000Z' }
+                    }
+                }
+            },
+            {
+                isHealthy: true,
+                antigravityQuotaHealth: {
+                    models: {
+                        'gemini-2.5-pro': { isHealthy: false, scheduledRecoveryTime: '2026-08-25T09:30:00.000Z' }
+                    }
+                }
+            },
+            {
+                isHealthy: true,
+                antigravityQuotaHealth: { models: {} }
+            }
+        ];
+
+        expect(usageManager.getAntigravityModelAvailabilitySummaries('gemini-antigravity', instances)).toEqual([
+            {
+                model: 'gemini-2.5-flash',
+                availableCount: 2,
+                totalCount: 3,
+                earliestRecoveryTime: null
+            },
+            {
+                model: 'gemini-2.5-pro',
+                availableCount: 1,
+                totalCount: 3,
+                earliestRecoveryTime: null
+            }
+        ]);
+
+        const fullyUnavailable = instances.map(instance => ({
+            ...instance,
+            antigravityQuotaHealth: {
+                models: {
+                    'gemini-2.5-pro': {
+                        isHealthy: false,
+                        scheduledRecoveryTime: instance.uuid === 'missing' ? null : '2026-08-25T11:30:00.000Z'
+                    }
+                }
+            }
+        }));
+        fullyUnavailable[0].antigravityQuotaHealth.models['gemini-2.5-pro'].scheduledRecoveryTime = '2026-08-25T12:30:00.000Z';
+        fullyUnavailable[1].antigravityQuotaHealth.models['gemini-2.5-pro'].scheduledRecoveryTime = '2026-08-25T09:30:00.000Z';
+        fullyUnavailable[2].antigravityQuotaHealth.models['gemini-2.5-pro'].scheduledRecoveryTime = '2026-08-25T10:30:00.000Z';
+
+        expect(usageManager.getAntigravityModelAvailabilitySummaries('gemini-antigravity', fullyUnavailable)).toEqual([
+            {
+                model: 'gemini-2.5-pro',
+                availableCount: 0,
+                totalCount: 3,
+                earliestRecoveryTime: '2026-08-25T09:30:00.000Z'
+            }
+        ]);
+    });
+
     test('ignores disabled, refresh-blocked, unhealthy, and uninitialized instances in the pool calculation', async () => {
         const usageManager = await import('../static/app/usage-manager.js');
         const cooled = {

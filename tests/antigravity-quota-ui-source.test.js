@@ -59,6 +59,12 @@ describe('Antigravity quota UI source', () => {
         expect(usageCache).toContain('antigravityQuotaHealth: incomingInstance.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null');
     });
 
+    test('usage API exposes scheduler refresh state for model availability summaries', () => {
+        const usageApi = readSource('src/ui-modules/usage-api.js');
+        expect(usageApi).toContain('needsRefresh: provider.needsRefresh === true');
+        expect(usageApi).toContain('needsRefresh: instance.needsRefresh,');
+    });
+
     test('usage backend no longer exposes or caches manual Antigravity model scans', () => {
         const uiManager = readSource('src/services/ui-manager.js');
         const usageApi = readSource('src/ui-modules/usage-api.js');
