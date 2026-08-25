@@ -39,6 +39,31 @@ function readStore() {
     return JSON.parse(fs.readFileSync(getStorePath(), 'utf8'));
 }
 
+function writeCredentialGroupStore(keyId, routing) {
+    fs.writeFileSync(
+        path.join(tempDir, 'configs', 'codex-credential-groups.json'),
+        JSON.stringify({
+            version: 1,
+            currentRevision: 1,
+            revisions: [{
+                revision: 1,
+                action: 'apply',
+                createdAt: '2026-08-13T03:00:00.000Z',
+                previousRevision: null,
+                sourceRevision: null,
+                config: {
+                    groups: [],
+                    keyAssignments: [{ keyId, ...routing }],
+                    generatedAt: '2026-08-13T03:00:00.000Z',
+                    timeZone: 'Asia/Shanghai',
+                    historyDays: 7
+                }
+            }]
+        }),
+        'utf8'
+    );
+}
+
 function writeAdminToken(token = 'admin-token') {
     fs.writeFileSync(path.join(tempDir, 'configs', 'token-store.json'), JSON.stringify({
         tokens: {
@@ -295,6 +320,52 @@ describe('API Potluck key credential routing', () => {
                 manualLock: true
             }
         });
+    });
+
+    test('updates the authoritative credential-group assignment with Key routing', async () => {
+        const { keyManager, apiRoutes } = await loadPotluckModules();
+        const token = writeAdminToken();
+        const created = await keyManager.createKey('Synchronized Routing', 1000);
+        writeCredentialGroupStore(created.id, {
+            routingMode: 'fixed',
+            primaryGroupId: null,
+            fixedCredential: {
+                providerType: 'openai-codex-oauth',
+                uuid: 'cred-fixed'
+            },
+            manualLock: false
+        });
+
+        const response = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'PUT',
+            `/api/potluck/keys/${encodeURIComponent(created.id)}/routing`,
+            {
+                routingMode: 'pool',
+                primaryGroupId: null,
+                fixedCredential: null,
+                manualLock: false
+            },
+            token
+        );
+
+        expect(response.statusCode).toBe(200);
+        expect(readStore().keys[created.id]).toMatchObject({
+            routingMode: 'pool',
+            primaryGroupId: null,
+            fixedCredential: null
+        });
+        const groupStore = JSON.parse(fs.readFileSync(
+            path.join(tempDir, 'configs', 'codex-credential-groups.json'),
+            'utf8'
+        ));
+        const current = groupStore.revisions.find(entry => entry.revision === groupStore.currentRevision);
+        expect(current.config.keyAssignments).toContainEqual(expect.objectContaining({
+            keyId: created.id,
+            routingMode: 'pool',
+            primaryGroupId: null,
+            fixedCredential: null
+        }));
     });
 
     test('returns a public fixed credential reference in the Key list for editor preselection', async () => {

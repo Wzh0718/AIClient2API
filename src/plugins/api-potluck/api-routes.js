@@ -1318,6 +1318,8 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                     sendJson(res, 404, { success: false, error: { message: '未找到 Key' } });
                     return true;
                 }
+                const credentialGroupService = new CredentialGroupService();
+                await credentialGroupService.updateKeyAssignment(keyId, keyData);
                 sendManagementMutationResponse(res, {
                     result: keyData,
                     message: 'Key 路由更新成功',

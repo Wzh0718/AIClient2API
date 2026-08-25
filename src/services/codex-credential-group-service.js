@@ -923,6 +923,24 @@ export class CredentialGroupService {
             : { revision: 0, action: null, groups: [], keyAssignments: [] };
     }
 
+    async updateKeyAssignment(keyId, routing = {}) {
+        const current = await this.getCurrentConfig();
+        const normalized = normalizeKeyAssignment({ ...routing, keyId });
+        const keyAssignments = (current.keyAssignments || [])
+            .filter(assignment => String(assignment?.keyId || assignment?.id || '') !== String(keyId));
+        keyAssignments.push(normalized);
+
+        return this.apply({
+            applicable: true,
+            ...current,
+            keyAssignments,
+            generatedAt: this.now().toISOString()
+        }, {
+            action: 'key-routing-update',
+            baseRevision: current.revision
+        });
+    }
+
     /**
      * Return revision metadata for management UIs without exposing the
      * revision's credential/key assignments or any future sensitive fields.
