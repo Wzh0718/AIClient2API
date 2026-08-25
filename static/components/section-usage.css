@@ -511,6 +511,31 @@
     white-space: nowrap;
 }
 
+.antigravity-model-availability-summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+    margin-left: 0.35rem;
+}
+
+.antigravity-model-availability {
+    max-width: 16rem;
+    overflow: hidden;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: var(--warning-bg);
+    color: var(--warning-text);
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.antigravity-model-availability.is-unavailable {
+    background: color-mix(in srgb, var(--danger-bg) 72%, var(--bg-primary));
+    color: var(--danger-text);
+}
+
 .antigravity-model-status-list {
     display: grid;
     margin-top: 0.4rem;

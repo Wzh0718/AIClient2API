@@ -682,6 +682,67 @@ export function getAntigravityPoolUnavailableModels(providerType, instances) {
     return sortAntigravityUnavailableModels(unavailableModels);
 }
 
+export function getAntigravityModelAvailabilitySummaries(providerType, instances) {
+    if (providerType !== ANTIGRAVITY_PROVIDER_TYPE || !Array.isArray(instances) || instances.length === 0) {
+        return [];
+    }
+
+    const activeInstances = instances.filter(instance => (
+        !instance?.isDisabled && !instance?.error?.includes('not initialized')
+    ));
+    if (activeInstances.length === 0) return [];
+
+    const models = new Set();
+    activeInstances.forEach(instance => {
+        Object.keys(instance.antigravityQuotaHealth?.models || {}).forEach(model => models.add(model));
+    });
+
+    return [...models].map(model => {
+        const unavailable = activeInstances.map(instance => {
+            const modelState = instance.antigravityQuotaHealth?.models?.[model];
+            const baseUnavailable = instance.needsRefresh === true || instance.isHealthy === false;
+            const modelUnavailable = modelState?.isHealthy === false;
+            return {
+                unavailable: baseUnavailable || modelUnavailable,
+                recoveryTime: baseUnavailable
+                    ? instance.scheduledRecoveryTime || null
+                    : modelState?.scheduledRecoveryTime || null
+            };
+        }).filter(item => item.unavailable);
+        const totalCount = activeInstances.length;
+        const availableCount = totalCount - unavailable.length;
+        const recoveryTimes = unavailable
+            .map(item => ({ value: item.recoveryTime, timestamp: getAntigravityRecoveryTimestamp(item.recoveryTime) }))
+            .filter(item => item.timestamp !== null)
+            .sort((left, right) => left.timestamp - right.timestamp);
+
+        return {
+            model,
+            availableCount,
+            totalCount,
+            earliestRecoveryTime: availableCount === 0 ? recoveryTimes[0]?.value || null : null
+        };
+    })
+        .filter(summary => summary.availableCount < summary.totalCount)
+        .sort((left, right) => left.model.localeCompare(right.model));
+}
+
+function renderAntigravityModelAvailabilitySummary(providerType, instances) {
+    const summaries = getAntigravityModelAvailabilitySummaries(providerType, instances);
+    if (summaries.length === 0) return '';
+
+    const rows = summaries.map(summary => {
+        const recovery = summary.availableCount === 0
+            ? ` · ${summary.earliestRecoveryTime
+                ? `最早恢复 ${formatAntigravityCompactRecovery(summary.earliestRecoveryTime)}`
+                : '恢复时间未知'}`
+            : '';
+        const label = `${summary.model}：${summary.availableCount}/${summary.totalCount} 可用${recovery}`;
+        return `<span class="antigravity-model-availability${summary.availableCount === 0 ? ' is-unavailable' : ''}" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
+    }).join('');
+    return `<span class="antigravity-model-availability-summary" aria-label="模型可用性">${rows}</span>`;
+}
+
 function formatAntigravityCompactRecovery(value) {
     const timestamp = getAntigravityRecoveryTimestamp(value);
     if (timestamp === null) return t('usage.antigravity.recoveryUnknown');
@@ -942,6 +1003,7 @@ function createProviderGroup(providerType, providerData) {
         ? t('usage.group.lastUpdated', { time: refreshedDate.toLocaleString(getCurrentLanguage()) })
         : t('usage.group.neverUpdated');
     const poolAlert = renderAntigravityPoolAlert(providerType, instances);
+    const modelAvailabilitySummary = renderAntigravityModelAvailabilitySummary(providerType, instances);
     if (poolAlert) group.classList.add('has-pool-alert');
     group.innerHTML = `
         <div class="usage-group-header">
@@ -952,6 +1014,7 @@ function createProviderGroup(providerType, providerData) {
                 <span class="instance-count">${t('usage.group.instances', { count: instances.length })}</span>
                 ${poolAlert}
                 <span class="success-count ${successCount === instances.length ? 'all-success' : ''}">${t('usage.group.success', { count: successCount, total: instances.length })}</span>
+                ${modelAvailabilitySummary}
             </div>
             <div class="usage-group-actions">
                 <span class="provider-last-update" title="${escapeHtml(refreshTimeText)}">${escapeHtml(refreshTimeText)}</span>
