@@ -4322,6 +4322,28 @@ export class ProviderPoolManager {
         }
     }
 
+    reconcileProviderForRouting(providerType, uuid) {
+        const provider = this._findProvider(providerType, uuid);
+        if (!provider) return { status: 'missing', provider: null };
+        const before = {
+            isHealthy: provider.config.isHealthy,
+            scheduledRecoveryTime: provider.config.scheduledRecoveryTime || null
+        };
+        this._checkAndRecoverScheduledProviders(providerType);
+        const after = {
+            isHealthy: provider.config.isHealthy,
+            scheduledRecoveryTime: provider.config.scheduledRecoveryTime || null
+        };
+        return {
+            status: before.isHealthy !== after.isHealthy || before.scheduledRecoveryTime !== after.scheduledRecoveryTime
+                ? 'recovered'
+                : 'unchanged',
+            provider,
+            before,
+            after
+        };
+    }
+
     /**
      * Performs initial (startup) health checks on selected providers.
      * Respects SCHEDULED_HEALTH_CHECK.providerTypes configuration.

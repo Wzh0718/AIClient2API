@@ -6,6 +6,7 @@ import {
     CredentialGroupService,
     calculateCredentialCapacity,
     calculateTargetGroupCount,
+    diagnoseKeyRouting,
     generateCredentialGroupSuggestion,
     routeKeyToCredentialCandidates,
     summarizeKeyDemand,
@@ -362,6 +363,26 @@ describe('Codex credential routing decisions', () => {
         });
     });
 
+    test('fixed routing rejects a healthy credential that is not assigned to a credential group', () => {
+        const result = routeKeyToCredentialCandidates({
+            keyRouting: {
+                routingMode: 'fixed',
+                fixedCredential: { providerType: 'openai-codex-oauth', uuid: 'cred-4' }
+            },
+            groups,
+            credentials: [
+                { uuid: 'cred-4', providerType: 'openai-codex-oauth', isHealthy: true }
+            ]
+        });
+
+        expect(result).toMatchObject({
+            errorCode: 'ROUTE_MISMATCH',
+            routeReason: 'FIXED_CREDENTIAL_NOT_IN_GROUP',
+            candidateProviderUuids: [],
+            selectedGroupId: null
+        });
+    });
+
     test('auto routing spills over to another healthy group when the primary group is unavailable', () => {
         const result = routeKeyToCredentialCandidates({
             keyRouting: { routingMode: 'auto', primaryGroupId: 'group-1' },
@@ -400,6 +421,81 @@ describe('Codex credential routing decisions', () => {
             spillover: false,
             errorCode: null
         });
+    });
+
+    test('routing diagnostics use keyAssignments as canonical fixed config and stay credential-safe', () => {
+        const result = diagnoseKeyRouting({
+            keyData: {
+                id: 'maki-secret-key',
+                routingMode: 'fixed',
+                fixedCredential: { providerType: 'openai-codex-oauth', uuid: 'stale-uuid' }
+            },
+            currentConfig: {
+                revision: 12,
+                groups: [{ id: 'group-1', credentialUuids: ['canonical-uuid'] }],
+                keyAssignments: [{
+                    keyId: 'maki-secret-key',
+                    routingMode: 'fixed',
+                    fixedCredential: { providerType: 'openai-codex-oauth', uuid: 'canonical-uuid' }
+                }]
+            },
+            credentials: [{
+                uuid: 'canonical-uuid',
+                providerType: 'openai-codex-oauth',
+                isHealthy: true,
+                capacity: 1
+            }]
+        });
+
+        expect(result).toMatchObject({
+            routingConfigSource: 'credential-groups',
+            routingMode: 'fixed',
+            selectedGroupId: 'group-1',
+            errorCode: null,
+            fixedCredential: {
+                providerType: 'openai-codex-oauth',
+                configured: true,
+                inGroup: true,
+                candidateAvailable: true
+            }
+        });
+        expect(result.fixedCredential.credentialUuid).toBe('canonical-uuid');
+        expect(JSON.stringify(result)).not.toContain('stale-uuid');
+    });
+
+    test('routing diagnostics report fixed credential group mismatch without exposing secrets', () => {
+        const result = diagnoseKeyRouting({
+            keyData: {
+                id: 'maki-secret-key',
+                routingMode: 'fixed',
+                fixedCredential: { providerType: 'openai-codex-oauth', uuid: 'stale-uuid' }
+            },
+            currentConfig: {
+                revision: 13,
+                groups: [{ id: 'group-1', credentialUuids: ['other-uuid'] }],
+                keyAssignments: [{
+                    keyId: 'maki-secret-key',
+                    routingMode: 'fixed',
+                    fixedCredential: { providerType: 'openai-codex-oauth', uuid: 'missing-uuid' }
+                }]
+            },
+            credentials: [{
+                uuid: 'missing-uuid',
+                providerType: 'openai-codex-oauth',
+                isHealthy: true,
+                capacity: 1
+            }]
+        });
+
+        expect(result).toMatchObject({
+            errorCode: 'ROUTE_MISMATCH',
+            routeReason: 'FIXED_CREDENTIAL_NOT_IN_GROUP',
+            selectedGroupId: null,
+            fixedCredential: { inGroup: false }
+        });
+        expect(JSON.stringify(result)).not.toContain('stale-uuid');
+        expect(JSON.stringify(result)).not.toContain('token');
+        expect(JSON.stringify(result)).not.toContain('proxy');
     });
 });
 

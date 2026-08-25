@@ -32,6 +32,7 @@ import { getBeijingDateKey, listLedgerDates, readLedgerRangeStats, resolveRangeD
 import {
     CredentialGroupService,
     calculateCredentialCapacity,
+    diagnoseKeyRouting,
     generateCredentialGroupSuggestion,
     summarizeKeyDemand,
     validateCredentialGroupSuggestion
@@ -265,6 +266,7 @@ function normalizeCodexCredential(providerType, provider, usageCache) {
         isHealthy: config.isHealthy !== false,
         isDisabled: config.isDisabled === true,
         needsRefresh: config.needsRefresh === true,
+        scheduledRecoveryTime: config.scheduledRecoveryTime || null,
         available: config.available,
         hasCapacity: config.hasCapacity,
         isAtCapacity: config.isAtCapacity,
@@ -623,6 +625,12 @@ function getCredentialGroupErrorStatus(error) {
         case 'INVALID_CREDENTIAL_GROUP_CONFIG':
         case 'INVALID_KEY_ROUTING_ASSIGNMENTS':
             return 400;
+        case 'ROUTE_MISMATCH':
+            return 503;
+        case 'PROVIDER_COOLDOWN':
+            return 429;
+        case 'MODEL_NOT_SUPPORTED':
+            return 404;
         default:
             return null;
     }
@@ -857,6 +865,55 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 new Date()
             );
             sendJson(res, 200, { success: true, data });
+            return true;
+        }
+
+        // GET /api/potluck/credential-groups/diagnostics - 获取路由一致性诊断
+        if (method === 'GET' && path === '/api/potluck/credential-groups/diagnostics') {
+            const context = await loadCredentialGroupContext();
+            const diagnostics = context.keys.map(key => {
+                const result = diagnoseKeyRouting({
+                    keyData: key,
+                    currentConfig: context.currentConfig,
+                    credentials: context.credentials
+                });
+                const fixed = result.fixedCredential || null;
+                const nextRecoveryMs = Date.parse(result.nextRecoveryTime || '');
+                const status = result.errorCode === 'FIXED_CREDENTIAL_UNAVAILABLE'
+                    && Number.isFinite(nextRecoveryMs)
+                    && nextRecoveryMs > Date.now()
+                    ? 'PROVIDER_COOLDOWN'
+                    : (result.errorCode || 'OK');
+                return {
+                    keyRef: hashSecret(result.keyId || ''),
+                    maskedKey: maskKeyId(result.keyId),
+                    name: sanitizeProviderName(key.name) || '未命名 Key',
+                    routingMode: result.routingMode,
+                    routingConfigSource: result.routingConfigSource,
+                    assignmentMissing: result.assignmentMissing,
+                    primaryGroupId: result.primaryGroupId,
+                    selectedGroupId: result.selectedGroupId,
+                    status,
+                    routeReason: result.routeReason,
+                    nextRecoveryTime: result.nextRecoveryTime,
+                    fixedCredential: result.fixedCredential
+                        ? {
+                            providerType: fixed.providerType,
+                            configured: fixed.configured,
+                            inGroup: fixed.inGroup,
+                            candidateAvailable: fixed.candidateAvailable,
+                            credentialRef: getCredentialRef(fixed.providerType, fixed.credentialUuid)
+                        }
+                        : null
+                };
+            });
+            sendJson(res, 200, {
+                success: true,
+                data: {
+                    revision: Number(context.currentConfig.revision || 0),
+                    diagnostics
+                }
+            });
             return true;
         }
 

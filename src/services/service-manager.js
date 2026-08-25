@@ -22,7 +22,7 @@ import { codexOverloadFailoverStore } from '../providers/openai/codex-overload-f
 import { codexCredentialGroupAffinityStore } from '../providers/openai/codex-credential-group-affinity.js';
 import { readGeminiCredentialEmail } from '../utils/gemini-account.js';
 import { normalizeCodexFingerprintProviderConfig } from '../utils/codex-fingerprint-migration.js';
-import { CredentialGroupService, routeKeyToCredentialCandidates } from './codex-credential-group-service.js';
+import { CredentialGroupService, resolveKeyRoutingAssignment, routeKeyToCredentialCandidates } from './codex-credential-group-service.js';
 import { getCodexRoutingConsistencyStatus } from './codex-routing-integrity.js';
 import {
     DEFAULT_CODEX_FALLBACK_MODEL,
@@ -222,32 +222,6 @@ function normalizeCredentialGroups(groups = []) {
         }));
 }
 
-function resolvePotluckCredentialRouting(keyData = {}, currentConfig = {}) {
-    const keyId = keyData?.id ? String(keyData.id) : '';
-    const storedAssignment = keyId
-        ? (currentConfig.keyAssignments || []).find(assignment => String(assignment?.keyId || assignment?.id || '') === keyId)
-        : null;
-
-    if (keyData.routingMode === 'fixed') {
-        return { ...keyData, keyId, routingMode: 'fixed' };
-    }
-    if (keyData.routingMode === 'pool') {
-        return { ...keyData, keyId, routingMode: 'pool', primaryGroupId: null, fixedCredential: null };
-    }
-    if (keyData.routingMode === 'auto' && keyData.primaryGroupId) {
-        return { ...keyData, keyId, routingMode: 'auto' };
-    }
-    if (storedAssignment) {
-        const routingMode = storedAssignment.routingMode === 'fixed'
-            ? 'fixed'
-            : storedAssignment.routingMode === 'auto' && storedAssignment.primaryGroupId
-                ? 'auto'
-                : 'pool';
-        return { ...storedAssignment, keyId, routingMode, primaryGroupId: routingMode === 'auto' ? storedAssignment.primaryGroupId : null };
-    }
-    return { keyId, routingMode: 'pool', primaryGroupId: null, fixedCredential: null };
-}
-
 async function resolveCodexCredentialGroupContext(config, providerType) {
     if (!isCodexProviderType(providerType) || !config?.potluckKeyData) {
         return { handled: false };
@@ -257,19 +231,35 @@ async function resolveCodexCredentialGroupContext(config, providerType) {
         filePath: config.CODEX_CREDENTIAL_GROUPS_FILE_PATH
     });
     const currentConfig = await service.getCurrentConfig();
-    const keyRouting = resolvePotluckCredentialRouting(config.potluckKeyData, currentConfig);
+    const keyRouting = resolveKeyRoutingAssignment(config.potluckKeyData, currentConfig);
     return {
         handled: true,
         keyRouting,
-        groups: normalizeCredentialGroups(currentConfig.groups)
+        groups: normalizeCredentialGroups(currentConfig.groups),
+        configRevision: Number(currentConfig.revision || 0)
     };
 }
 
 function getProviderCredentialCatalog(providerType) {
     return (providerPoolManager?.providerStatus?.[providerType] || [])
-        .map(provider => provider?.uuid || provider?.config?.uuid)
-        .filter(Boolean)
-        .map(uuid => ({ uuid: String(uuid), providerType, providerWeight: 1 }));
+        .map(provider => {
+            const config = provider?.config || provider;
+            const uuid = provider?.uuid || config?.uuid;
+            if (!uuid) return null;
+            return {
+                uuid: String(uuid),
+                providerType,
+                providerWeight: Number(config?.providerWeight || 1),
+                isHealthy: config?.isHealthy,
+                isDisabled: config?.isDisabled,
+                needsRefresh: config?.needsRefresh,
+                scheduledRecoveryTime: config?.scheduledRecoveryTime,
+                quotaAvailable: config?.quotaAvailable,
+                hasCapacity: config?.hasCapacity,
+                isAtCapacity: config?.isAtCapacity
+            };
+        })
+        .filter(Boolean);
 }
 
 function getProviderStatusByUuid(providerType, uuid) {
@@ -306,11 +296,69 @@ function isFixedCredentialModelSupported(providerType, uuid, requestedModel) {
     return !notSupportedModels.some(model => modelAliasMatches(requestedModel, model));
 }
 
-function createFixedCredentialUnavailableError(cause = null) {
+function createFixedCredentialUnavailableError(cause = null, route = {}, configRevision = null) {
     const error = new Error('The fixed Codex credential is unavailable');
     error.code = 'FIXED_CREDENTIAL_UNAVAILABLE';
     error.status = cause?.status || 503;
+    error.statusCode = error.status;
+    error.details = {
+        routingMode: 'fixed',
+        selectedGroupId: route.selectedGroupId || null,
+        ...(Number.isFinite(Number(configRevision)) ? { configRevision: Number(configRevision) } : {}),
+        ...(cause?.code ? { causeCode: cause.code } : {}),
+        ...(cause?.retryAfter || cause?.details?.nextRecoveryAt
+            ? { nextRecoveryAt: cause.retryAfter || cause.details.nextRecoveryAt }
+            : {}),
+        retryable: true
+    };
     if (cause) error.cause = cause;
+    return error;
+}
+
+function createFixedRouteMismatchError(route = {}, configRevision = null) {
+    const error = new Error('Fixed Codex routing configuration is inconsistent');
+    error.code = 'ROUTE_MISMATCH';
+    error.status = 503;
+    error.statusCode = 503;
+    error.details = {
+        reason: route.routeReason || route.errorCode || 'ROUTE_MISMATCH',
+        routingMode: 'fixed',
+        selectedGroupId: route.selectedGroupId || null,
+        ...(Number.isFinite(Number(configRevision)) ? { configRevision: Number(configRevision) } : {}),
+        retryable: false
+    };
+    return error;
+}
+
+function createFixedModelNotSupportedError(model, route = {}, configRevision = null) {
+    const error = new Error(`Fixed Codex credential does not support model ${model}`);
+    error.code = 'MODEL_NOT_SUPPORTED';
+    error.status = 404;
+    error.statusCode = 404;
+    error.details = {
+        reason: 'FIXED_CREDENTIAL_MODEL_UNSUPPORTED',
+        routingMode: 'fixed',
+        selectedGroupId: route.selectedGroupId || null,
+        ...(Number.isFinite(Number(configRevision)) ? { configRevision: Number(configRevision) } : {}),
+        retryable: false
+    };
+    return error;
+}
+
+function createProviderCooldownError(recoveryTime, route = {}, configRevision = null) {
+    const error = new Error('Fixed Codex credential is cooling down');
+    error.code = 'PROVIDER_COOLDOWN';
+    error.status = 429;
+    error.statusCode = 429;
+    error.retryAfter = recoveryTime || null;
+    error.details = {
+        reason: 'FIXED_CREDENTIAL_COOLDOWN',
+        routingMode: 'fixed',
+        selectedGroupId: route.selectedGroupId || null,
+        nextRecoveryAt: recoveryTime || null,
+        ...(Number.isFinite(Number(configRevision)) ? { configRevision: Number(configRevision) } : {}),
+        retryable: true
+    };
     return error;
 }
 
@@ -348,6 +396,8 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
         });
 
     if (keyRouting.routingMode === 'fixed') {
+        const fixedUuid = keyRouting.fixedCredential?.uuid || null;
+        if (fixedUuid) providerPoolManager.reconcileProviderForRouting?.(providerType, fixedUuid);
         const route = routeKeyToCredentialCandidates({
             keyRouting,
             groups,
@@ -362,15 +412,24 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
             spilloverReason: null,
             assignmentMissing: false
         });
+        if (route.errorCode === 'ROUTE_MISMATCH') {
+            throw createFixedRouteMismatchError(route, context.configRevision);
+        }
+        if (route.errorCode === 'FIXED_CREDENTIAL_UNAVAILABLE' && route.nextRecoveryTime) {
+            const recoveryMs = Date.parse(route.nextRecoveryTime);
+            if (Number.isFinite(recoveryMs) && recoveryMs > Date.now()) {
+                throw createProviderCooldownError(route.nextRecoveryTime, route, context.configRevision);
+            }
+        }
         if (route.errorCode || route.candidateProviderUuids.length !== 1) {
-            throw createFixedCredentialUnavailableError();
+            throw createFixedCredentialUnavailableError(route.errorCode ? { code: route.errorCode } : null, route, context.configRevision);
         }
         if (!isFixedCredentialModelSupported(
             providerType,
             route.candidateProviderUuids[0],
             requestedModel
         )) {
-            throw createFixedCredentialUnavailableError();
+            throw createFixedModelNotSupportedError(requestedModel, route, context.configRevision);
         }
 
         const fixedOptions = withStickyProviderAffinity(config, providerType, {
@@ -383,7 +442,7 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
         });
         try {
             const selectedResult = await selectFromPool(fixedOptions);
-            if (!selectedResult) throw createFixedCredentialUnavailableError();
+            if (!selectedResult) throw createFixedCredentialUnavailableError(null, route, context.configRevision);
             updateCodexRoutingDiagnostics(config, {
                 selectedProviderUuid: selectedResult.config?.uuid || null,
                 hotShardApplied: selectionDiagnostics.hotShardApplied === true
@@ -391,7 +450,10 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
             return { handled: true, selectedResult, availabilityError: null };
         } catch (error) {
             if (error?.code === 'FIXED_CREDENTIAL_UNAVAILABLE') throw error;
-            throw createFixedCredentialUnavailableError(error);
+            if (error?.code === 'MODEL_RATE_LIMITED' || error?.code === 'PROVIDER_TEMPORARILY_UNAVAILABLE') {
+                throw createProviderCooldownError(error.nextRecoveryTime || error.retryAfter || null, route, context.configRevision);
+            }
+            throw createFixedCredentialUnavailableError(error, route, context.configRevision);
         }
     }
 

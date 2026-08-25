@@ -402,6 +402,61 @@ function chooseGroupForCredential(groups) {
     }, null);
 }
 
+export function resolveKeyRoutingAssignment(keyData = {}, currentConfig = {}) {
+    const keyId = keyData?.id || keyData?.keyId ? String(keyData.id || keyData.keyId) : '';
+    const storedAssignment = keyId
+        ? (currentConfig.keyAssignments || []).find(assignment => String(assignment?.keyId || assignment?.id || '') === keyId)
+        : null;
+
+    if (storedAssignment) {
+        return {
+            ...normalizeKeyAssignment(storedAssignment),
+            keyId,
+            routingConfigSource: 'credential-groups'
+        };
+    }
+
+    if (keyData.routingMode === 'fixed') {
+        return { ...normalizeKeyAssignment(keyData), keyId, routingConfigSource: 'key-data', assignmentMissing: true };
+    }
+    if (keyData.routingMode === 'pool') {
+        return { keyId, routingMode: 'pool', primaryGroupId: null, fixedCredential: null, routingConfigSource: 'key-data', assignmentMissing: true };
+    }
+    if (keyData.routingMode === 'auto' && keyData.primaryGroupId) {
+        return { ...normalizeKeyAssignment(keyData), keyId, routingConfigSource: 'key-data', assignmentMissing: true };
+    }
+    return { keyId, routingMode: 'pool', primaryGroupId: null, fixedCredential: null, routingConfigSource: 'default', assignmentMissing: true };
+}
+
+export function diagnoseKeyRouting({ keyData = {}, currentConfig = {}, credentials = [] } = {}) {
+    const routing = resolveKeyRoutingAssignment(keyData, currentConfig);
+    const route = routeKeyToCredentialCandidates({
+        keyRouting: routing,
+        groups: currentConfig.groups || [],
+        credentials
+    });
+    return {
+        keyId: routing.keyId || null,
+        routingMode: routing.routingMode,
+        routingConfigSource: routing.routingConfigSource || 'default',
+        assignmentMissing: routing.assignmentMissing === true,
+        primaryGroupId: routing.primaryGroupId || null,
+        selectedGroupId: route.selectedGroupId || null,
+        errorCode: route.errorCode || null,
+        routeReason: route.routeReason || null,
+        nextRecoveryTime: route.nextRecoveryTime || null,
+        fixedCredential: routing.routingMode === 'fixed' && routing.fixedCredential?.uuid
+            ? {
+                providerType: routing.fixedCredential.providerType || 'openai-codex-oauth',
+                credentialUuid: routing.fixedCredential.uuid,
+                configured: true,
+                inGroup: Boolean(route.selectedGroupId),
+                candidateAvailable: route.candidateProviderUuids.length === 1
+            }
+            : null
+    };
+}
+
 function chooseGroupForKey(groups, demandUnits) {
     return groups.reduce((best, group) => {
         const capacity = group.capacity > 0 ? group.capacity : DEFAULT_UNKNOWN_CAPACITY;
@@ -718,22 +773,63 @@ export function routeKeyToCredentialCandidates(options = {}) {
 
     if (keyRouting.routingMode === 'fixed') {
         const fixed = keyRouting.fixedCredential;
-        const credential = fixed?.uuid ? availableByUuid.get(fixed.uuid) : null;
+        const allByUuid = new Map(
+            credentials
+                .filter(credential => getCredentialUuid(credential))
+                .map(credential => [getCredentialUuid(credential), credential])
+        );
+        const credential = fixed?.uuid ? allByUuid.get(fixed.uuid) : null;
         const providerTypeMatches = credential
             && (!fixed.providerType || getCredentialProviderType(credential) === fixed.providerType);
-        if (!credential || !providerTypeMatches) {
+        if (!credential) {
             return {
                 routingMode: 'fixed',
                 selectedGroupId: null,
                 candidateProviderUuids: [],
                 fallbackProviderUuids: [],
                 spillover: false,
-                errorCode: 'FIXED_CREDENTIAL_UNAVAILABLE'
+                errorCode: 'ROUTE_MISMATCH',
+                routeReason: 'FIXED_CREDENTIAL_NOT_FOUND'
+            };
+        }
+        if (!providerTypeMatches) {
+            return {
+                routingMode: 'fixed',
+                selectedGroupId: null,
+                candidateProviderUuids: [],
+                fallbackProviderUuids: [],
+                spillover: false,
+                errorCode: 'ROUTE_MISMATCH',
+                routeReason: 'FIXED_PROVIDER_TYPE_MISMATCH'
+            };
+        }
+        const selectedGroupId = groups.find(group => group.credentialUuids.includes(fixed.uuid))?.id || null;
+        if (!selectedGroupId) {
+            return {
+                routingMode: 'fixed',
+                selectedGroupId: null,
+                candidateProviderUuids: [],
+                fallbackProviderUuids: [],
+                spillover: false,
+                errorCode: 'ROUTE_MISMATCH',
+                routeReason: 'FIXED_CREDENTIAL_NOT_IN_GROUP'
+            };
+        }
+        if (!availableByUuid.has(fixed.uuid)) {
+            return {
+                routingMode: 'fixed',
+                selectedGroupId,
+                candidateProviderUuids: [],
+                fallbackProviderUuids: [],
+                spillover: false,
+                errorCode: 'FIXED_CREDENTIAL_UNAVAILABLE',
+                routeReason: 'FIXED_CREDENTIAL_NOT_HEALTHY',
+                nextRecoveryTime: credential.scheduledRecoveryTime || credential.config?.scheduledRecoveryTime || null
             };
         }
         return {
             routingMode: 'fixed',
-            selectedGroupId: groups.find(group => group.credentialUuids.includes(fixed.uuid))?.id || null,
+            selectedGroupId,
             candidateProviderUuids: [fixed.uuid],
             fallbackProviderUuids: [],
             spillover: false,

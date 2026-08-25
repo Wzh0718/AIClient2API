@@ -149,9 +149,60 @@ describe('Service Manager Codex credential-group routing', () => {
         });
     });
 
+    test('uses the credential-group assignment as the routing source when key data is stale', async () => {
+        writeGroupConfig({
+            groups: [
+                { id: 'group-a', credentialUuids: ['codex-a'] },
+                { id: 'group-b', credentialUuids: ['codex-b'] }
+            ],
+            keyAssignments: [{
+                keyId: 'key-1',
+                routingMode: 'fixed',
+                fixedCredential: { providerType, uuid: 'codex-b' }
+            }]
+        });
+        const config = createConfig({
+            keyData: {
+                routingMode: 'fixed',
+                fixedCredential: { providerType, uuid: 'codex-a' }
+            }
+        });
+        await initialize(config);
+
+        const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
+
+        expect(result.uuid).toBe('codex-b');
+        expect(config._codexRouting).toMatchObject({
+            routingMode: 'fixed',
+            selectedGroupId: 'group-b',
+            selectedProviderUuid: 'codex-b'
+        });
+    });
+
+    test('fixed routing reports a route mismatch when its credential is not in a group', async () => {
+        writeGroupConfig({
+            groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
+            keyAssignments: [{
+                keyId: 'key-1',
+                routingMode: 'fixed',
+                fixedCredential: { providerType, uuid: 'codex-b' }
+            }]
+        });
+        const config = createConfig({
+            providers: [provider('codex-a'), provider('codex-b')],
+            keyData: { routingMode: 'pool' }
+        });
+        await initialize(config);
+
+        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toMatchObject({
+            code: 'ROUTE_MISMATCH',
+            status: 503,
+            details: expect.objectContaining({ reason: 'FIXED_CREDENTIAL_NOT_IN_GROUP' })
+        });
+    });
+
     test.each([
         ['unhealthy', provider('codex-a', { isHealthy: false })],
-        ['unsupported model', provider('codex-a', { supportedModels: ['gpt-5.3-codex'] })],
         ['concurrency exhausted', provider('codex-a', { concurrencyLimit: 1, queueLimit: 0 })]
     ])('fixed routing fails closed when the credential is %s', async (caseName, fixedProvider) => {
         writeGroupConfig({
@@ -179,6 +230,91 @@ describe('Service Manager Codex credential-group routing', () => {
             routingMode: 'fixed',
             selectedProviderUuid: null,
             spillover: false
+        });
+    });
+
+    test('fixed routing reports MODEL_NOT_SUPPORTED for a healthy credential without the requested model', async () => {
+        writeGroupConfig({
+            groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
+            keyAssignments: [{
+                keyId: 'key-1',
+                routingMode: 'fixed',
+                fixedCredential: { providerType, uuid: 'codex-a' }
+            }]
+        });
+        const config = createConfig({
+            providers: [provider('codex-a', { supportedModels: ['gpt-5.3-codex'] })],
+            keyData: { routingMode: 'pool' }
+        });
+        await initialize(config);
+
+        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toMatchObject({
+            code: 'MODEL_NOT_SUPPORTED',
+            status: 404
+        });
+    });
+
+    test('fixed routing reports PROVIDER_COOLDOWN while the fixed credential is cooling down', async () => {
+        const recoveryTime = new Date(Date.now() + 60_000).toISOString();
+        writeGroupConfig({
+            groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
+            keyAssignments: [{
+                keyId: 'key-1',
+                routingMode: 'fixed',
+                fixedCredential: { providerType, uuid: 'codex-a' }
+            }]
+        });
+        const config = createConfig({
+            providers: [provider('codex-a', {
+                isHealthy: false,
+                scheduledRecoveryTime: recoveryTime
+            })],
+            keyData: { routingMode: 'pool' }
+        });
+        const manager = await initialize(config);
+        Object.assign(manager.providerStatus[providerType][0].config, {
+            isHealthy: false,
+            scheduledRecoveryTime: recoveryTime
+        });
+
+        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toMatchObject({
+            code: 'PROVIDER_COOLDOWN',
+            status: 429,
+            retryAfter: recoveryTime
+        });
+    });
+
+    test('fixed routing lazily recovers an expired provider cooldown before candidate validation', async () => {
+        writeGroupConfig({
+            groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
+            keyAssignments: [{
+                keyId: 'key-1',
+                routingMode: 'fixed',
+                fixedCredential: { providerType, uuid: 'codex-a' }
+            }]
+        });
+        const config = createConfig({
+            providers: [provider('codex-a', {
+                isHealthy: false,
+                scheduledRecoveryTime: '2026-08-25T00:00:00.000Z',
+                lastErrorMessage: 'expired cooldown'
+            })],
+            keyData: { routingMode: 'pool' }
+        });
+        const manager = await initialize(config);
+        Object.assign(manager.providerStatus[providerType][0].config, {
+            isHealthy: false,
+            scheduledRecoveryTime: '2026-08-25T00:00:00.000Z',
+            lastErrorMessage: 'expired cooldown'
+        });
+
+        const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
+
+        expect(result.uuid).toBe('codex-a');
+        expect(config._codexRouting).toMatchObject({
+            routingMode: 'fixed',
+            selectedGroupId: 'group-a',
+            selectedProviderUuid: 'codex-a'
         });
     });
 
@@ -432,7 +568,8 @@ describe('Service Manager Codex credential-group routing', () => {
         await initialize(config);
 
         await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toMatchObject({
-            code: 'FIXED_CREDENTIAL_UNAVAILABLE'
+            code: 'MODEL_NOT_SUPPORTED',
+            status: 404
         });
     });
 

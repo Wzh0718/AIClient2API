@@ -249,6 +249,105 @@ describe('Potluck Codex credential group management API', () => {
         expect(serialized).not.toContain(RAW_UUID_PREFIX);
     });
 
+    test('returns canonical routing diagnostics with masked credential references', async () => {
+        setKeyCatalog([{
+            id: RAW_KEY,
+            keyId: RAW_KEY,
+            name: 'Fixed key',
+            routingMode: 'fixed',
+            fixedCredential: { providerType: 'openai-codex-oauth', uuid: `${RAW_UUID_PREFIX}2` }
+        }]);
+        fs.writeFileSync(path.join(tempDir, 'configs', 'codex-credential-groups.json'), JSON.stringify({
+            version: 1,
+            currentRevision: 12,
+            revisions: [{
+                revision: 12,
+                action: 'apply',
+                config: {
+                    groups: [{ id: 'group-1', name: '固定组', credentialUuids: [`${RAW_UUID_PREFIX}1`] }],
+                    keyAssignments: [{
+                        keyId: RAW_KEY,
+                        routingMode: 'fixed',
+                        fixedCredential: { providerType: 'openai-codex-oauth', uuid: `${RAW_UUID_PREFIX}1` }
+                    }]
+                }
+            }]
+        }));
+
+        const response = await callRoute('GET', '/api/potluck/credential-groups/diagnostics');
+        const serialized = JSON.stringify(response.body);
+
+        expect(response.statusCode).toBe(200);
+        expect(response.body).toMatchObject({
+            success: true,
+            data: {
+                revision: 12,
+                diagnostics: [expect.objectContaining({
+                    routingMode: 'fixed',
+                    routingConfigSource: 'credential-groups',
+                    selectedGroupId: 'group-1',
+                    status: 'OK',
+                    fixedCredential: expect.objectContaining({
+                        providerType: 'openai-codex-oauth',
+                        credentialRef: expect.any(String)
+                    })
+                })]
+            }
+        });
+        expect(serialized).not.toContain(RAW_KEY);
+        expect(serialized).not.toContain(RAW_UUID_PREFIX);
+    });
+
+    test('reports fixed credential mismatch and cooldown distinctly', async () => {
+        setKeyCatalog([
+            {
+                id: `${RAW_KEY}-mismatch`,
+                keyId: `${RAW_KEY}-mismatch`,
+                name: 'Mismatch key',
+                routingMode: 'fixed',
+                fixedCredential: { providerType: 'openai-codex-oauth', uuid: `${RAW_UUID_PREFIX}2` }
+            },
+            {
+                id: `${RAW_KEY}-cooldown`,
+                keyId: `${RAW_KEY}-cooldown`,
+                name: 'Cooldown key',
+                routingMode: 'fixed',
+                fixedCredential: { providerType: 'openai-codex-oauth', uuid: `${RAW_UUID_PREFIX}3` }
+            }
+        ]);
+        setCredentialPool([
+            makeCredential(2),
+            makeCredential(3, {
+                isHealthy: false,
+                scheduledRecoveryTime: '2026-08-14T05:00:00.000Z'
+            })
+        ]);
+        fs.writeFileSync(path.join(tempDir, 'configs', 'codex-credential-groups.json'), JSON.stringify({
+            version: 1,
+            currentRevision: 7,
+            revisions: [{
+                revision: 7,
+                action: 'apply',
+                config: {
+                    groups: [{ id: 'group-1', credentialUuids: [`${RAW_UUID_PREFIX}1`] }, { id: 'group-2', credentialUuids: [`${RAW_UUID_PREFIX}3`] }],
+                    keyAssignments: [
+                        { keyId: `${RAW_KEY}-mismatch`, routingMode: 'fixed', fixedCredential: { providerType: 'openai-codex-oauth', uuid: `${RAW_UUID_PREFIX}2` } },
+                        { keyId: `${RAW_KEY}-cooldown`, routingMode: 'fixed', fixedCredential: { providerType: 'openai-codex-oauth', uuid: `${RAW_UUID_PREFIX}3` } }
+                    ]
+                }
+            }]
+        }));
+
+        const response = await callRoute('GET', '/api/potluck/credential-groups/diagnostics');
+        const byName = Object.fromEntries(response.body.data.diagnostics.map(item => [item.name, item]));
+
+        expect(byName['Mismatch key']).toMatchObject({ status: 'ROUTE_MISMATCH' });
+        expect(byName['Cooldown key']).toMatchObject({
+            status: 'PROVIDER_COOLDOWN',
+            nextRecoveryTime: '2026-08-14T05:00:00.000Z'
+        });
+    });
+
     test('returns normalized demand shares and capacity load indexes in a preview', async () => {
         const response = await createPreview({
             credentialCount: 3,
