@@ -162,6 +162,7 @@
         .stat-card.green .value > span:first-child { color: var(--success-color); }
         .stat-card.cyan .value { color: var(--info-color); }
         .stat-card.orange .value { color: #f59e0b; font-size: 1.25rem; margin-top: 0.5rem; }
+        .stat-note { font-size: 11px; color: var(--text-tertiary); margin-top: 6px; }
 
         /* 分布统计样式 */
         .distribution-list {
@@ -414,6 +415,16 @@
                 <div class="label">最后使用</div>
                 <div class="value" id="statLastUsed">从未</div>
             </div>
+            <div class="stat-card orange">
+                <div class="label">今日估算费用</div>
+                <div class="value" id="statTodayCost">$0.0000</div>
+                <div class="stat-note" id="statTodayCostNote">按当前价格表估算</div>
+            </div>
+            <div class="stat-card purple">
+                <div class="label">累计估算费用</div>
+                <div class="value" id="statTotalCost">$0.0000</div>
+                <div class="stat-note" id="statTotalCostNote">按当前价格表估算</div>
+            </div>
             <div class="stat-card purple">
                 <div class="label">每日用量</div>
                 <div class="value">
@@ -646,6 +657,17 @@
             document.getElementById('statTodayCachedTokens').textContent = formatTokenCompact(data.usage?.cachedTokens || 0);
             document.getElementById('statTotalTokens').textContent = formatTokenCompact(data.tokens?.total || 0);
             document.getElementById('statTotalCachedTokens').textContent = formatTokenCompact(data.tokens?.cached || 0);
+
+            const formatUsd = (value) => `$${Number(value || 0).toFixed(4)}`;
+            document.getElementById('statTodayCost').textContent = formatUsd(data.usage?.cost?.usd);
+            document.getElementById('statTotalCost').textContent = formatUsd(data.cost?.usd);
+            const missingPriceTokens = Number(data.usage?.cost?.missingPriceTokens || 0)
+                + Number(data.cost?.missingPriceTokens || 0);
+            const costNote = missingPriceTokens > 0
+                ? `部分 Token 未匹配价格（${formatTokenCompact(missingPriceTokens)}）`
+                : '按当前价格表估算';
+            document.getElementById('statTodayCostNote').textContent = costNote;
+            document.getElementById('statTotalCostNote').textContent = costNote;
             
             // 速率统计
             document.getElementById('statQps').textContent = (data.usage?.qps || 0).toFixed(2);
@@ -686,6 +708,7 @@
                 dailyData[date] = {
                     totalTokens: data.summary?.totalTokens || 0,
                     requestCount: data.summary?.requestCount || 0,
+                    costUsd: data.summary?.cost?.usd || 0,
                     maxQps: data.summary?.maxQps || 0,
                     maxRpm: data.summary?.maxRpm || 0,
                     maxTps: data.summary?.maxTps || 0
@@ -705,7 +728,7 @@
                 // 统一使用北京时间 (UTC+8) 生成 key，与后端保持一致
                 const utc8Date = new Date(date.getTime() + (8 * 60 * 60 * 1000));
                 const dateKey = utc8Date.toISOString().split('T')[0];
-                const entry = dailyData[dateKey] || { totalTokens: 0, requestCount: 0 };
+                const entry = dailyData[dateKey] || { totalTokens: 0, requestCount: 0, costUsd: 0 };
                 const tokens = entry.totalTokens;
                 const requests = entry.requestCount;
                 currentTotal += tokens;
@@ -723,7 +746,7 @@
                 day.className = 'calendar-day';
                 day.dataset.level = level;
                 
-                const tipText = `${dateKey}: ${formatNumber(requests)} 次请求, ${formatTokenCompact(tokens)} Tokens${entry.maxQps ? `\n峰值: ${entry.maxQps.toFixed(2)} QPS / ${entry.maxRpm.toFixed(0)} RPM / ${entry.maxTps.toFixed(2)} TPS` : ''}`;
+                const tipText = `${dateKey}: ${formatNumber(requests)} 次请求, ${formatTokenCompact(tokens)} Tokens, $${Number(entry.costUsd || 0).toFixed(4)} 估算费用${entry.maxQps ? `\n峰值: ${entry.maxQps.toFixed(2)} QPS / ${entry.maxRpm.toFixed(0)} RPM / ${entry.maxTps.toFixed(2)} TPS` : ''}`;
                 day.onmouseenter = (e) => {
                     tooltip.innerText = tipText;
                     tooltip.style.display = 'block';
@@ -735,7 +758,8 @@
                 
                 grid.appendChild(day);
             }
-            document.getElementById('calendarFooter').textContent = `最近三个月累计消耗: ${formatTokenCompact(currentTotal)} Tokens`;
+            const recentCost = Object.values(dailyData).reduce((sum, entry) => sum + Number(entry.costUsd || 0), 0);
+            document.getElementById('calendarFooter').textContent = `最近三个月累计消耗: ${formatTokenCompact(currentTotal)} Tokens，估算费用 $${recentCost.toFixed(4)}`;
         }
 
         /**

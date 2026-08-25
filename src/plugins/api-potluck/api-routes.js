@@ -57,6 +57,17 @@ function sendJson(res, statusCode, data) {
     res.end(JSON.stringify(data));
 }
 
+function compactUserCost(cost = {}) {
+    return {
+        usd: Number(cost.usd || 0),
+        actualUsd: Number(cost.actualUsd || 0),
+        estimatedUsd: Number(cost.estimatedUsd || 0),
+        missingPriceTokens: Number(cost.missingPriceTokens || 0),
+        estimatedPriceTokens: Number(cost.estimatedPriceTokens || 0),
+        pricingVersion: cost.pricingVersion || null
+    };
+}
+
 function getRequestCostOptions(req) {
     try {
         const url = new URL(req.url || '', 'http://localhost');
@@ -1408,6 +1419,8 @@ export async function handlePotluckUserApiRoutes(method, path, req, res) {
             const usagePercent = keyData.dailyLimit > 0
                 ? Math.round((keyData.todayUsage / keyData.dailyLimit) * 100)
                 : 0;
+            const todayDate = getBeijingDateKey(new Date());
+            const todayCost = keyData.usageHistory?.[todayDate]?.summary?.cost || {};
 
             // 返回用户友好的使用量信息（隐藏敏感信息）
             sendJson(res, 200, {
@@ -1430,9 +1443,11 @@ export async function handlePotluckUserApiRoutes(method, path, req, res) {
                         rpm: keyData.rpm || 0,
                         maxQps: keyData.maxQps || 0,
                         maxTps: keyData.maxTps || 0,
-                        maxRpm: keyData.maxRpm || 0
+                        maxRpm: keyData.maxRpm || 0,
+                        cost: compactUserCost(todayCost)
                     },
                     total: keyData.totalUsage,
+                    cost: compactUserCost(keyData.cost),
                     tokens: {
                         prompt: keyData.totalPromptTokens || 0,
                         completion: keyData.totalCompletionTokens || 0,
