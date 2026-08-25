@@ -1340,6 +1340,9 @@ function addCostToUsageHistory(usageHistory = {}, conversionModel = DEFAULT_CONV
     for (const day of Object.values(usageHistory || {})) {
         if (!day?.summary) continue;
         day.summary.cost = buildCost(day.summary, day.models || {}, conversionModel);
+        for (const [provider, usage] of Object.entries(day.providers || {})) {
+            usage.cost = buildCost(usage, day.providerModels?.[provider] || {}, conversionModel);
+        }
         for (const [model, usage] of Object.entries(day.models || {})) {
             usage.cost = buildCost(usage, { [model]: usage }, conversionModel);
         }
@@ -1408,12 +1411,13 @@ function cloneCredentialRoutingUsageHistory(usageHistory = {}) {
     return compact;
 }
 
-function cloneUsageMapForCompactHistory(usageMap = {}) {
+function cloneUsageMapForCompactHistory(usageMap = {}, costByName = {}) {
     const compact = {};
     for (const [name, usage] of Object.entries(usageMap || {})) {
         compact[name] = cloneUsageBucket(usage);
         addCacheHitRatio(compact[name]);
-        delete compact[name].cost;
+        if (costByName[name]) compact[name].cost = cloneCompactCostBucket(costByName[name]);
+        else delete compact[name].cost;
     }
     return compact;
 }
@@ -1425,9 +1429,13 @@ function cloneUsageHistoryForUser(usageHistory = {}, conversionModel = DEFAULT_C
         addCacheHitRatio(summary);
         const summaryCost = buildCost(summary, day?.models || {}, conversionModel);
         summary.cost = options.compactCosts ? cloneCompactCostBucket(summaryCost) : summaryCost;
+        const providerCosts = {};
+        for (const [provider, usage] of Object.entries(day?.providers || {})) {
+            providerCosts[provider] = buildCost(usage, day?.providerModels?.[provider] || {}, conversionModel);
+        }
         compact[date] = {
             summary,
-            providers: cloneUsageMapForCompactHistory(day?.providers),
+            providers: cloneUsageMapForCompactHistory(day?.providers, providerCosts),
             models: cloneUsageMapForCompactHistory(day?.models)
         };
     }
