@@ -2641,12 +2641,14 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     }
 
     let temporaryRouteFallbackUsed = Boolean(temporaryRoute?.scheduleBypass);
+    const temporaryFallbackModel = temporaryRoute?.fallbackModel
+        || temporaryRoute?.scheduleBypass?.fallbackModel
+        || DEFAULT_CODEX_FALLBACK_MODEL;
     const buildTemporaryLunaFallback = temporaryRoute?.fallbackToOriginal
         ? async () => {
             const fallbackProviderType = temporaryRoute.scheduleBypass?.fallbackProviderType
                 || temporaryRoute.originalProviderType;
-            const fallbackModel = temporaryRoute.scheduleBypass?.fallbackModel
-                || DEFAULT_CODEX_FALLBACK_MODEL;
+            const fallbackModel = temporaryFallbackModel;
             CONFIG.MODEL_PROVIDER = fallbackProviderType;
             delete CONFIG.actualProviderType;
             const { getApiServiceWithFallback } = await import('../services/service-manager.js');
@@ -2753,7 +2755,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             });
         } catch (selectionError) {
             if (!buildTemporaryLunaFallback) throw selectionError;
-            logger.warn(`[Temporary Route] Target selection failed; using ${DEFAULT_CODEX_FALLBACK_MODEL}: ${selectionError.message}`);
+            logger.warn(`[Temporary Route] Target selection failed; using ${temporaryFallbackModel}: ${selectionError.message}`);
             const fallback = await buildTemporaryLunaFallback();
             providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
             temporaryRouteFallbackUsed = true;

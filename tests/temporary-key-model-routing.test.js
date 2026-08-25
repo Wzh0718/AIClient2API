@@ -24,6 +24,7 @@ function createConfig(overrides = {}) {
                 modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
+                fallbackModel: 'gpt-5.4-mini',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }
@@ -53,7 +54,7 @@ function createScheduledConfig(overrides = {}) {
         end: '19:00',
         modelFamilies: ['gpt-5.4', 'gpt-5.3-codex-spark'],
         fallbackProviderType: 'openai-codex-oauth',
-        fallbackModel: 'gpt-5.6-luna'
+        fallbackModel: 'gpt-5.4-mini'
     };
     return { ...config, ...overrides };
 }
@@ -97,6 +98,7 @@ describe('temporary per-key model routing', () => {
                 originalProviderType: 'openai-codex-oauth',
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
+                fallbackModel: 'gpt-5.4-mini',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             });
@@ -232,7 +234,7 @@ describe('temporary per-key model routing', () => {
                 reason: 'scheduled_blackout',
                 targetAttempted: false,
                 fallbackProviderType: 'openai-codex-oauth',
-                fallbackModel: 'gpt-5.6-luna',
+                fallbackModel: 'gpt-5.4-mini',
                 calendarDegraded: false,
                 calendarYear: 2026
             });

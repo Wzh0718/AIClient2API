@@ -192,6 +192,7 @@ export function resolveTemporaryKeyModelRoute({
             originalProviderType,
             targetProviderType: String(rule.targetProviderType),
             targetModel: String(rule.targetModel),
+            fallbackModel: rule.fallbackModel ? String(rule.fallbackModel) : null,
             fallbackToOriginal: rule.fallbackToOriginal === true,
             preserveResponseModel: rule.preserveResponseModel === true,
             ...(scheduleBypass ? { scheduleBypass } : {})

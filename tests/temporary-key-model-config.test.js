@@ -34,6 +34,7 @@ describe('temporary key model route configuration', () => {
                 modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
+                fallbackModel: 'gpt-5.4-mini',
                 fallbackToOriginal: true,
                 preserveResponseModel: true,
                 targetBlackout: {
@@ -43,7 +44,7 @@ describe('temporary key model route configuration', () => {
                     end: '19:00',
                     modelFamilies: ['gpt-5.4', 'gpt-5.3-codex-spark'],
                     fallbackProviderType: 'openai-codex-oauth',
-                    fallbackModel: 'gpt-5.6-luna'
+                    fallbackModel: 'gpt-5.4-mini'
                 }
             }
         ]);

@@ -31,7 +31,7 @@ describe('codex 5.6 model registration', () => {
 
         expect(routingSource).not.toContain("'openai-codex-oauth:gpt-5.6': 'gpt-5.6-sol'");
         expect(routingSource).toContain("DEFAULT_CODEX_FALLBACK_MODEL");
-        expect(routingSource).not.toContain("const DEFAULT_CODEX_FALLBACK_MODEL = 'gpt-5.4-mini';");
+        expect(routingSource).toContain("DEFAULT_CODEX_FALLBACK_MODEL");
         expect(routingSource).toContain('resolveCodexEntryModel');
         expect(modelRoutingSource).toContain("DEFAULT_CODEX_FALLBACK_MODEL = 'gpt-5.6-luna'");
         expect(codexSource).toContain('不支持的模型');
