@@ -60,16 +60,47 @@ describe('Codex weekly quota estimation', () => {
         expect(result.upperBoundUsd).toBeGreaterThan(result.estimatedWeeklyUsd);
     });
 
-    test('does not estimate at zero or fully exhausted percentage', () => {
-        for (const usedPercent of [0, 100]) {
-            expect(estimateCurrentPeriodQuota({
-                observedAt: '2026-08-23T03:00:00.000Z',
-                periodStart: '2026-08-20T03:34:03.000Z',
-                resetAt: '2026-08-27T03:34:03.000Z',
-                usedPercent,
-                periodCostUsd: 100
-            })).toMatchObject({ status: 'insufficient-data' });
-        }
+    test('does not estimate at zero percent', () => {
+        expect(estimateCurrentPeriodQuota({
+            observedAt: '2026-08-23T03:00:00.000Z',
+            periodStart: '2026-08-20T03:34:03.000Z',
+            resetAt: '2026-08-27T03:34:03.000Z',
+            usedPercent: 0,
+            periodCostUsd: 100
+        })).toMatchObject({ status: 'insufficient-data' });
+    });
+
+    test('treats a fully exhausted weekly quota as a determined current-period total', () => {
+        const result = estimateCurrentPeriodQuota({
+            observedAt: '2026-08-23T03:00:00.000Z',
+            periodStart: '2026-08-20T03:34:03.000Z',
+            resetAt: '2026-08-27T03:34:03.000Z',
+            usedPercent: 100,
+            periodCostUsd: 100
+        });
+
+        expect(result).toMatchObject({
+            status: 'exhausted',
+            estimatedWeeklyUsd: 100,
+            estimatedMonthlyUsd: 400,
+            confidence: 'high',
+            method: 'exhausted-period-total'
+        });
+    });
+
+    test('does not invent a determined amount when an exhausted quota has no local cost', () => {
+        expect(estimateCurrentPeriodQuota({
+            observedAt: '2026-08-23T03:00:00.000Z',
+            periodStart: '2026-08-20T03:34:03.000Z',
+            resetAt: '2026-08-27T03:34:03.000Z',
+            usedPercent: 100,
+            periodCostUsd: 0
+        })).toMatchObject({
+            status: 'exhausted',
+            estimatedWeeklyUsd: null,
+            estimatedMonthlyUsd: null,
+            method: 'exhausted-period-total'
+        });
     });
 
     test('sums only account timeline buckets that overlap the active period', () => {

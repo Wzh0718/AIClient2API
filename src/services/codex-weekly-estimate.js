@@ -131,11 +131,25 @@ export function estimateCurrentPeriodQuota({
         || observedMs < startMs
         || observedMs >= resetMs
         || percent === null
-        || percent <= 0
-        || percent >= 100
-        || cost === null
-        || cost <= 0
+        || percent < 0
+        || percent > 100
     ) {
+        return base;
+    }
+
+    if (percent === 100) {
+        const determinedCost = cost !== null && cost > 0 ? roundCurrency(cost) : null;
+        return {
+            ...base,
+            status: 'exhausted',
+            estimatedWeeklyUsd: determinedCost,
+            estimatedMonthlyUsd: determinedCost !== null ? roundCurrency(determinedCost * 4) : null,
+            confidence: 'high',
+            method: 'exhausted-period-total'
+        };
+    }
+
+    if (percent <= 0 || cost === null || cost <= 0) {
         return base;
     }
 

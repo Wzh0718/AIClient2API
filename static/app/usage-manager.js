@@ -1322,6 +1322,14 @@ function renderAccountUsageSummary(accountSummary, instance = {}) {
 
 function renderEstimatedWeeklyQuota(accountSummary, instance = {}) {
     const estimate = instance.weeklyQuotaEstimate;
+    if (estimate && estimate.status === 'exhausted' && estimate.method === 'exhausted-period-total') {
+        const weeklyAmount = Number(estimate.estimatedWeeklyUsd);
+        const monthlyAmount = Number(estimate.estimatedMonthlyUsd);
+        if (Number.isFinite(weeklyAmount)) {
+            return `<div class="account-usage-estimated-weekly" title="本周期已用完，额度已确定：当前周期累计金额 ${formatUsd(estimate.periodCostUsd)}"><i class="fas fa-chart-line"></i><span>预估周额度（已用完）</span><strong>$${Math.round(weeklyAmount).toLocaleString(getCurrentLanguage())}</strong></div><div class="account-usage-estimated-weekly account-usage-estimated-monthly" title="本周期已用完，按确定周额度 × 4 推算"><i class="fas fa-calendar-alt"></i><span>预估月额度</span><strong>$${Math.round(monthlyAmount).toLocaleString(getCurrentLanguage())}</strong></div>`;
+        }
+        return '<div class="account-usage-estimated-weekly" title="官方周额度已用完，但本地累计金额不可用"><i class="fas fa-chart-line"></i><span>周额度</span><strong>已用完（100%）</strong></div><div class="account-usage-estimated-weekly account-usage-estimated-monthly" title="本地累计金额不可用，无法推算月额度"><i class="fas fa-calendar-alt"></i><span>预估月额度</span><strong>不可估算</strong></div>';
+    }
     if (!estimate || estimate.status !== 'estimated' || !Number.isFinite(Number(estimate.estimatedWeeklyUsd))) {
         return '<div class="account-usage-estimated-weekly" title="当前周期金额或官方额度不足，继续采样中"><i class="fas fa-chart-line"></i><span>预估周额度</span><strong>采样中</strong></div><div class="account-usage-estimated-weekly account-usage-estimated-monthly" title="周额度可估算后按 4 周推算"><i class="fas fa-calendar-alt"></i><span>预估月额度</span><strong>采样中</strong></div>';
     }

@@ -120,6 +120,15 @@ describe('usage manager display source regressions', () => {
         expect(source).toContain('本地金额');
     });
 
+    test('exhausted weekly quota renders a determined amount or exhausted state instead of sampling', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain("estimate.status === 'exhausted'");
+        expect(source).toContain('本周期已用完，额度已确定');
+        expect(source).toContain('已用完（100%）');
+        expect(source).toContain("estimate.method === 'exhausted-period-total'");
+    });
+
     test('account usage summary keeps an estimate row visible while sampling', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
 
