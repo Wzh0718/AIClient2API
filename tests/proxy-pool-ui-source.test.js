@@ -35,9 +35,41 @@ describe('provider proxy pool UI source', () => {
 
         expect(modalSource).toContain('function buildProxyPoolIndex');
         expect(modalSource).toContain('function getProviderProxyBadgeHtml');
-        expect(modalSource).toContain('renderProxyPoolAssignments(proxy.id)');
+        expect(modalSource).toContain('renderProxyPoolAssignments(proxyId, proxyPoolProviderFilter)');
         expect(modalSource).toContain('data-proxy-account');
         expect(cssSource).toContain('.provider-proxy-badge');
         expect(cssSource).toContain('.proxy-pool-assignments');
+    });
+
+    test('proxy pool defaults to the current provider and exposes provider filter controls', () => {
+        const modalSource = readFileSync('static/app/modal.js', 'utf8');
+        const i18nSource = readFileSync('static/app/i18n.js', 'utf8');
+
+        expect(modalSource).toContain("proxyPoolProviderFilter = currentProviderType || 'all'");
+        expect(modalSource).toContain('renderProxyPoolProviderFilters');
+        expect(modalSource).toContain('data-proxy-provider-filter');
+        expect(modalSource).toContain('modal.proxyPool.allProviders');
+        expect(i18nSource).toContain("'modal.proxyPool.globalScope'");
+    });
+
+    test('provider filter updates assignment slots without rebuilding editable proxy rows', () => {
+        const modalSource = readFileSync('static/app/modal.js', 'utf8');
+
+        expect(modalSource).toContain('function updateProxyPoolAssignmentViews');
+        expect(modalSource).toContain("querySelectorAll('.proxy-pool-assignment-slot')");
+        expect(modalSource).toContain('renderProxyPoolAssignments(proxyId, proxyPoolProviderFilter)');
+        expect(modalSource).toContain('data-proxy-assignment-id');
+        expect(modalSource).not.toContain("document.querySelector('.proxy-pool-list').innerHTML = cachedProxyPools");
+    });
+
+    test('assignment chips keep provider identity and filtered empty state visible', () => {
+        const modalSource = readFileSync('static/app/modal.js', 'utf8');
+        const cssSource = readFileSync('static/components/section-providers.css', 'utf8');
+
+        expect(modalSource).toContain('proxy-pool-account-provider');
+        expect(modalSource).toContain('modal.proxyPool.noAccountsForProvider');
+        expect(modalSource).toContain('modal.proxyPool.accountCount');
+        expect(cssSource).toContain('.proxy-pool-provider-filters');
+        expect(cssSource).toContain('.proxy-pool-account-provider');
     });
 });

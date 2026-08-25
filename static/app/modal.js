@@ -15,6 +15,17 @@ let nodeSearchTerm = '';
 let currentViewMode = localStorage.getItem('providerViewMode') || 'list';
 let cachedProxyPools = [];
 let proxyPoolAssignments = new Map();
+let proxyPoolProviderTypes = [];
+let proxyPoolProviderFilter = 'all';
+
+const PROXY_POOL_PROVIDER_LABELS = {
+    'gemini-antigravity': 'Antigravity',
+    'gemini-cli-oauth': 'Gemini CLI',
+    'claude-kiro-oauth': 'Kiro',
+    'openai-codex-oauth': 'Codex',
+    'grok-cli-oauth': 'Grok CLI',
+    'grok-web': 'Grok Web'
+};
 
 const CODEX_QUOTA_PERCENT_FIELDS = new Set([
     'codexGeneralMax5hPercent',
@@ -116,6 +127,10 @@ function getProviderDisplayName(provider = {}) {
     return provider.customName || provider.codexEmail || provider.email || provider.uuid || 'unknown';
 }
 
+function getProxyPoolProviderLabel(providerType = '') {
+    return PROXY_POOL_PROVIDER_LABELS[providerType] || providerType || t('modal.proxyPool.allProviders');
+}
+
 function buildProxyPoolAssignments(providerGroups = {}) {
     const assignments = new Map();
 
@@ -144,14 +159,59 @@ function buildProxyPoolAssignments(providerGroups = {}) {
 async function loadProxyPoolAssignments() {
     try {
         const response = await window.apiClient.get('/providers');
-        proxyPoolAssignments = buildProxyPoolAssignments(response?.providers || {});
+        const providerGroups = response?.providers || {};
+        proxyPoolProviderTypes = Object.keys(providerGroups);
+        if (currentProviderType && !proxyPoolProviderTypes.includes(currentProviderType)) {
+            proxyPoolProviderTypes.push(currentProviderType);
+        }
+        proxyPoolAssignments = buildProxyPoolAssignments(providerGroups);
     } catch (error) {
         console.warn('Failed to load proxy pool assignments:', error);
-        proxyPoolAssignments = buildProxyPoolAssignments({
-            [currentProviderType || 'current']: currentProviders
-        });
+        const fallbackGroups = currentProviderType
+            ? { [currentProviderType]: currentProviders }
+            : {};
+        proxyPoolProviderTypes = currentProviderType ? [currentProviderType] : [];
+        proxyPoolAssignments = buildProxyPoolAssignments(fallbackGroups);
     }
     return proxyPoolAssignments;
+}
+
+function getProxyPoolProviderAccountCount(providerType = 'all') {
+    let count = 0;
+    proxyPoolAssignments.forEach(accounts => {
+        count += providerType === 'all'
+            ? accounts.length
+            : accounts.filter(account => account.providerType === providerType).length;
+    });
+    return count;
+}
+
+function renderProxyPoolProviderFilters() {
+    const orderedTypes = [...new Set(proxyPoolProviderTypes)]
+        .filter(Boolean)
+        .sort((left, right) => {
+            if (left === currentProviderType) return -1;
+            if (right === currentProviderType) return 1;
+            return getProxyPoolProviderLabel(left).localeCompare(getProxyPoolProviderLabel(right));
+        });
+    const filters = ['all', ...orderedTypes];
+
+    return filters.map(providerType => {
+        const active = providerType === proxyPoolProviderFilter;
+        const label = providerType === 'all'
+            ? t('modal.proxyPool.allProviders')
+            : getProxyPoolProviderLabel(providerType);
+        const count = getProxyPoolProviderAccountCount(providerType);
+        return `
+            <button type="button"
+                    class="proxy-pool-provider-filter${active ? ' active' : ''}"
+                    data-proxy-provider-filter="${escapeHtml(providerType)}"
+                    aria-pressed="${active}">
+                <span>${escapeHtml(label)}</span>
+                <span class="proxy-pool-provider-count">${count}</span>
+            </button>
+        `;
+    }).join('');
 }
 
 function getProviderProxyBadgeHtml(provider = {}) {
@@ -181,34 +241,73 @@ function getProviderProxyBadgeHtml(provider = {}) {
     `;
 }
 
-function renderProxyPoolAssignments(proxyId = '') {
-    const accounts = proxyPoolAssignments.get(proxyId) || [];
+function renderProxyPoolAssignments(proxyId = '', providerFilter = proxyPoolProviderFilter) {
+    const allAccounts = proxyPoolAssignments.get(proxyId) || [];
+    const accounts = providerFilter === 'all'
+        ? allAccounts
+        : allAccounts.filter(account => account.providerType === providerFilter);
     const visibleAccounts = accounts.slice(0, 6);
     const overflowCount = Math.max(0, accounts.length - visibleAccounts.length);
+    const emptyText = providerFilter === 'all'
+        ? t('modal.proxyPool.noAccounts')
+        : t('modal.proxyPool.noAccountsForProvider', { provider: getProxyPoolProviderLabel(providerFilter) });
+    const assignmentLabel = t('modal.proxyPool.accountCount', { count: accounts.length });
 
     if (accounts.length === 0) {
         return `
             <div class="proxy-pool-assignments empty">
-                <span class="proxy-pool-assignments-label">绑定账号</span>
-                <span class="proxy-pool-assignment-empty">暂无账号使用</span>
+                <span class="proxy-pool-assignments-label">${escapeHtml(assignmentLabel)}</span>
+                <span class="proxy-pool-assignment-empty">${escapeHtml(emptyText)}</span>
             </div>
         `;
     }
 
-    return `
-        <div class="proxy-pool-assignments">
-            <span class="proxy-pool-assignments-label">绑定账号</span>
-            <div class="proxy-pool-account-list">
-                ${visibleAccounts.map(account => `
-                    <span class="proxy-pool-account-chip" data-proxy-account="${escapeHtml(account.uuid)}" title="${escapeHtml(account.providerType)} / ${escapeHtml(account.uuid)}">
-                        <i class="fas fa-user-circle"></i>
-                        <span>${escapeHtml(account.name)}</span>
-                    </span>
+        return `
+            <div class="proxy-pool-assignments">
+                <span class="proxy-pool-assignments-label">${escapeHtml(assignmentLabel)}</span>
+                <div class="proxy-pool-account-list">
+                    ${visibleAccounts.map(account => `
+                        <span class="proxy-pool-account-chip" data-proxy-account="${escapeHtml(account.uuid)}" title="${escapeHtml(account.providerType)} / ${escapeHtml(account.uuid)}">
+                            <i class="fas fa-user-circle"></i>
+                            <span>${escapeHtml(account.name)}</span>
+                            <span class="proxy-pool-account-provider">${escapeHtml(getProxyPoolProviderLabel(account.providerType))}</span>
+                        </span>
                 `).join('')}
                 ${overflowCount > 0 ? `<span class="proxy-pool-account-more">+${overflowCount}</span>` : ''}
             </div>
         </div>
     `;
+}
+
+function updateProxyPoolAssignmentViews() {
+    const modal = document.querySelector('.proxy-pool-modal');
+    if (!modal) return;
+
+    modal.querySelectorAll('.proxy-pool-assignment-slot').forEach(slot => {
+        const row = slot.closest('.proxy-pool-row');
+        const proxyId = row?.querySelector('[data-proxy-field="id"]')?.value || slot.dataset.proxyAssignmentId || '';
+        slot.innerHTML = renderProxyPoolAssignments(proxyId, proxyPoolProviderFilter);
+    });
+
+    modal.querySelectorAll('[data-proxy-provider-filter]').forEach(button => {
+        const active = button.dataset.proxyProviderFilter === proxyPoolProviderFilter;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+    });
+
+    const scopeLabel = modal.querySelector('.proxy-pool-current-scope');
+    if (scopeLabel) {
+        scopeLabel.textContent = proxyPoolProviderFilter === 'all'
+            ? t('modal.proxyPool.allProviders')
+            : getProxyPoolProviderLabel(proxyPoolProviderFilter);
+    }
+}
+
+function setProxyPoolProviderFilter(providerType = 'all') {
+    proxyPoolProviderFilter = providerType === 'all' || proxyPoolProviderTypes.includes(providerType)
+        ? providerType
+        : (currentProviderType || 'all');
+    updateProxyPoolAssignmentViews();
 }
 
 function renderSupportedModelsValue(models = []) {
@@ -663,6 +762,7 @@ async function showProviderManagerModal(data, initialSearchTerm = '') {
 async function showProxyPoolManager() {
     await loadProxyPools(true);
     await loadProxyPoolAssignments();
+    proxyPoolProviderFilter = currentProviderType || 'all';
 
     const existingModal = document.querySelector('.proxy-pool-modal');
     if (existingModal) existingModal.remove();
@@ -673,12 +773,23 @@ async function showProxyPoolManager() {
     modal.innerHTML = `
         <div class="provider-modal-content">
             <div class="provider-modal-header">
-                <h3><i class="fas fa-network-wired"></i> ${escapeHtml(t('modal.proxyPool.title'))}</h3>
+                <h3>
+                    <i class="fas fa-network-wired"></i>
+                    ${escapeHtml(t('modal.proxyPool.title'))}
+                    <span class="proxy-pool-current-scope">${escapeHtml(getProxyPoolProviderLabel(proxyPoolProviderFilter))}</span>
+                </h3>
                 <button class="modal-close" onclick="this.closest('.proxy-pool-modal').remove()">
                     <i class="fas fa-times"></i>
                 </button>
             </div>
             <div class="provider-modal-body">
+                <div class="proxy-pool-scope-note">
+                    <i class="fas fa-circle-info"></i>
+                    <span>${escapeHtml(t('modal.proxyPool.globalScope'))}</span>
+                </div>
+                <div class="proxy-pool-provider-filters" role="group" aria-label="${escapeHtml(t('modal.proxyPool.filterLabel'))}">
+                    ${renderProxyPoolProviderFilters()}
+                </div>
                 <div class="provider-summary-actions" style="margin-bottom: 12px;">
                     <button class="btn btn-success" onclick="window.addProxyPoolRow()">
                         <i class="fas fa-plus"></i> ${escapeHtml(t('modal.proxyPool.add'))}
@@ -695,6 +806,9 @@ async function showProxyPoolManager() {
         </div>
     `;
     document.body.appendChild(modal);
+    modal.querySelectorAll('[data-proxy-provider-filter]').forEach(button => {
+        button.addEventListener('click', () => setProxyPoolProviderFilter(button.dataset.proxyProviderFilter));
+    });
 }
 
 function renderProxyPoolRow(proxy = {}) {
@@ -735,7 +849,9 @@ function renderProxyPoolRow(proxy = {}) {
                     <i class="fas fa-trash"></i> ${escapeHtml(t('modal.provider.delete'))}
                 </button>
             </div>
-            ${renderProxyPoolAssignments(proxy.id)}
+            <div class="proxy-pool-assignment-slot" data-proxy-assignment-id="${escapeHtml(proxyId)}">
+                ${renderProxyPoolAssignments(proxyId, proxyPoolProviderFilter)}
+            </div>
         </div>
     `;
 }

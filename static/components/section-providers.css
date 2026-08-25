@@ -1452,8 +1452,94 @@
     color: var(--warning-text);
 }
 
-.proxy-pool-assignments {
+.proxy-pool-current-scope {
+    display: inline-flex;
+    margin-left: 8px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: var(--primary-10);
+    color: var(--primary-color);
+    font-size: 12px;
+    vertical-align: middle;
+}
+
+.proxy-pool-scope-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--primary-20);
+    border-radius: 8px;
+    background: var(--primary-05);
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.proxy-pool-scope-note i {
+    margin-top: 2px;
+    color: var(--primary-color);
+}
+
+.proxy-pool-provider-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 14px;
+}
+
+.proxy-pool-provider-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 36px;
+    padding: 6px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font: inherit;
+    transition: var(--transition);
+}
+
+.proxy-pool-provider-filter:hover,
+.proxy-pool-provider-filter:focus-visible {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+    outline: none;
+}
+
+.proxy-pool-provider-filter.active {
+    border-color: var(--primary-color);
+    background: var(--primary-color);
+    color: #fff;
+}
+
+.proxy-pool-provider-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    min-height: 22px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.proxy-pool-provider-filter.active .proxy-pool-provider-count {
+    background: rgba(255, 255, 255, 0.2);
+    color: #fff;
+}
+
+.proxy-pool-assignment-slot {
     grid-column: 1 / -1;
+}
+
+.proxy-pool-assignments {
     display: flex;
     align-items: flex-start;
     gap: 10px;
@@ -1508,6 +1594,16 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.proxy-pool-account-chip .proxy-pool-account-provider {
+    flex-shrink: 0;
+    padding: 2px 5px;
+    border-radius: 999px;
+    background: var(--primary-10);
+    color: var(--primary-color);
+    font-size: 10px;
+    font-weight: 700;
 }
 
 .proxy-pool-account-more {
@@ -2550,6 +2646,15 @@
     .proxy-pool-assignments-label {
         line-height: 1.2;
     }
+    .proxy-pool-provider-filters {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        padding-bottom: 4px;
+    }
+    .proxy-pool-provider-filter {
+        min-height: 44px;
+        flex-shrink: 0;
+    }
     .modal-content { width: 95%; max-height: 90vh; }
     .stats-grid { grid-template-columns: 1fr; }
 }
@@ -2587,6 +2692,8 @@
 [data-theme="dark"] .provider-proxy-badge.empty { background: var(--bg-tertiary); color: var(--text-secondary); }
 [data-theme="dark"] .proxy-pool-assignments { background: var(--bg-secondary); border-color: var(--border-color); }
 [data-theme="dark"] .proxy-pool-account-chip { background: var(--bg-primary); border-color: var(--border-color); color: var(--text-primary); }
+[data-theme="dark"] .proxy-pool-provider-filter { background: var(--bg-secondary); }
+[data-theme="dark"] .proxy-pool-provider-filter.active { background: var(--primary-color); color: #fff; }
 [data-theme="dark"] .proxy-pool-account-more { background: var(--bg-tertiary); border-color: var(--border-color); color: var(--text-secondary); }
 /* 高亮说明样式 - 暗黑主题 */
 [data-theme="dark"] .highlight-note {
