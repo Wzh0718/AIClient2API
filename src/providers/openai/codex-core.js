@@ -64,7 +64,11 @@ function normalizeCodexTerminalError(parsed) {
 }
 
 function isCodexUsageLimitError(errorBody) {
-    return String(errorBody?.type || '').trim().toLowerCase() === 'usage_limit_reached';
+    const code = String(errorBody?.code || '').trim().toLowerCase();
+    const type = String(errorBody?.type || '').trim().toLowerCase();
+    return type === 'usage_limit_reached' ||
+        type === 'insufficient_quota' ||
+        code === 'insufficient_quota';
 }
 
 function isCodexModelCapacityError(errorBody) {

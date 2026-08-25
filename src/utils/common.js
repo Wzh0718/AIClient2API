@@ -579,6 +579,24 @@ function getRetryDelayFromBody(errorBody) {
     try {
         const data = parseErrorBody(errorBody);
 
+        let resetDelay = null;
+        walkErrorPayload(data, value => {
+            if (resetDelay !== null) return;
+            const resetsInSeconds = Number(value?.resets_in_seconds ?? value?.resetsInSeconds);
+            if (Number.isFinite(resetsInSeconds) && resetsInSeconds > 0) {
+                resetDelay = resetsInSeconds * 1000;
+                return;
+            }
+            const resetsAt = Number(value?.resets_at ?? value?.resetsAt);
+            if (Number.isFinite(resetsAt) && resetsAt > 0) {
+                const delay = resetsAt > 1e12
+                    ? resetsAt - Date.now()
+                    : resetsAt * 1000 - Date.now();
+                if (delay > 0) resetDelay = delay;
+            }
+        });
+        if (resetDelay !== null) return resetDelay;
+
         const directDelay = parseDurationMs(data?.retryDelay ?? data?.retry_delay ?? data?.retryAfterMs);
         if (directDelay !== null) return directDelay;
 
@@ -752,9 +770,13 @@ function isCodexProviderType(providerType) {
 
 function isCodexUsageLimitReached(error) {
     const errorBody = error?.response?.data?.error;
+    const code = String(errorBody?.code || '').toLowerCase();
     const type = String(errorBody?.type || '').toLowerCase();
     const message = String(errorBody?.message || error?.message || '').toLowerCase();
-    return type === 'usage_limit_reached' || message.includes('usage limit has been reached');
+    return type === 'usage_limit_reached' ||
+        type === 'insufficient_quota' ||
+        code === 'insufficient_quota' ||
+        message.includes('usage limit has been reached');
 }
 
 export function resolveCodexQuotaBucketForModel(requestedModel = null, patterns = DEFAULT_CODEX_53_MODEL_PATTERNS) {
@@ -797,9 +819,36 @@ export function applyProviderRateLimitCooldown({
     }
 
     const isCodexProvider = isCodexProviderType(providerType);
+    const isCodexQuotaExhaustion = isCodexProvider && isCodexUsageLimitReached(error);
     const rateLimitRecoveryTime = isCodexProvider
         ? getCodexRateLimitCooldownRecoveryTime(error, config)
         : getRateLimitCooldownRecoveryTime(error, config);
+
+    // Codex quota exhaustion is a credential-state signal, not merely an
+    // optional generic 429 cooldown. If the upstream supplied a reset delay,
+    // persist the quota bucket until that reset even when generic cooldown is
+    // disabled. This prevents immediate reuse of an exhausted account while
+    // leaving reset-less transient 429s on the existing policy path.
+    if (isCodexQuotaExhaustion && providerPoolManager && providerUuid) {
+        const resetDelayMs = getRetryAfterMs(error);
+        const quotaRecoveryTime = resetDelayMs !== null
+            ? new Date(Date.now() + resetDelayMs)
+            : rateLimitRecoveryTime;
+        if (quotaRecoveryTime && typeof providerPoolManager.markCodexQuotaBucketUnhealthy === 'function') {
+            const bucket = resolveCodexQuotaBucketForModel(
+                requestedModel,
+                config?.CODEX_53_QUOTA_MODEL_PATTERNS || config?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS
+            );
+            if (bucket) {
+                if (rateLimitRecoveryTime === null) {
+                    logger.info(`${loggerPrefix} Persisting Codex ${bucket} quota exhaustion for ${providerType} (${providerUuid}) until ${quotaRecoveryTime.toISOString()}`);
+                    providerPoolManager.markCodexQuotaBucketUnhealthy(providerType, { uuid: providerUuid }, bucket, 'Codex quota exhausted until upstream reset', quotaRecoveryTime);
+                    return true;
+                }
+            }
+        }
+    }
+
     if (!rateLimitRecoveryTime || !providerPoolManager || !providerUuid) {
         return false;
     }

@@ -25,8 +25,8 @@
 
 - provider 配置中支持 Codex 5h/周用量百分比阈值，用官方剩余额度判断是否跳过账号。
 - 移除了前端绝对 token 上限输入，后端保留旧字段兼容历史配置。
-- 新增 Codex 预热服务：默认在 `06:30` 和 `11:30` 对所有启用的 Codex 账号触发轻量请求，每个窗口默认 2 次。
-- 预热用于提前启动 5 小时额度窗口，会消耗少量请求和 token。
+- 新增 Codex 预热服务：默认关闭；只有显式设置 `CODEX_PREWARM_ENABLED=true` 后，才会在 `06:30` 和 `11:30` 对符合条件的 Codex 账号触发轻量请求，每个窗口默认 2 次。
+- 预热用于提前启动 5 小时额度窗口，会消耗少量请求和 token；没有明确短窗口/5h quota 的账号会被跳过。
 
 ### API Potluck 分发 key 统计
 
@@ -72,7 +72,7 @@
 
 ## 关键配置项
 
-- `CODEX_PREWARM_ENABLED`：是否启用 Codex 预热。
+- `CODEX_PREWARM_ENABLED`：是否启用 Codex 预热，默认 `false`，显式设置为 `true` 才会发送预热请求。
 - `CODEX_PREWARM_TIMES`：预热时间列表，例如 `06:30,11:30`。
 - `CODEX_PREWARM_ATTEMPTS`：每个预热窗口触发次数。
 - `CODEX_PREWARM_TIMEZONE`：预热时区。
@@ -91,7 +91,7 @@
 - 不要覆盖云端真实 `configs/`、`logs/`、`plugins/` 挂载目录。
 - 更新容器前先备份云端配置文件，尤其是 `configs/config.json` 和环境变量。
 - 云服务器代理必须单独确认。不要直接使用本机的 `127.0.0.1:7890` 或局域网代理地址，除非云端确实能访问。
-- 预热默认会消耗少量 token，云端启用前确认所有启用 Codex 账号都接受该行为。
+- 预热默认关闭；显式启用前确认所有符合条件的 Codex 账号都接受该行为，因为它会消耗少量请求和 token。
 - sticky provider 默认应按配置决定是否启用；如果更关注缓存命中率，可以开启并观察 provider 健康状态。
 - 真实 smoke 时不要打印完整 API key、OAuth token、cookie、Authorization 头或原始请求体。
 

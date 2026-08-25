@@ -53,6 +53,13 @@ afterEach(() => {
 });
 
 describe('codex prewarm service', () => {
+    test('defaults Codex prewarm to explicit opt-in', async () => {
+        const { normalizePrewarmConfig } = await loadPrewarmService();
+
+        expect(normalizePrewarmConfig({}).enabled).toBe(false);
+        expect(normalizePrewarmConfig({ CODEX_PREWARM_ENABLED: 'true' }).enabled).toBe(true);
+    });
+
     test('stop clears scheduling and waits for an active prewarm job to settle', async () => {
         writeUsageCache([
             { uuid: 'codex-a', success: true, usage: { summary: { plan: 'Pro' } } },

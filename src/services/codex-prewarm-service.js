@@ -47,7 +47,7 @@ function parsePrewarmTimes(value) {
 export function normalizePrewarmConfig(config = {}) {
     const times = parsePrewarmTimes(config.CODEX_PREWARM_TIMES || DEFAULT_PREWARM_TIMES);
     return {
-        enabled: toBoolean(config.CODEX_PREWARM_ENABLED, true),
+        enabled: toBoolean(config.CODEX_PREWARM_ENABLED, config.enabled ?? false),
         times: times.length > 0 ? times : DEFAULT_PREWARM_TIMES,
         attempts: toPositiveInteger(config.CODEX_PREWARM_ATTEMPTS, DEFAULT_ATTEMPTS),
         timezone: config.CODEX_PREWARM_TIMEZONE || DEFAULT_TIMEZONE,

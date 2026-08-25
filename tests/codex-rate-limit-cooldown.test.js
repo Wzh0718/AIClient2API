@@ -81,4 +81,40 @@ describe('Codex rate-limit cooldown', () => {
         expect(manager.markCodexQuotaBucketUnhealthy).toHaveBeenCalled();
         expect(manager.markCodexRateLimitCooldown).not.toHaveBeenCalled();
     });
+
+    test('persists Codex quota exhaustion until reset even when generic 429 cooldown is disabled', () => {
+        const now = Date.parse('2026-08-10T08:00:00Z');
+        jest.spyOn(Date, 'now').mockReturnValue(now);
+        const manager = {
+            markCodexRateLimitCooldown: jest.fn(),
+            markCodexQuotaBucketUnhealthy: jest.fn()
+        };
+        const error = create429({
+            body: {
+                error: {
+                    type: 'usage_limit_reached',
+                    message: 'The usage limit has been reached',
+                    resets_in_seconds: 4481
+                }
+            }
+        });
+
+        applyProviderRateLimitCooldown({
+            error,
+            config: { RATE_LIMIT_COOLDOWN_ENABLED: false },
+            providerPoolManager: manager,
+            providerType: 'openai-codex-oauth',
+            providerUuid: 'cred-1',
+            requestedModel: 'gpt-5.5'
+        });
+
+        expect(manager.markCodexQuotaBucketUnhealthy).toHaveBeenCalledWith(
+            'openai-codex-oauth',
+            { uuid: 'cred-1' },
+            'general',
+            expect.stringContaining('quota'),
+            new Date(now + 4481 * 1000)
+        );
+        expect(manager.markCodexRateLimitCooldown).not.toHaveBeenCalled();
+    });
 });

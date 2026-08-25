@@ -27,7 +27,7 @@
 | 2026-08-16 18:16 | 凭据组 revision 2：只剩 1 个健康组 `62154a7c`，两个 Key 都指向它。 |
 | 2026-08-17 11:32 | live usage 快照。12/13 号 disabled 或跳过，只剩 `62154a7c` 成功刷新。 |
 
-`config.json` 没有写 `CODEX_FINGERPRINT_ENABLED`，走代码默认 `true`。`CODEX_POTLUCK_STICKY_PROVIDER_ENABLED` 和 `CODEX_PREWARM_ENABLED` 都是 true。
+该诊断记录的是历史配置状态：当时 `CODEX_POTLUCK_STICKY_PROVIDER_ENABLED` 和 `CODEX_PREWARM_ENABLED` 都是 true。当前分支的 `CODEX_PREWARM_ENABLED` 默认值已改为 `false`，必须显式 opt-in；`CODEX_FINGERPRINT_ENABLED` 的默认值以当前配置管理器为准。
 
 ## 指纹诊断
 

@@ -105,6 +105,28 @@ describe('Codex terminal Responses errors', () => {
         expect(thrown.retryAfterMs).toBe(37000);
     });
 
+    test('maps insufficient_quota to a retryable Codex quota error', () => {
+        const service = createService();
+        const payload = failedEvent({
+            type: 'insufficient_quota',
+            code: 'insufficient_quota',
+            message: 'The 7 day usage limit has been reached.',
+            resets_in_seconds: 91
+        });
+
+        let thrown;
+        try {
+            service.parseNonStreamResponse(JSON.stringify(payload));
+        } catch (error) {
+            thrown = error;
+        }
+
+        expect(thrown.response.status).toBe(429);
+        expect(thrown.shouldSwitchCredential).toBe(true);
+        expect(thrown.skipErrorCount).toBe(true);
+        expect(thrown.retryAfterMs).toBe(91000);
+    });
+
     test.each([
         'The selected model is at capacity.',
         'Model is at capacity. Please try a different model.'

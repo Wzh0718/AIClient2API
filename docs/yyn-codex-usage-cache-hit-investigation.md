@@ -257,7 +257,7 @@ Provider pool 状态：
 - 可选 Codex sticky provider affinity 已实现，默认关闭；开启后同一个 API Potluck key 的 Codex 请求固定到同一个健康账号，账号不可用时自动 fallback。
 - provider weight 已作为本地定制能力实现，默认权重 1。
 - Codex provider 新增 `codexMax5hTokens` 与 `codexMaxWeeklyTokens`，只按 token 过滤，所有可选 Codex 账号超额时返回 429。
-- Codex prewarm 服务已实现，默认 `06:30` 与 `11:30 Asia/Shanghai`，覆盖所有启用的 Codex 账号，每账号每窗口触发 2 次轻量请求，并按账号/日期/时间点去重。
+- Codex prewarm 服务已实现，默认关闭；显式设置 `CODEX_PREWARM_ENABLED=true` 后，才会按 `06:30` 与 `11:30 Asia/Shanghai` 调度，每账号每窗口触发 2 次轻量请求，并按账号/日期/时间点去重。
 - 官方 Codex `/usage` 格式化层已兼容 daily/weekly/total token 字段，并保留 1 小时缓存与手动刷新绕过。
 - `model-usage-stats.html` 新增低 cache hit ratio 提醒，默认标出低于 30% 的 Codex 账号。
 
@@ -265,4 +265,4 @@ Provider pool 状态：
 
 - 官方 `/usage` 实际字段可能随上游调整；当前解析是防御式兼容，仍需用启用账号的真实响应做只读 smoke。
 - 低命中提醒先做观测，不自动按 cache hit ratio 改路由；需要积累 1-2 天样本后再决定是否做策略化调度。
-- prewarm 会真实消耗少量请求/token，当前默认按用户要求启用；若远端验证成本过高，可通过 `CODEX_PREWARM_ENABLED=false` 关闭。
+- prewarm 会真实消耗少量请求/token；没有明确短窗口/5h quota 的账号会跳过，若已显式启用仍可通过 `CODEX_PREWARM_ENABLED=false` 关闭。
