@@ -221,13 +221,7 @@ const DEFAULT_CODEX_53_MODEL_PATTERNS = [
     '*codex_spark*'
 ];
 
-const DEFAULT_CODEX_53_QUOTA_FALLBACK_MODEL = DEFAULT_CODEX_FALLBACK_MODEL;
-const DEFAULT_CODEX_UNAVAILABLE_MODEL_FALLBACKS = Object.freeze({
-    'gpt-5.3-codex-spark': 'gpt-5.6-luna',
-    'gpt-5.3-codex-spark-fast': 'gpt-5.6-luna',
-    'gpt-5.4-mini': 'gpt-5.6-luna',
-    'gpt-5.4-mini-fast': 'gpt-5.6-luna'
-});
+const DEFAULT_CODEX_53_QUOTA_FALLBACK_MODEL = 'gpt-5.4-mini';
 
 const DEFAULT_CODEX_STICKY_HOT_SHARD_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_CODEX_STICKY_HOT_SHARD_MIN_REQUESTS = 100;
@@ -495,12 +489,9 @@ export function getCodexModelFallbackTarget(requestedModel, globalConfig = {}) {
     const configured = globalConfig?.CODEX_UNAVAILABLE_MODEL_FALLBACKS
         || globalConfig?.codexUnavailableModelFallbacks
         || {};
-    const merged = { ...DEFAULT_CODEX_UNAVAILABLE_MODEL_FALLBACKS, ...configured };
-    const target = Object.prototype.hasOwnProperty.call(merged, model)
-        ? merged[model]
-        : (matchesModelFamily(model, 'gpt-5.3') || matchesModelFamily(model, 'gpt-5.4')
-            ? DEFAULT_CODEX_FALLBACK_MODEL
-            : null);
+    const target = Object.prototype.hasOwnProperty.call(configured, model)
+        ? configured[model]
+        : null;
     if (!target || target === false || target === model) return null;
     return String(target);
 }
@@ -3165,7 +3156,7 @@ export class ProviderPoolManager {
         }
 
         if (codex53QuotaFallbackReason) {
-            const targetModel = modelFallbackTarget || getCodex53QuotaFallbackModel(this.globalConfig);
+            const targetModel = getCodex53QuotaFallbackModel(this.globalConfig);
             this._log('info', `Trying Codex 5.3 quota fallback for ${requestedModel}: -> ${providerType} (${targetModel}); reason: ${codex53QuotaFallbackReason}`);
             const selectedConfig = await this.acquireSlot(providerType, targetModel, options);
             if (selectedConfig) {
@@ -3367,7 +3358,7 @@ export class ProviderPoolManager {
         }
 
         if (codex53QuotaFallbackReason) {
-            const targetModel = modelFallbackTarget || getCodex53QuotaFallbackModel(this.globalConfig);
+            const targetModel = getCodex53QuotaFallbackModel(this.globalConfig);
             this._log('info', `Trying Codex 5.3 quota fallback for ${requestedModel}: -> ${providerType} (${targetModel}); reason: ${codex53QuotaFallbackReason}`);
             const selectedConfig = await this.selectProvider(providerType, targetModel, options);
 

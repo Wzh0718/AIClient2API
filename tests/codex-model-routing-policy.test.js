@@ -7,11 +7,11 @@ import {
 
 describe('Codex entry model routing policy', () => {
     test.each(['gpt-5.4', 'gpt-5.4-fast', 'gpt-5.4-mini', 'gpt-5.4-mini-fast'])(
-        'routes non-batch %s directly to Luna',
+        'keeps GPT-5.4 family %s unchanged',
         model => {
             expect(resolveCodexEntryModel({ model, supported: true })).toEqual({
-                actualModel: DEFAULT_CODEX_FALLBACK_MODEL,
-                reason: 'GPT_54_DIRECT_LUNA'
+                actualModel: model,
+                reason: null
             });
         }
     );
@@ -26,11 +26,9 @@ describe('Codex entry model routing policy', () => {
         }
     );
 
-    test('routes unsupported Codex models to Luna', () => {
-        expect(resolveCodexEntryModel({ model: 'gpt-does-not-exist', supported: false })).toEqual({
-            actualModel: DEFAULT_CODEX_FALLBACK_MODEL,
-            reason: 'UNSUPPORTED_MODEL'
-        });
+    test('reports unsupported Codex models as errors', () => {
+        expect(() => resolveCodexEntryModel({ model: 'gpt-does-not-exist', supported: false }))
+            .toThrow('[Codex] 不支持的模型: gpt-does-not-exist');
     });
 
     test('preserves the original Codex model for a batch-key Gemini fallback', () => {
