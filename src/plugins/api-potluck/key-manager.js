@@ -1433,10 +1433,14 @@ function cloneUsageHistoryForUser(usageHistory = {}, conversionModel = DEFAULT_C
         for (const [provider, usage] of Object.entries(day?.providers || {})) {
             providerCosts[provider] = buildCost(usage, day?.providerModels?.[provider] || {}, conversionModel);
         }
+        const modelCosts = {};
+        for (const [model, usage] of Object.entries(day?.models || {})) {
+            modelCosts[model] = buildCost(usage, { [model]: usage }, conversionModel);
+        }
         compact[date] = {
             summary,
             providers: cloneUsageMapForCompactHistory(day?.providers, providerCosts),
-            models: cloneUsageMapForCompactHistory(day?.models)
+            models: cloneUsageMapForCompactHistory(day?.models, modelCosts)
         };
     }
     return compact;
