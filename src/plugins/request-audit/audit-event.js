@@ -131,6 +131,7 @@ export function buildRequestAuditEvent(context = {}) {
     const response = normalizeResponse(context);
     const derivedStatus = deriveStatus(context, response);
     const selectedProviderUuid = context._codexRouting?.selectedProviderUuid || null;
+    const modelRouting = context._modelRouting || context._codexRouting || {};
     const actualProviderUuid = context.providerUuid || null;
     const consistencyStatus = selectedProviderUuid && actualProviderUuid
         ? selectedProviderUuid === actualProviderUuid ? 'consistent' : 'mismatch'
@@ -188,9 +189,14 @@ export function buildRequestAuditEvent(context = {}) {
             consistencyStatus,
             actualProviderGroupId: context._codexRouting?.actualProviderGroupId || null,
             providerSwitchCount: toNumber(context._codexRouting?.providerSwitchCount),
-            modelFallbackFrom: context._codexRouting?.modelFallbackFrom || null,
-            modelFallbackTo: context._codexRouting?.modelFallbackTo || null,
-            modelFallbackReason: context._codexRouting?.modelFallbackReason || null,
+            modelFallbackFrom: modelRouting.modelFallbackFrom || null,
+            modelFallbackTo: modelRouting.modelFallbackTo || null,
+            modelFallbackReason: modelRouting.modelFallbackReason || null,
+            ...(context._modelRouting ? {
+                queueWaitMs: toNumber(modelRouting.queueWaitMs),
+                fallbackAttemptCount: toNumber(modelRouting.fallbackAttemptCount),
+                queueOutcome: modelRouting.queueOutcome || null
+            } : {}),
             spillover: context._codexRouting?.spillover === true,
             spilloverReason: context._codexRouting?.spilloverReason || null,
             assignmentMissing: context._codexRouting?.assignmentMissing === true,

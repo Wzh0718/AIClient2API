@@ -10,6 +10,17 @@ export let PROMPT_LOG_FILENAME = ''; // Make PROMPT_LOG_FILENAME exportable
 
 const ALL_MODEL_PROVIDERS = Object.values(MODEL_PROVIDER);
 const BYTES_PER_MB = 1024 * 1024;
+const ANTIGRAVITY_ELASTIC_ROUTING_DEFAULTS = Object.freeze({
+    enabled: true,
+    maxQueueWaitMs: 45_000,
+    preferOriginalWaitMs: 10_000,
+    fallbackModels: ['gemini-3.1-flash-lite', 'gemini-2.5-flash'],
+    globalQueueLimit: 512,
+    perKeyModelQueueLimit: 256,
+    globalQueuedBytesLimit: 64 * BYTES_PER_MB,
+    recoveryJitterMinMs: 50,
+    recoveryJitterMaxMs: 250
+});
 
 function parsePositiveInteger(value) {
     if (value === undefined || value === null || value === '') {
@@ -62,6 +73,14 @@ function normalizeCodexFingerprintEnabled(config) {
     if (config.CODEX_FINGERPRINT_ENABLED === undefined || config.CODEX_FINGERPRINT_ENABLED === null) {
         config.CODEX_FINGERPRINT_ENABLED = false;
     }
+}
+
+function normalizeAntigravityElasticRouting(config) {
+    const incoming = config.antigravityElasticRouting;
+    config.antigravityElasticRouting = {
+        ...ANTIGRAVITY_ELASTIC_ROUTING_DEFAULTS,
+        ...(incoming && typeof incoming === 'object' && !Array.isArray(incoming) ? incoming : {})
+    };
 }
 
 function normalizeConfiguredProviders(config) {
@@ -202,6 +221,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
             startupRun: true
         },
         providerFallbackChain: {}, // 跨类型 Fallback 链配置
+        antigravityElasticRouting: { ...ANTIGRAVITY_ELASTIC_ROUTING_DEFAULTS },
         temporaryKeyModelRoutes: [], // 临时按 Key 哈希、入口和模型进行跨 Provider 路由；默认关闭
         workdayCalendars: {}, // 可选的法定工作日历；缺失年份时路由层按周一至周五保护性降级
         LOG_ENABLED: true,
@@ -355,6 +375,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
     normalizeRequestBodyMaxBytes(currentConfig);
     normalizeLogRetentionDays(currentConfig);
     normalizeCodexFingerprintEnabled(currentConfig);
+    normalizeAntigravityElasticRouting(currentConfig);
     normalizeConfiguredProviders(currentConfig);
     currentConfig.IMAGE_ASPECT_MISMATCH_THRESHOLD = normalizeAspectMismatchThreshold(
         currentConfig.IMAGE_ASPECT_MISMATCH_THRESHOLD

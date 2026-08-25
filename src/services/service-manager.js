@@ -522,32 +522,55 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
     return { handled: true, selectedResult: selected.selectedResult, availabilityError: null };
 }
 
-function throwProviderSelectionFailure(config, model, options, selectionDiagnostics, availabilityError = null) {
+export function createProviderSelectionError(providerType, model, selectionDiagnostics = {}, options = {}) {
+    const suffix = `${providerType}${model ? ` supporting model: ${model}` : ''}`;
+    const reasons = selectionDiagnostics.filterReasons || {};
+    let status = 503;
+    let code = 'PROVIDER_CREDENTIALS_UNAVAILABLE';
+    let message = `[API Service] No usable provider credentials for ${suffix}`;
+    let retryAfter = null;
+
     if (options.acquireSlot === true && selectionDiagnostics.capacityExhausted === true) {
-        const errorMsg = `[API Service] All healthy providers are at concurrency capacity for ${config.MODEL_PROVIDER}${model ? ` supporting model: ${model}` : ''}`;
-        logger.warn(errorMsg);
-        const error = new Error(errorMsg);
-        error.status = 429;
-        error.code = 429;
-        throw error;
-    }
-    if (
+        status = 429;
+        code = 'PROVIDER_CONCURRENCY_EXHAUSTED';
+        message = `[API Service] All healthy providers are at concurrency capacity for ${suffix}`;
+    } else if (Number(reasons.model_cooldown || 0) > 0) {
+        status = 429;
+        code = 'MODEL_RATE_LIMITED';
+        message = `[API Service] All providers are cooling down for ${suffix}`;
+        retryAfter = selectionDiagnostics.nextModelRecoveryTime || null;
+    } else if (
         selectionDiagnostics.temporaryCooldownSkipped > 0
         && selectionDiagnostics.eligibleCandidateCount === 0
     ) {
-        const errorMsg = `[API Service] All providers are temporarily unavailable during cooldown for ${config.MODEL_PROVIDER}${model ? ` supporting model: ${model}` : ''}`;
-        logger.warn(errorMsg);
-        const error = new Error(errorMsg);
-        error.status = 429;
-        error.code = 429;
-        error.retryAfter = selectionDiagnostics.nextTemporaryRecoveryTime;
-        throw error;
+        status = 429;
+        code = 'PROVIDER_TEMPORARILY_UNAVAILABLE';
+        message = `[API Service] All providers are temporarily unavailable during cooldown for ${suffix}`;
+        retryAfter = selectionDiagnostics.nextTemporaryRecoveryTime || null;
+    } else if (
+        Number(reasons.model_unsupported || 0) > 0
+        && Number(reasons.model_unsupported || 0) >= Number(selectionDiagnostics.totalCandidateCount || 0)
+    ) {
+        status = 404;
+        code = 'MODEL_NOT_SUPPORTED';
+        message = `[API Service] No configured provider supports model ${model}`;
     }
-    if (availabilityError) throw availabilityError;
 
-    const errorMsg = `[API Service] No healthy provider found in pool for ${config.MODEL_PROVIDER}${model ? ` supporting model: ${model}` : ''}`;
-    logger.error(errorMsg);
-    throw new Error(errorMsg);
+    const error = new Error(message);
+    error.status = status;
+    error.statusCode = status;
+    error.code = code;
+    if (retryAfter) error.retryAfter = retryAfter;
+    error.filterReasons = { ...reasons };
+    return error;
+}
+
+function throwProviderSelectionFailure(config, model, options, selectionDiagnostics, availabilityError = null) {
+    if (availabilityError) throw availabilityError;
+    const error = createProviderSelectionError(config.MODEL_PROVIDER, model, selectionDiagnostics, options);
+    if (error.status >= 500) logger.error(error.message);
+    else logger.warn(error.message);
+    throw error;
 }
 
 function restoreProviderPoolsAfterFailedPersist(config, originalProviderPools) {
@@ -1494,7 +1517,10 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                 actualProviderType: selectedType,
                 isFallback: fallbackUsed,
                 actualModel: fallbackModel,
-                modelFallbackReason: fallbackReason
+                modelFallbackReason: fallbackReason,
+                queueWaitMs = 0,
+                fallbackAttemptCount = 0,
+                queueOutcome = null
             } = selectedResult;
             
             // 合并选中的提供者配置到当前请求的 config 中
@@ -1506,6 +1532,16 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
             selectedUuid = selectedProviderConfig.uuid;
             actualModel = fallbackModel || actualModelName;
             selectedModelFallbackReason = fallbackReason || null;
+            config._modelRouting = {
+                requestedModel: actualModelName,
+                actualModel,
+                modelFallbackFrom: fallbackUsed && actualModel !== actualModelName ? actualModelName : null,
+                modelFallbackTo: fallbackUsed && actualModel !== actualModelName ? actualModel : null,
+                modelFallbackReason: fallbackReason || null,
+                queueWaitMs: Number(queueWaitMs || 0),
+                fallbackAttemptCount: Number(fallbackAttemptCount || 0),
+                queueOutcome: queueOutcome || null
+            };
 
             // mixed pool/fallback 可能跨 providerType 命中真实节点，需要切到真实 adapter。
             if (actualProviderType && actualProviderType !== config.MODEL_PROVIDER) {
@@ -1540,7 +1576,7 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         config._codexRouting.hotShardApplied = selectionDiagnostics.hotShardApplied === true;
     }
 
-    const fallbackMetadata = isFallback && codexFallbackTarget && actualModel !== actualModelName
+    const fallbackMetadata = isFallback && actualModel !== actualModelName
         ? {
             modelFallbackFrom: actualModelName,
             modelFallbackTo: actualModel,
@@ -1562,6 +1598,11 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         isFallback,
         uuid: selectedUuid,
         actualModel,
+        ...(config._modelRouting ? {
+            queueWaitMs: config._modelRouting.queueWaitMs,
+            fallbackAttemptCount: config._modelRouting.fallbackAttemptCount,
+            queueOutcome: config._modelRouting.queueOutcome
+        } : {}),
         ...fallbackMetadata
     };
 }

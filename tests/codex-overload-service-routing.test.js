@@ -152,7 +152,7 @@ describe('Codex overload service routing', () => {
 
         await expect(request).rejects.toMatchObject({
             status: 429,
-            code: 429
+            code: 'PROVIDER_CONCURRENCY_EXHAUSTED'
         });
         await expect(request).rejects.toThrow('concurrency capacity');
     });
@@ -174,7 +174,10 @@ describe('Codex overload service routing', () => {
         });
 
         await expect(request).rejects.not.toMatchObject({ status: 429 });
-        await expect(request).rejects.toThrow('No healthy provider found');
+        await expect(request).rejects.toMatchObject({
+            status: 503,
+            code: 'PROVIDER_CREDENTIALS_UNAVAILABLE'
+        });
         expect(selectionDiagnostics).toMatchObject({
             eligibleCandidateCount: 0,
             concurrencyLimitSkipped: 0,
@@ -203,7 +206,7 @@ describe('Codex overload service routing', () => {
 
         await expect(request).rejects.toMatchObject({
             status: 429,
-            code: 429
+            code: 'PROVIDER_TEMPORARILY_UNAVAILABLE'
         });
         await expect(request).rejects.toThrow('temporarily unavailable');
         expect(selectionDiagnostics).toMatchObject({

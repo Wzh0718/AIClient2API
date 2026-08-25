@@ -27,6 +27,34 @@ import { performance } from 'node:perf_hooks';
 import { createProviderStateEvent, applyProviderStateEvent } from '../runtime/provider-state-event.js';
 import { DEFAULT_CODEX_FALLBACK_MODEL, matchesModelFamily } from './openai/codex-model-routing.js';
 
+const ANTIGRAVITY_ELASTIC_SOURCE_MODEL = 'gemini-2.5-flash-lite';
+const ANTIGRAVITY_ELASTIC_DEFAULTS = Object.freeze({
+    enabled: true,
+    maxQueueWaitMs: 45_000,
+    preferOriginalWaitMs: 10_000,
+    fallbackModels: ['gemini-3.1-flash-lite', 'gemini-2.5-flash'],
+    globalQueueLimit: 512,
+    perKeyModelQueueLimit: 256,
+    globalQueuedBytesLimit: 64 * 1024 * 1024,
+    recoveryJitterMinMs: 50,
+    recoveryJitterMaxMs: 250
+});
+
+function positiveInteger(value, fallback, { allowZero = false } = {}) {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < (allowZero ? 0 : 1)) return fallback;
+    return parsed;
+}
+
+function createGeminiRoutingError(message, code, status = 429, extras = {}) {
+    const error = new Error(message);
+    error.status = status;
+    error.statusCode = status;
+    error.code = code;
+    Object.assign(error, extras);
+    return error;
+}
+
 function getCustomModelAliasesForProvider(config, providerType) {
     const customModels = Array.isArray(config?.customModels) ? config.customModels : [];
     return new Set(
@@ -551,6 +579,12 @@ export class ProviderPoolManager {
         this._isSelecting = {}; // 同步标志位锁
         this._codexStickyHotStats = new Map();
         this._providerSelectionLoadStats = new Map();
+        this._geminiElasticQueue = {
+            waiting: 0,
+            queuedBytes: 0,
+            perKeyModel: new Map(),
+            waiters: new Set()
+        };
 
         // --- V2: 读写分离 and 异步刷新队列 ---
         // 刷新并发控制配置
@@ -1626,7 +1660,7 @@ export class ProviderPoolManager {
         return candidates;
     }
 
-    _hasAcquireCapacity(providerStatus) {
+    _hasAcquireCapacity(providerStatus, options = {}) {
         const config = providerStatus.config;
         const state = providerStatus.state;
         const concurrencyLimit = parseInt(config.concurrencyLimit || 0);
@@ -1634,6 +1668,7 @@ export class ProviderPoolManager {
 
         if (concurrencyLimit <= 0) return true;
         if (state.activeCount < concurrencyLimit) return true;
+        if (options.skipCredentialQueue === true) return false;
         return queueLimit > 0 && state.waitingCount < queueLimit;
     }
 
@@ -1741,7 +1776,7 @@ export class ProviderPoolManager {
         for (const candidateType of mixedPool.candidateProviders) {
             try {
                 const providers = this._getHealthyProvidersForType(candidateType, requestedModel, options)
-                    .filter(provider => this._hasAcquireCapacity(provider));
+                    .filter(provider => this._hasAcquireCapacity(provider, options));
                 candidates.push(...providers);
             } catch (error) {
                 if (error.status === 429 || error.code === 429) {
@@ -2250,10 +2285,12 @@ export class ProviderPoolManager {
             const leaseId = leases?.get(key);
             if (!leaseId) return false;
             leases.delete(key);
-            return this.coordination.release(leaseId).catch(error => {
+            const released = this.coordination.release(leaseId).catch(error => {
                 this._log('warn', `[Coordination] Lease release deferred to TTL for ${key}: ${error.message}`);
                 return false;
             });
+            this._notifyGeminiElasticWaiters();
+            return released;
         }
         
         const provider = this._findProvider(providerType, uuid);
@@ -2272,6 +2309,7 @@ export class ProviderPoolManager {
                 setImmediate(next);
             }
         }
+        this._notifyGeminiElasticWaiters();
     }
 
     /**
@@ -2388,6 +2426,16 @@ export class ProviderPoolManager {
         );
         if (selectionDiagnostics) {
             selectionDiagnostics.healthCooldownSkipped = availableProviders.length - availableAndHealthyProviders.length;
+            const healthReasons = {};
+            for (const provider of availableProviders) {
+                if (provider.config.isDisabled) healthReasons.disabled = (healthReasons.disabled || 0) + 1;
+                else if (provider.config.needsRefresh) healthReasons.needs_refresh = (healthReasons.needs_refresh || 0) + 1;
+                else if (!provider.config.isHealthy) healthReasons.unhealthy = (healthReasons.unhealthy || 0) + 1;
+            }
+            selectionDiagnostics.filterReasons = {
+                ...(selectionDiagnostics.filterReasons || {}),
+                ...healthReasons
+            };
         }
 
         if (Array.isArray(options.allowedProviderUuids)) {
@@ -2422,6 +2470,12 @@ export class ProviderPoolManager {
             });
 
             if (modelFilteredProviders.length === 0) {
+                if (selectionDiagnostics && availableAndHealthyProviders.length > 0) {
+                    selectionDiagnostics.filterReasons = {
+                        ...(selectionDiagnostics.filterReasons || {}),
+                        model_unsupported: availableAndHealthyProviders.length
+                    };
+                }
                 this._log('warn', `No available providers for type: ${providerType} that support model: ${requestedModel}`);
                 return null;
             }
@@ -2450,7 +2504,7 @@ export class ProviderPoolManager {
 
         if (options.acquireSlot === true) {
             const beforeConcurrencyFilter = availableAndHealthyProviders.length;
-            availableAndHealthyProviders = availableAndHealthyProviders.filter(provider => this._hasAcquireCapacity(provider));
+            availableAndHealthyProviders = availableAndHealthyProviders.filter(provider => this._hasAcquireCapacity(provider, options));
             if (selectionDiagnostics) {
                 selectionDiagnostics.concurrencyLimitSkipped = beforeConcurrencyFilter - availableAndHealthyProviders.length;
                 selectionDiagnostics.capacityExhausted = beforeConcurrencyFilter > 0
@@ -2668,8 +2722,9 @@ export class ProviderPoolManager {
         }
         if (allowed.length === 0 && providers.length > 0 && freeCount > 0) {
             const error = new Error(`All Antigravity providers are on the free plan (plan_free=${freeCount})`);
-            error.status = 429;
-            error.code = 429;
+            error.status = 503;
+            error.statusCode = 503;
+            error.code = 'PROVIDER_CREDENTIALS_UNAVAILABLE';
             error.filterReasons = { plan_free: freeCount };
             throw error;
         }
@@ -2731,6 +2786,9 @@ export class ProviderPoolManager {
                 ...(selectionDiagnostics.filterReasons || {}),
                 ...filterReasons
             };
+            if (recoveryTimes.length > 0) {
+                selectionDiagnostics.nextModelRecoveryTime = new Date(Math.min(...recoveryTimes)).toISOString();
+            }
         }
 
         if (allowed.length === 0 && providers.length > 0 && Object.keys(filterReasons).length > 0) {
@@ -2749,6 +2807,267 @@ export class ProviderPoolManager {
         return allowed;
     }
 
+    _getAntigravityElasticRoutingConfig() {
+        const configured = this.globalConfig?.antigravityElasticRouting || {};
+        const configuredFallbacks = Array.isArray(configured.fallbackModels)
+            ? configured.fallbackModels.map(model => String(model || '').trim()).filter(Boolean)
+            : ANTIGRAVITY_ELASTIC_DEFAULTS.fallbackModels;
+        return {
+            enabled: configured.enabled !== false,
+            maxQueueWaitMs: positiveInteger(configured.maxQueueWaitMs, ANTIGRAVITY_ELASTIC_DEFAULTS.maxQueueWaitMs),
+            preferOriginalWaitMs: positiveInteger(configured.preferOriginalWaitMs, ANTIGRAVITY_ELASTIC_DEFAULTS.preferOriginalWaitMs, { allowZero: true }),
+            fallbackModels: ANTIGRAVITY_ELASTIC_DEFAULTS.fallbackModels.filter(model => configuredFallbacks.includes(model)),
+            globalQueueLimit: positiveInteger(configured.globalQueueLimit, ANTIGRAVITY_ELASTIC_DEFAULTS.globalQueueLimit),
+            perKeyModelQueueLimit: positiveInteger(configured.perKeyModelQueueLimit, ANTIGRAVITY_ELASTIC_DEFAULTS.perKeyModelQueueLimit),
+            globalQueuedBytesLimit: positiveInteger(configured.globalQueuedBytesLimit, ANTIGRAVITY_ELASTIC_DEFAULTS.globalQueuedBytesLimit),
+            recoveryJitterMinMs: positiveInteger(configured.recoveryJitterMinMs, ANTIGRAVITY_ELASTIC_DEFAULTS.recoveryJitterMinMs, { allowZero: true }),
+            recoveryJitterMaxMs: positiveInteger(configured.recoveryJitterMaxMs, ANTIGRAVITY_ELASTIC_DEFAULTS.recoveryJitterMaxMs, { allowZero: true })
+        };
+    }
+
+    _isAntigravityElasticRoutingEligible(providerType, requestedModel) {
+        return this._getAntigravityElasticRoutingConfig().enabled
+            && isAntigravityProviderType(providerType)
+            && normalizeAntigravityQuotaModel(requestedModel) === ANTIGRAVITY_ELASTIC_SOURCE_MODEL;
+    }
+
+    getGeminiElasticQueueSnapshot() {
+        return {
+            waiting: this._geminiElasticQueue.waiting,
+            queuedBytes: this._geminiElasticQueue.queuedBytes,
+            perKeyModel: Object.fromEntries(this._geminiElasticQueue.perKeyModel)
+        };
+    }
+
+    _notifyGeminiElasticWaiters() {
+        for (const waiter of [...this._geminiElasticQueue.waiters]) waiter();
+    }
+
+    async _acquireGeminiElasticQueueEntry(requestedModel, options, config) {
+        const queueKey = `${String(options.queueKey || 'anonymous')}:${requestedModel}`;
+        const bytes = Math.max(0, Number(options.queueRequestBytes) || 0);
+
+        if (this.coordination) {
+            if (typeof this.coordination.acquireGeminiQueueSlot !== 'function') {
+                throw createGeminiRoutingError('Gemini queue coordination is unavailable', 'COORDINATION_UNAVAILABLE', 503);
+            }
+            let entry;
+            try {
+                entry = await this.coordination.acquireGeminiQueueSlot({
+                    queueKey,
+                    bytes,
+                    ttlMs: config.maxQueueWaitMs + 5000,
+                    globalLimit: config.globalQueueLimit,
+                    perKeyLimit: config.perKeyModelQueueLimit,
+                    byteLimit: config.globalQueuedBytesLimit
+                });
+            } catch (cause) {
+                const error = createGeminiRoutingError(
+                    'Gemini queue coordination is unavailable',
+                    'COORDINATION_UNAVAILABLE',
+                    503
+                );
+                error.cause = cause;
+                throw error;
+            }
+            if (!entry) {
+                throw createGeminiRoutingError('Gemini elastic queue capacity exceeded', 'QUEUE_CAPACITY_EXCEEDED', 429);
+            }
+            return entry;
+        }
+
+        const currentForKey = this._geminiElasticQueue.perKeyModel.get(queueKey) || 0;
+        if (
+            this._geminiElasticQueue.waiting >= config.globalQueueLimit
+            || currentForKey >= config.perKeyModelQueueLimit
+            || this._geminiElasticQueue.queuedBytes + bytes > config.globalQueuedBytesLimit
+        ) {
+            throw createGeminiRoutingError('Gemini elastic queue capacity exceeded', 'QUEUE_CAPACITY_EXCEEDED', 429);
+        }
+        this._geminiElasticQueue.waiting += 1;
+        this._geminiElasticQueue.queuedBytes += bytes;
+        this._geminiElasticQueue.perKeyModel.set(queueKey, currentForKey + 1);
+        return { local: true, queueKey, bytes };
+    }
+
+    async _releaseGeminiElasticQueueEntry(entry) {
+        if (!entry) return;
+        if (!entry.local) {
+            await this.coordination?.releaseGeminiQueueSlot?.(entry.leaseId).catch(error => {
+                this._log('warn', `[Coordination] Gemini queue slot release deferred to TTL: ${error.message}`);
+            });
+            return;
+        }
+        const currentForKey = this._geminiElasticQueue.perKeyModel.get(entry.queueKey) || 0;
+        if (currentForKey <= 1) this._geminiElasticQueue.perKeyModel.delete(entry.queueKey);
+        else this._geminiElasticQueue.perKeyModel.set(entry.queueKey, currentForKey - 1);
+        this._geminiElasticQueue.waiting = Math.max(0, this._geminiElasticQueue.waiting - 1);
+        this._geminiElasticQueue.queuedBytes = Math.max(0, this._geminiElasticQueue.queuedBytes - entry.bytes);
+    }
+
+    _waitForGeminiElasticWake({ timeoutMs, abortSignal }) {
+        if (abortSignal?.aborted) {
+            return Promise.reject(createGeminiRoutingError('Client aborted while queued', 'CLIENT_ABORTED', 499));
+        }
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            const wake = () => finish(resolve);
+            const onAbort = () => finish(() => reject(createGeminiRoutingError('Client aborted while queued', 'CLIENT_ABORTED', 499)));
+            const cleanup = () => {
+                clearTimeout(timer);
+                this._geminiElasticQueue.waiters.delete(wake);
+                abortSignal?.removeEventListener?.('abort', onAbort);
+            };
+            const finish = callback => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                callback();
+            };
+            const timer = setTimeout(wake, Math.max(1, timeoutMs));
+            timer.unref?.();
+            this._geminiElasticQueue.waiters.add(wake);
+            abortSignal?.addEventListener?.('abort', onAbort, { once: true });
+        });
+    }
+
+    _getRecoveryTimeFromError(error) {
+        const value = Date.parse(error?.nextRecoveryTime || error?.retryAfter || '');
+        return Number.isFinite(value) ? value : null;
+    }
+
+    async _tryAntigravityElasticModel(providerType, model, options) {
+        try {
+            const config = await this.acquireSlot(providerType, model, {
+                ...options,
+                skipCredentialQueue: true
+            });
+            return { config, error: null };
+        } catch (error) {
+            if (error?.status === 429 || error?.code === 429) return { config: null, error };
+            throw error;
+        }
+    }
+
+    async _acquireAntigravityElasticSlot(providerType, requestedModel, options = {}) {
+        const policy = this._getAntigravityElasticRoutingConfig();
+        const models = [requestedModel, ...policy.fallbackModels];
+        const startedAt = Date.now();
+        const deadline = startedAt + policy.maxQueueWaitMs;
+        let queueEntry = null;
+        let latestErrors = [];
+
+        const attemptModels = async () => {
+            latestErrors = [];
+            for (let index = 0; index < models.length; index += 1) {
+                const model = models[index];
+                const attempt = await this._tryAntigravityElasticModel(providerType, model, options);
+                if (attempt.config) {
+                    const isFallback = model !== requestedModel;
+                    if (isFallback) this.recordGeminiSchedulingEvent('fallbacks');
+                    return {
+                        config: attempt.config,
+                        actualProviderType: providerType,
+                        actualModel: model,
+                        isFallback,
+                        modelFallbackReason: isFallback ? 'SOURCE_MODEL_UNAVAILABLE' : null,
+                        fallbackAttemptCount: index,
+                        queueWaitMs: queueEntry ? Date.now() - startedAt : 0
+                    };
+                }
+                latestErrors.push(attempt.error);
+            }
+            return null;
+        };
+
+        try {
+            const sourceAttempt = await this._tryAntigravityElasticModel(providerType, requestedModel, options);
+            if (sourceAttempt.config) {
+                return {
+                    config: sourceAttempt.config,
+                    actualProviderType: providerType,
+                    actualModel: requestedModel,
+                    isFallback: false,
+                    fallbackAttemptCount: 0,
+                    queueWaitMs: 0
+                };
+            }
+
+            const sourceRecovery = this._getRecoveryTimeFromError(sourceAttempt.error);
+            const sourceWaitMs = sourceRecovery ? sourceRecovery - Date.now() : Infinity;
+            if (sourceWaitMs > 0 && sourceWaitMs <= policy.preferOriginalWaitMs) {
+                queueEntry = await this._acquireGeminiElasticQueueEntry(requestedModel, options, policy);
+                await this._waitForGeminiElasticWake({
+                    timeoutMs: Math.min(sourceWaitMs, Math.max(1, deadline - Date.now())),
+                    abortSignal: options.abortSignal
+                });
+                const jitterRange = Math.max(0, policy.recoveryJitterMaxMs - policy.recoveryJitterMinMs);
+                const jitterMs = policy.recoveryJitterMinMs + Math.floor(Math.random() * (jitterRange + 1));
+                if (jitterMs > 0 && Date.now() < deadline) {
+                    await this._waitForGeminiElasticWake({
+                        timeoutMs: Math.min(jitterMs, Math.max(1, deadline - Date.now())),
+                        abortSignal: options.abortSignal
+                    });
+                }
+                const recovered = await this._tryAntigravityElasticModel(providerType, requestedModel, options);
+                if (recovered.config) {
+                    return {
+                        config: recovered.config,
+                        actualProviderType: providerType,
+                        actualModel: requestedModel,
+                        isFallback: false,
+                        queueOutcome: 'recovered_original',
+                        fallbackAttemptCount: 0,
+                        queueWaitMs: Date.now() - startedAt
+                    };
+                }
+            }
+
+            const immediateFallback = await attemptModels();
+            if (immediateFallback) return immediateFallback;
+            if (!queueEntry) queueEntry = await this._acquireGeminiElasticQueueEntry(requestedModel, options, policy);
+
+            while (Date.now() < deadline) {
+                const now = Date.now();
+                const recoveryTimes = latestErrors
+                    .map(error => this._getRecoveryTimeFromError(error))
+                    .filter(value => Number.isFinite(value) && value > now);
+                const nearestRecovery = recoveryTimes.length > 0 ? Math.min(...recoveryTimes) : null;
+                const remainingMs = Math.max(1, deadline - now);
+                const recoveryDelay = nearestRecovery ? Math.max(1, nearestRecovery - now) : remainingMs;
+                await this._waitForGeminiElasticWake({
+                    timeoutMs: Math.min(remainingMs, recoveryDelay, this.coordination ? 1000 : remainingMs),
+                    abortSignal: options.abortSignal
+                });
+                const selected = await attemptModels();
+                if (selected) {
+                    selected.queueOutcome = selected.isFallback ? 'fallback_after_wait' : 'recovered_original';
+                    return selected;
+                }
+            }
+
+            const recoveryTimes = latestErrors
+                .map(error => this._getRecoveryTimeFromError(error))
+                .filter(value => Number.isFinite(value) && value > Date.now());
+            const nextRecoveryTime = recoveryTimes.length > 0
+                ? new Date(Math.min(...recoveryTimes)).toISOString()
+                : null;
+            throw createGeminiRoutingError(
+                `Gemini model queue wait timed out after ${policy.maxQueueWaitMs}ms`,
+                'QUEUE_WAIT_TIMEOUT',
+                429,
+                {
+                    quotaScope: 'model',
+                    quotaKey: normalizeAntigravityQuotaModel(requestedModel),
+                    nextRecoveryTime,
+                    retryAfter: nextRecoveryTime
+                }
+            );
+        } finally {
+            await this._releaseGeminiElasticQueueEntry(queueEntry);
+        }
+    }
+
     recordGeminiSchedulingEvent(field) {
         return this.coordination?.recordGeminiSchedulingEvent?.(field) === true;
     }
@@ -2760,6 +3079,10 @@ export class ProviderPoolManager {
         if (!providerType || typeof providerType !== 'string') {
             this._log('error', `Invalid providerType: ${providerType}`);
             return null;
+        }
+
+        if (this._isAntigravityElasticRoutingEligible(providerType, requestedModel)) {
+            return this._acquireAntigravityElasticSlot(providerType, requestedModel, options);
         }
 
         if (options.disableProviderFallback === true) {

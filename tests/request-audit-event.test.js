@@ -176,6 +176,34 @@ describe('request audit event', () => {
     });
   });
 
+  test('records Gemini queue and fallback metadata from the generic model route', () => {
+    const event = buildRequestAuditEvent({
+      requestId: 'req-gemini-elastic',
+      model: 'gemini-2.5-flash',
+      originalRequestBody: { model: 'gemini-2.5-flash-lite' },
+      processedRequestBody: { model: 'gemini-2.5-flash' },
+      _modelRouting: {
+        requestedModel: 'gemini-2.5-flash-lite',
+        actualModel: 'gemini-2.5-flash',
+        modelFallbackFrom: 'gemini-2.5-flash-lite',
+        modelFallbackTo: 'gemini-2.5-flash',
+        modelFallbackReason: 'SOURCE_MODEL_UNAVAILABLE',
+        queueWaitMs: 1234,
+        fallbackAttemptCount: 2,
+        queueOutcome: 'fallback_after_wait'
+      }
+    });
+
+    expect(event.routing).toMatchObject({
+      modelFallbackFrom: 'gemini-2.5-flash-lite',
+      modelFallbackTo: 'gemini-2.5-flash',
+      modelFallbackReason: 'SOURCE_MODEL_UNAVAILABLE',
+      queueWaitMs: 1234,
+      fallbackAttemptCount: 2,
+      queueOutcome: 'fallback_after_wait'
+    });
+  });
+
   test('records real account email when routing context provides it', () => {
     const event = buildRequestAuditEvent({
       requestId: 'req-account-email',

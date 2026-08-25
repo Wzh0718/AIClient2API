@@ -15,6 +15,7 @@ class InMemoryRedisExecutor {
         this.modelCooldowns = new Map();
         this.modelProbeLeases = new Map();
         this.imageCapacityLeases = new Map();
+        this.geminiQueueLeases = new Map();
         this.scriptCalls = [];
         this.now = 0;
     }
@@ -58,6 +59,32 @@ class InMemoryRedisExecutor {
             if (this.modelProbeLeases.get(probeHash) !== owner) return 0;
             this.modelProbeLeases.delete(probeHash);
             return 1;
+        }
+        if (name === 'acquire-gemini-queue-slot') {
+            const [leaseId, queueKey, bytes, globalLimit, perKeyLimit, byteLimit, ttlMs, nowMs, workerId] = args;
+            for (const [id, lease] of this.geminiQueueLeases.entries()) {
+                if (lease.expiresAt <= Number(nowMs)) this.geminiQueueLeases.delete(id);
+            }
+            const active = [...this.geminiQueueLeases.values()];
+            const queuedBytes = active.reduce((sum, lease) => sum + lease.bytes, 0);
+            const perKey = active.filter(lease => lease.queueKey === queueKey).length;
+            if (
+                active.length >= Number(globalLimit)
+                || perKey >= Number(perKeyLimit)
+                || queuedBytes + Number(bytes) > Number(byteLimit)
+            ) {
+                return JSON.stringify({ acquired: false, waiting: active.length, queuedBytes });
+            }
+            this.geminiQueueLeases.set(leaseId, {
+                queueKey,
+                bytes: Number(bytes),
+                workerId,
+                expiresAt: Number(nowMs) + Number(ttlMs)
+            });
+            return JSON.stringify({ acquired: true, leaseId, waiting: active.length + 1, queuedBytes: queuedBytes + Number(bytes) });
+        }
+        if (name === 'release-gemini-queue-slot') {
+            return this.geminiQueueLeases.delete(args[0]) ? 1 : 0;
         }
         if (name === 'acquire-provider-lease') {
             const [epoch, leaseId, ttlMs, workerId, candidatesJson, _nowMs, observedBootId, affinityKey = '', _affinityTtlMs, routedProviderKey = '', probeOwner = '', probeTtlMs = '30000'] = args;
@@ -198,6 +225,53 @@ class InMemoryRedisExecutor {
 }
 
 describe('RedisLeaseCoordinator', () => {
+    test('enforces Gemini queue limits across workers and releases capacity', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const first = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+        const second = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w2' });
+
+        const lease = await first.acquireGeminiQueueSlot({
+            queueKey: 'key-a:gemini-2.5-flash-lite',
+            bytes: 1024,
+            globalLimit: 1,
+            perKeyLimit: 1,
+            byteLimit: 2048,
+            ttlMs: 50000
+        });
+        await expect(second.acquireGeminiQueueSlot({
+            queueKey: 'key-b:gemini-2.5-flash-lite',
+            bytes: 1024,
+            globalLimit: 1,
+            perKeyLimit: 1,
+            byteLimit: 2048,
+            ttlMs: 50000
+        })).resolves.toBeNull();
+
+        await first.releaseGeminiQueueSlot(lease.leaseId);
+        await expect(second.acquireGeminiQueueSlot({
+            queueKey: 'key-b:gemini-2.5-flash-lite',
+            bytes: 1024,
+            globalLimit: 1,
+            perKeyLimit: 1,
+            byteLimit: 2048,
+            ttlMs: 50000
+        })).resolves.toEqual(expect.objectContaining({ leaseId: expect.any(String) }));
+    });
+
+    test('rejects Gemini queue admission when the shared byte budget is exceeded', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const coordinator = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+
+        await expect(coordinator.acquireGeminiQueueSlot({
+            queueKey: 'key-a:model',
+            bytes: 4096,
+            globalLimit: 10,
+            perKeyLimit: 10,
+            byteLimit: 1024,
+            ttlMs: 50000
+        })).resolves.toBeNull();
+    });
+
     test('rejects new leases quickly when Redis memory exceeds the critical watermark', async () => {
         const redis = {
             evalScript: jest.fn(),

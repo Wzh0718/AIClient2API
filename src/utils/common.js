@@ -28,6 +28,10 @@ import {
     recordTemporaryRouteScheduleBypass,
     resolveTemporaryKeyModelRoute
 } from './temporary-key-model-routing.js';
+import {
+    applyModelFallbackResponseHeaders,
+    shouldPreserveFallbackResponseModel
+} from './model-fallback-response-metadata.js';
 
 const CODEX_FINGERPRINT_HEADER_NAMES = Object.freeze([
     'x-codex-turn-metadata',
@@ -614,6 +618,33 @@ export function getRetryAfterMs(error, now = Date.now()) {
     if (retryAfterDelay !== null) return retryAfterDelay;
 
     return getRetryDelayFromBody(error?.response?.data);
+}
+
+export function getHttpRetryAfterValue(error, statusCode, now = Date.now()) {
+    if (Number(statusCode) !== 429) return null;
+
+    const explicitSeconds = Number(error?.retryAfterSeconds);
+    if (Number.isFinite(explicitSeconds) && explicitSeconds >= 0) {
+        return String(Math.max(1, Math.ceil(explicitSeconds)));
+    }
+
+    for (const value of [error?.nextRecoveryTime, error?.retryAfter]) {
+        const recoveryMs = Date.parse(String(value || ''));
+        if (Number.isFinite(recoveryMs)) {
+            return String(Math.max(1, Math.ceil((recoveryMs - now) / 1000)));
+        }
+    }
+
+    const retryAfterMs = getRetryAfterMs(error, now);
+    if (retryAfterMs !== null) return String(Math.max(1, Math.ceil(retryAfterMs / 1000)));
+    return '1';
+}
+
+function getErrorResponseHeaders(error, statusCode) {
+    const headers = { 'Content-Type': 'application/json' };
+    const retryAfter = getHttpRetryAfterValue(error, statusCode);
+    if (retryAfter) headers['Retry-After'] = retryAfter;
+    return headers;
 }
 
 function getPositiveInteger(value, fallback) {
@@ -1387,12 +1418,12 @@ export function isAuthorized(req, requestUrl, REQUIRED_API_KEY) {
  * @param {Object} responsePayload - The actual response payload (string for unary, object for stream chunks).
  * @param {boolean} isStream - Whether the response is a stream.
  */
-export async function handleUnifiedResponse(res, responsePayload, isStream, statusCode = 200) {
+export async function handleUnifiedResponse(res, responsePayload, isStream, statusCode = 200, headers = {}) {
     const validatedStatusCode = ensureValidStatusCode(statusCode);
     if (isStream) {
-        res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "Transfer-Encoding": "chunked" });
+        res.writeHead(200, { ...headers, "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "Transfer-Encoding": "chunked" });
     } else {
-        res.writeHead(validatedStatusCode, { 'Content-Type': 'application/json' });
+        res.writeHead(validatedStatusCode, { ...headers, 'Content-Type': 'application/json' });
     }
 
     if (isStream) {
@@ -1763,6 +1794,9 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 // 使用 acquireSlot: true 以占用新凭证的并发插槽
                 const result = await getApiServiceWithFallback(CONFIG, model, {
                     acquireSlot: true,
+                    abortSignal: retryContext?.abortSignal,
+                    queueKey: retryContext?.queueKey,
+                    queueRequestBytes: retryContext?.queueRequestBytes,
                     ...(retryContext?.temporaryRoute ? { disableProviderFallback: true } : {}),
                     excludeProviderUuids: failedCredentialUuids,
                     deprioritizeProviderTypes: failedProviderTypes,
@@ -1792,6 +1826,13 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 
                 if (result && result.service) {
                     logger.info(`[Stream Retry] Switched to new credential: ${result.uuid} (provider: ${result.actualProviderType})`);
+                    const requestedResponseModel = retryContext?.clientRequestedModel || model;
+                    const retryModelRouting = {
+                        requestedModel: requestedResponseModel,
+                        actualModel: result.actualModel || model,
+                        modelFallbackReason: result.modelFallbackReason || CONFIG._modelRouting?.modelFallbackReason || null
+                    };
+                    applyModelFallbackResponseHeaders(res, retryModelRouting);
                     
                     // 使用新服务重试
                     const newRetryContext = {
@@ -1804,6 +1845,9 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                         clientDisconnected,  // 传递断开状态
                         anyDataSent          // 传递数据发送状态
                     };
+                    if (shouldPreserveFallbackResponseModel(retryModelRouting)) {
+                        newRetryContext.clientResponseModel = requestedResponseModel;
+                    }
                     
                     // 递归调用，使用新的服务
                     return await handleStreamRequest(
@@ -2110,6 +2154,9 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 // 使用 acquireSlot: true 以占用新凭证的并发插槽
                 const result = await getApiServiceWithFallback(CONFIG, model, {
                     acquireSlot: true,
+                    abortSignal: retryContext?.abortSignal,
+                    queueKey: retryContext?.queueKey,
+                    queueRequestBytes: retryContext?.queueRequestBytes,
                     ...(retryContext?.temporaryRoute ? { disableProviderFallback: true } : {}),
                     excludeProviderUuids: failedCredentialUuids,
                     deprioritizeProviderTypes: failedProviderTypes,
@@ -2139,6 +2186,13 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 
                 if (result && result.service) {
                     logger.info(`[Unary Retry] Switched to new credential: ${result.uuid} (provider: ${result.actualProviderType})`);
+                    const requestedResponseModel = retryContext?.clientRequestedModel || model;
+                    const retryModelRouting = {
+                        requestedModel: requestedResponseModel,
+                        actualModel: result.actualModel || model,
+                        modelFallbackReason: result.modelFallbackReason || CONFIG._modelRouting?.modelFallbackReason || null
+                    };
+                    applyModelFallbackResponseHeaders(res, retryModelRouting);
                     
                     // 使用新服务重试
                     const newRetryContext = {
@@ -2149,6 +2203,9 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                         failedCredentialUuids,
                         failedProviderTypes
                     };
+                    if (shouldPreserveFallbackResponseModel(retryModelRouting)) {
+                        newRetryContext.clientResponseModel = requestedResponseModel;
+                    }
                     
                     // 递归调用，使用新的服务
                     return await handleUnaryRequest(
@@ -2225,7 +2282,13 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         const errorResponse = createErrorResponse(error, fromProvider);
         const rawStatusCode = error.status || error.code || (error.response && error.response.status) || 500;
         const statusCode = ensureValidStatusCode(rawStatusCode);
-        await handleUnifiedResponse(res, JSON.stringify(errorResponse), false, statusCode);
+        await handleUnifiedResponse(
+            res,
+            JSON.stringify(errorResponse),
+            false,
+            statusCode,
+            getErrorResponseHeaders(error, statusCode)
+        );
     } finally {
         // 确保在请求结束或出错时释放插槽
         if (providerPoolManager && pooluuid) {
@@ -2376,6 +2439,24 @@ export async function handleModelListRequest(req, res, service, endpointType, CO
         // }
         handleError(res, error, CONFIG.MODEL_PROVIDER, fromProvider);
     }
+}
+
+export function createRequestLifecycleAbortController(req, res) {
+    const controller = new AbortController();
+    const cleanup = () => {
+        req?.removeListener?.('aborted', abortAndCleanup);
+        res?.removeListener?.('close', abortAndCleanup);
+        res?.removeListener?.('finish', cleanup);
+    };
+    const abortAndCleanup = () => {
+        controller.abort();
+        cleanup();
+    };
+
+    req?.once?.('aborted', abortAndCleanup);
+    res?.once?.('close', abortAndCleanup);
+    res?.once?.('finish', cleanup);
+    return controller;
 }
 
 
@@ -2538,6 +2619,13 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         providerPoolManager &&
         (CONFIG.MODEL_PROVIDER === MODEL_PROVIDER.AUTO || (CONFIG.providerPools && CONFIG.providerPools[CONFIG.MODEL_PROVIDER]))
     );
+    const selectionAbortController = createRequestLifecycleAbortController(req, res);
+    const queueIdentity = CONFIG.potluckKeyData?.id || CONFIG.potluckApiKey || req.socket?.remoteAddress || 'anonymous';
+    const queueKey = crypto.createHash('sha256').update(String(queueIdentity)).digest('hex').slice(0, 24);
+    const contentLength = Number(req.headers?.['content-length']);
+    const queueRequestBytes = Number.isFinite(contentLength) && contentLength >= 0
+        ? contentLength
+        : Buffer.byteLength(JSON.stringify(originalRequestBody));
     if (!service || shouldSelectByPool) {
         const { getApiServiceWithFallback } = await import('../services/service-manager.js');
         const routingStrategy = resolveImageProviderRoutingStrategy(CONFIG, {
@@ -2549,6 +2637,9 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         try {
             result = await getApiServiceWithFallback(CONFIG, model, {
                 acquireSlot: shouldSelectByPool,
+                abortSignal: selectionAbortController.signal,
+                queueKey,
+                queueRequestBytes,
                 ...(temporaryRoute ? { disableProviderFallback: true } : {}),
                 ...(routingStrategy ? { routingStrategy } : {})
             });
@@ -2580,6 +2671,13 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         actualCustomName = result.serviceConfig?.customName || CONFIG.customName;
         actualAccountIdentity = result.serviceConfig?.codexAccountKey || result.serviceConfig?.codexAccountId || actualAccountIdentity;
         actualAccountEmail = result.serviceConfig?.codexEmail || actualAccountEmail;
+
+        const responseModelRouting = {
+            requestedModel: clientRequestedModel,
+            actualModel: result.actualModel || model,
+            modelFallbackReason: result.modelFallbackReason || CONFIG._modelRouting?.modelFallbackReason || null
+        };
+        applyModelFallbackResponseHeaders(res, responseModelRouting);
 
         // 如果发生了模型级别的 fallback，需要更新请求使用的模型
         if (result.actualModel && result.actualModel !== model) {
@@ -2663,7 +2761,14 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         CONFIG,
         currentRetry: 0,
         maxRetries: credentialSwitchMaxRetries,
-        ...(!temporaryRoute && isCodexProvider(toProvider) && model !== clientRequestedModel
+        clientRequestedModel,
+        abortSignal: selectionAbortController.signal,
+        queueKey,
+        queueRequestBytes,
+        ...(!temporaryRoute && (
+            (isCodexProvider(toProvider) && model !== clientRequestedModel)
+            || shouldPreserveFallbackResponseModel(CONFIG._modelRouting)
+        )
             ? { clientResponseModel: clientRequestedModel }
             : {}),
         ...(temporaryRoute ? {
@@ -2832,7 +2937,7 @@ export function handleError(res, error, provider = null, fromProvider = null, re
     if (fromProvider) {
         const errorResponse = createErrorResponse(error, fromProvider);
         if (!res.headersSent) {
-            res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+            res.writeHead(statusCode, getErrorResponseHeaders(error, statusCode));
         }
         res.end(JSON.stringify(errorResponse));
         return;
@@ -2893,7 +2998,7 @@ export function handleError(res, error, provider = null, fromProvider = null, re
     }
 
     if (!res.headersSent) {
-        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+        res.writeHead(statusCode, getErrorResponseHeaders(error, statusCode));
     }
 
     const errorPayload = {

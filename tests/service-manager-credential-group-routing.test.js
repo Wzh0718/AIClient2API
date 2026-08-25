@@ -469,7 +469,10 @@ describe('Service Manager Codex credential-group routing', () => {
         const manager = await initialize(config);
         const selectSpy = jest.spyOn(manager, 'selectProviderWithFallback');
 
-        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toThrow('No healthy provider found');
+        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toMatchObject({
+            status: 503,
+            code: 'PROVIDER_CREDENTIALS_UNAVAILABLE'
+        });
         expect(selectSpy).toHaveBeenCalledTimes(1);
         expect(selectSpy.mock.calls[0]).toEqual(expect.arrayContaining([providerType, 'gpt-5.6-luna']));
         expect(selectSpy.mock.calls[0][2]).toMatchObject({ disableProviderFallback: true });

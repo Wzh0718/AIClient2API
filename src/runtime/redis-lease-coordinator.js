@@ -134,6 +134,47 @@ end
 return 1
 `;
 
+const ACQUIRE_GEMINI_QUEUE_SLOT_SCRIPT = `
+local leases_key = KEYS[1] .. ':gemini-queue:leases'
+local expiry_key = KEYS[1] .. ':gemini-queue:expiry'
+local now_ms = tonumber(ARGV[8])
+local expired = redis.call('ZRANGEBYSCORE', expiry_key, '-inf', now_ms)
+for _, lease_id in ipairs(expired) do
+  redis.call('HDEL', leases_key, lease_id)
+  redis.call('ZREM', expiry_key, lease_id)
+end
+local waiting = 0
+local queued_bytes = 0
+local per_key = 0
+local entries = redis.call('HVALS', leases_key)
+for _, value in ipairs(entries) do
+  local entry = cjson.decode(value)
+  waiting = waiting + 1
+  queued_bytes = queued_bytes + tonumber(entry.bytes or 0)
+  if entry.queueKey == ARGV[2] then per_key = per_key + 1 end
+end
+local bytes = tonumber(ARGV[3])
+if waiting >= tonumber(ARGV[4])
+  or per_key >= tonumber(ARGV[5])
+  or queued_bytes + bytes > tonumber(ARGV[6]) then
+  return cjson.encode({ acquired = false, waiting = waiting, queuedBytes = queued_bytes })
+end
+local lease = cjson.encode({ queueKey = ARGV[2], bytes = bytes, workerId = ARGV[9] })
+redis.call('HSET', leases_key, ARGV[1], lease)
+redis.call('ZADD', expiry_key, now_ms + tonumber(ARGV[7]), ARGV[1])
+redis.call('PEXPIRE', leases_key, tonumber(ARGV[7]) * 2)
+redis.call('PEXPIRE', expiry_key, tonumber(ARGV[7]) * 2)
+return cjson.encode({ acquired = true, leaseId = ARGV[1], waiting = waiting + 1, queuedBytes = queued_bytes + bytes })
+`;
+
+const RELEASE_GEMINI_QUEUE_SLOT_SCRIPT = `
+local leases_key = KEYS[1] .. ':gemini-queue:leases'
+local expiry_key = KEYS[1] .. ':gemini-queue:expiry'
+local removed = redis.call('HDEL', leases_key, ARGV[1])
+redis.call('ZREM', expiry_key, ARGV[1])
+return removed
+`;
+
 const RENEW_SCRIPT = `
 local lease_key = KEYS[1] .. ':lease:' .. ARGV[1]
 if redis.call('EXISTS', lease_key) == 0 then return 0 end
@@ -393,6 +434,7 @@ export class RedisLeaseCoordinator {
         this.renewTimers = new Map();
         this.activeLeases = new Map();
         this.activeImageLeases = new Map();
+        this.activeGeminiQueueLeases = new Set();
         this.imageCapacityRecoveryRequired = false;
         this.imageCapacityMetrics = {
             acquired: 0,
@@ -409,6 +451,11 @@ export class RedisLeaseCoordinator {
             rateLimited: 0,
             retryAttempts: 0,
             fallbacks: 0,
+            queued: 0,
+            queueRejected: 0,
+            queueReleased: 0,
+            currentQueueDepth: 0,
+            currentQueuedBytes: 0,
             byModel: {}
         };
         this.redisMemory = { usedBytes: 0, maxBytes: 0, ratio: 0, degraded: false, critical: false };
@@ -565,6 +612,50 @@ export class RedisLeaseCoordinator {
         this.activeImageLeases.set(leaseId, lease);
         this.imageCapacityMetrics.acquired += 1;
         return { leaseId, bytes: normalizedBytes, usedBytes: this.imageCapacityMetrics.lastUsedBytes };
+    }
+
+    async acquireGeminiQueueSlot({
+        queueKey,
+        bytes = 0,
+        globalLimit = 512,
+        perKeyLimit = 256,
+        byteLimit = 64 * 1024 * 1024,
+        ttlMs = 50_000
+    } = {}) {
+        await this._checkRedisMemoryPressure();
+        const leaseId = randomUUID();
+        const result = await this._eval('acquire-gemini-queue-slot', ACQUIRE_GEMINI_QUEUE_SLOT_SCRIPT, [
+            leaseId,
+            hashAffinityKey(queueKey || 'anonymous'),
+            String(Math.max(0, Number(bytes) || 0)),
+            String(Math.max(1, Number(globalLimit) || 512)),
+            String(Math.max(1, Number(perKeyLimit) || 256)),
+            String(Math.max(1, Number(byteLimit) || 64 * 1024 * 1024)),
+            String(Math.max(1000, Number(ttlMs) || 50_000)),
+            String(Date.now()),
+            this.workerId
+        ]);
+        const state = typeof result === 'string' ? JSON.parse(result) : result;
+        this.modelSchedulingMetrics.currentQueueDepth = Number(state?.waiting || 0);
+        this.modelSchedulingMetrics.currentQueuedBytes = Number(state?.queuedBytes || 0);
+        if (state?.acquired !== true) {
+            this.modelSchedulingMetrics.queueRejected += 1;
+            return null;
+        }
+        this.activeGeminiQueueLeases.add(leaseId);
+        this.modelSchedulingMetrics.queued += 1;
+        return { leaseId, bytes: Math.max(0, Number(bytes) || 0) };
+    }
+
+    async releaseGeminiQueueSlot(leaseId) {
+        if (!leaseId) return false;
+        this.activeGeminiQueueLeases.delete(leaseId);
+        const released = Number(await this._eval('release-gemini-queue-slot', RELEASE_GEMINI_QUEUE_SLOT_SCRIPT, [leaseId])) === 1;
+        if (released) {
+            this.modelSchedulingMetrics.queueReleased += 1;
+            this.modelSchedulingMetrics.currentQueueDepth = Math.max(0, this.modelSchedulingMetrics.currentQueueDepth - 1);
+        }
+        return released;
     }
 
     async resizeImageCapacity(leaseId, bytes, { budgetBytes } = {}) {
@@ -790,6 +881,7 @@ export class RedisLeaseCoordinator {
             bootId: this.bootId,
             redisMemory: { ...this.redisMemory },
             activeLeases: this.activeLeases.size,
+            activeGeminiQueueLeases: this.activeGeminiQueueLeases.size,
             imageCapacity: {
                 ...this.imageCapacityMetrics,
                 localActiveLeases: this.activeImageLeases.size,

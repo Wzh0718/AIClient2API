@@ -18,6 +18,31 @@ function parseBooleanConfig(value) {
     return Boolean(value);
 }
 
+function normalizeAntigravityElasticRoutingUpdate(incoming, current = {}) {
+    if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return current;
+    const next = { ...current };
+    if (incoming.enabled !== undefined) next.enabled = parseBooleanConfig(incoming.enabled);
+    for (const key of [
+        'maxQueueWaitMs',
+        'preferOriginalWaitMs',
+        'globalQueueLimit',
+        'perKeyModelQueueLimit',
+        'globalQueuedBytesLimit',
+        'recoveryJitterMinMs',
+        'recoveryJitterMaxMs'
+    ]) {
+        if (incoming[key] === undefined) continue;
+        const value = Number(incoming[key]);
+        if (Number.isInteger(value) && value >= 0) next[key] = value;
+    }
+    if (Array.isArray(incoming.fallbackModels)) {
+        next.fallbackModels = incoming.fallbackModels
+            .map(model => String(model || '').trim())
+            .filter(model => ['gemini-3.1-flash-lite', 'gemini-2.5-flash'].includes(model));
+    }
+    return next;
+}
+
 const PROXY_RUNTIME_CONFIG_KEYS = [
     'PROXY_URL',
     'PROXY_ENABLED_PROVIDERS',
@@ -171,6 +196,7 @@ export async function handleGetConfig(req, res, currentConfig) {
         REFRESH_CONCURRENCY_PER_PROVIDER: currentConfig.REFRESH_CONCURRENCY_PER_PROVIDER,
         providerFallbackChain: currentConfig.providerFallbackChain,
         modelFallbackMapping: currentConfig.modelFallbackMapping,
+        antigravityElasticRouting: currentConfig.antigravityElasticRouting,
         PROXY_URL: currentConfig.PROXY_URL,
         PROXY_ENABLED_PROVIDERS: currentConfig.PROXY_ENABLED_PROVIDERS,
         TLS_SIDECAR_ENABLED: currentConfig.TLS_SIDECAR_ENABLED,
@@ -341,6 +367,12 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
         if (newConfig.REFRESH_CONCURRENCY_PER_PROVIDER !== undefined) currentConfig.REFRESH_CONCURRENCY_PER_PROVIDER = newConfig.REFRESH_CONCURRENCY_PER_PROVIDER;
         if (newConfig.providerFallbackChain !== undefined) currentConfig.providerFallbackChain = newConfig.providerFallbackChain;
         if (newConfig.modelFallbackMapping !== undefined) currentConfig.modelFallbackMapping = newConfig.modelFallbackMapping;
+        if (newConfig.antigravityElasticRouting !== undefined) {
+            currentConfig.antigravityElasticRouting = normalizeAntigravityElasticRoutingUpdate(
+                newConfig.antigravityElasticRouting,
+                currentConfig.antigravityElasticRouting
+            );
+        }
         
         // Proxy settings
         if (newConfig.PROXY_URL !== undefined) currentConfig.PROXY_URL = newConfig.PROXY_URL;
@@ -527,6 +559,7 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
                 REFRESH_CONCURRENCY_PER_PROVIDER: currentConfig.REFRESH_CONCURRENCY_PER_PROVIDER,
                 providerFallbackChain: currentConfig.providerFallbackChain,
                 modelFallbackMapping: currentConfig.modelFallbackMapping,
+                antigravityElasticRouting: currentConfig.antigravityElasticRouting,
                 PROXY_URL: currentConfig.PROXY_URL,
                 PROXY_ENABLED_PROVIDERS: currentConfig.PROXY_ENABLED_PROVIDERS,
                 LOG_ENABLED: currentConfig.LOG_ENABLED,

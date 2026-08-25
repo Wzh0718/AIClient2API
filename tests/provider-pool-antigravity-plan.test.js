@@ -111,7 +111,10 @@ describe('provider pool Antigravity subscription plan', () => {
         ]);
 
         await expect(pool.selectProvider('gemini-antigravity', 'gemini-2.5-flash'))
-            .rejects.toMatchObject({ status: 429 });
+            .rejects.toMatchObject({
+                status: 503,
+                code: 'PROVIDER_CREDENTIALS_UNAVAILABLE'
+            });
     });
 
     test('routes Google AI Pro accounts even when Antigravity reports a free entitlement', async () => {
