@@ -42,4 +42,22 @@ describe('provider refresh fencing', () => {
         expect(status.config.lastRefreshTime).toBeFalsy();
         expect(coordination.releaseRefreshFence).toHaveBeenCalledWith('test', 'one', 7);
     });
+
+    test('failed token refresh records a retry cooldown without changing lastRefreshTime', async () => {
+        const serviceAdapterFactory = jest.fn(() => ({
+            refreshToken: jest.fn(async () => { throw new Error('temporary refresh failure'); }),
+            forceRefreshToken: jest.fn(async () => { throw new Error('temporary refresh failure'); })
+        }));
+        const manager = new ProviderPoolManager({ test: [{ uuid: 'one' }] }, {
+            persistenceEnabled: false,
+            serviceAdapterFactory
+        });
+        const status = manager.providerStatus.test[0];
+        status.config.lastRefreshTime = 123;
+
+        await expect(manager._refreshNodeToken('test', status, true)).rejects.toThrow('temporary refresh failure');
+
+        expect(status.config.lastRefreshTime).toBe(123);
+        expect(status.config.lastRefreshAttemptTime).toEqual(expect.any(Number));
+    });
 });

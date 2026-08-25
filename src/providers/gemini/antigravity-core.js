@@ -1451,6 +1451,11 @@ export class AntigravityApiService {
                 body: JSON.stringify(body)
             };
 
+            const requestTimeout = Number(this.config.HEALTH_CHECK_REQUEST_TIMEOUT_MS);
+            if (Number.isFinite(requestTimeout) && requestTimeout > 0) {
+                requestOptions.timeout = requestTimeout;
+            }
+
             this._applySidecar(requestOptions);
             const res = await this.authClient.request(requestOptions);
             return res.data;
@@ -1556,6 +1561,11 @@ export class AntigravityApiService {
                 validateStatus: () => true,
                 body: JSON.stringify(body)
             };
+
+            const requestTimeout = Number(this.config.HEALTH_CHECK_REQUEST_TIMEOUT_MS);
+            if (Number.isFinite(requestTimeout) && requestTimeout > 0) {
+                requestOptions.timeout = requestTimeout;
+            }
 
             this._applySidecar(requestOptions);
 

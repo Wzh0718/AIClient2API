@@ -564,6 +564,7 @@ export class ProviderPoolManager {
         
         this.warmupTarget = options.globalConfig?.WARMUP_TARGET || 0; // 默认预热0个节点
         this.refreshingUuids = new Set(); // 正在刷新的节点 UUID 集合
+        this.healthCheckPromises = new Map(); // 同一凭据只允许一个上游健康检测
         
         this.refreshQueues = {}; // 按 providerType 分组的队列
         // 缓冲队列机制：延迟5秒，去重后再执行刷新
@@ -1394,6 +1395,7 @@ export class ProviderPoolManager {
                 config.needsRefresh = false;
                 config.refreshCount = 0;
                 config.errorCount = 0; // 成功/无操作也重置错误计数
+                config.lastHealthStateTime = new Date().toISOString();
                 
                 this._debouncedSave(providerType);
             } else {
@@ -1411,6 +1413,7 @@ export class ProviderPoolManager {
             
             // 增加错误计数（用于普通的健康检查参考，虽然刷新错误主要参考 refreshCount）
             if (error.code !== 'STALE_REFRESH_FENCE') config.errorCount = (config.errorCount || 0) + 1;
+            if (error.code !== 'STALE_REFRESH_FENCE') config.lastHealthStateTime = new Date().toISOString();
 
             // 只有当刷新重试次数达到上限（5次）时，才标记为不健康
             // 注意：refreshCount 在进入本方法后的 try 块前已经自增（L466）
@@ -1425,7 +1428,7 @@ export class ProviderPoolManager {
 
                 // 增加冷却保护：更新 lastRefreshTime，利用 markProviderNeedRefresh 中的 30s 保护逻辑，
                 // 防止因瞬时高并发请求导致 5 次重试机会在短时间内被耗尽。
-                config.lastRefreshTime = Date.now(); 
+                config.lastRefreshAttemptTime = Date.now();
                 
                 this._debouncedSave(providerType);
             }
@@ -2036,6 +2039,8 @@ export class ProviderPoolManager {
                     if (isColdStart && !syncFromConfig) {
                         // 冷启动：清空所有统计数据，确保重启后计数重置
                         providerConfig.lastUsed = null;
+                        providerConfig.lastSuccessTime = providerConfig.lastSuccessTime || null;
+                        providerConfig.lastHealthStateTime = providerConfig.lastHealthStateTime || null;
                         providerConfig.usageCount = 0;
                         providerConfig.errorCount = 0;
                         // providerConfig.lastErrorTime = null;
@@ -2043,6 +2048,8 @@ export class ProviderPoolManager {
                     } else if (syncFromConfig) {
                         // 强制同步：从配置中恢复统计数据
                         providerConfig.lastUsed = providerConfig.lastUsed || null;
+                        providerConfig.lastSuccessTime = providerConfig.lastSuccessTime || null;
+                        providerConfig.lastHealthStateTime = providerConfig.lastHealthStateTime || null;
                         providerConfig.usageCount = providerConfig.usageCount || 0;
                         providerConfig.errorCount = providerConfig.errorCount || 0;
                         providerConfig.lastErrorTime = providerConfig.lastErrorTime || null;
@@ -2050,6 +2057,8 @@ export class ProviderPoolManager {
                     } else if (existing) {
                         // 热重载：从旧状态中恢复统计数据，避免被配置文件中的旧数据覆盖
                         providerConfig.lastUsed = existing.config.lastUsed;
+                        providerConfig.lastSuccessTime = existing.config.lastSuccessTime;
+                        providerConfig.lastHealthStateTime = existing.config.lastHealthStateTime;
                         providerConfig.usageCount = existing.config.usageCount;
                         providerConfig.errorCount = existing.config.errorCount;
                         providerConfig.lastErrorTime = existing.config.lastErrorTime;
@@ -2057,6 +2066,8 @@ export class ProviderPoolManager {
                     } else {
                         // 新增节点或默认初始化
                         providerConfig.lastUsed = providerConfig.lastUsed || null;
+                        providerConfig.lastSuccessTime = providerConfig.lastSuccessTime || null;
+                        providerConfig.lastHealthStateTime = providerConfig.lastHealthStateTime || null;
                         providerConfig.usageCount = providerConfig.usageCount || 0;
                         providerConfig.errorCount = providerConfig.errorCount || 0;
                     }
@@ -3331,9 +3342,12 @@ export class ProviderPoolManager {
 
             // 防并发机制 B: 如果 30 秒内刚刷新过，忽略请求（防止滞后的 401 错误导致重复刷新）
             const now = Date.now();
-            const lastRefreshTime = provider.config.lastRefreshTime || 0;
-            if (now - lastRefreshTime < 30000) {
-                this._log('info', `Provider ${this._getDisplayName(providerConfig)} was refreshed recently (${Math.round((now - lastRefreshTime)/1000)}s ago), ignoring refresh request.`);
+            const lastRefreshActivityTime = Math.max(
+                Number(provider.config.lastRefreshTime || 0),
+                Number(provider.config.lastRefreshAttemptTime || 0)
+            );
+            if (now - lastRefreshActivityTime < 30000) {
+                this._log('info', `Provider ${this._getDisplayName(providerConfig)} had recent refresh activity (${Math.round((now - lastRefreshActivityTime)/1000)}s ago), ignoring refresh request.`);
                 return;
             }
 
@@ -3385,6 +3399,7 @@ export class ProviderPoolManager {
             }
 
             provider.config.lastErrorTime = new Date().toISOString();
+            provider.config.lastHealthStateTime = new Date().toISOString();
             // 更新 lastUsed 时间，避免因 LRU 策略导致失败节点被重复选中
             provider.config.lastUsed = new Date().toISOString();
             
@@ -3433,6 +3448,7 @@ export class ProviderPoolManager {
             provider.config.refreshCount = 0;
             provider.config.errorCount = this.maxErrorCount; // Set to max to indicate definitive failure
             provider.config.lastErrorTime = new Date().toISOString();
+            provider.config.lastHealthStateTime = new Date().toISOString();
             provider.config.lastUsed = new Date().toISOString();
 
             if (errorMessage) {
@@ -3471,6 +3487,7 @@ export class ProviderPoolManager {
             provider.config.refreshCount = 0;
             provider.config.errorCount = this.maxErrorCount; // Set to max to indicate definitive failure
             provider.config.lastErrorTime = new Date().toISOString();
+            provider.config.lastHealthStateTime = new Date().toISOString();
             provider.config.lastUsed = new Date().toISOString();
 
             if (errorMessage) {
@@ -3651,17 +3668,10 @@ export class ProviderPoolManager {
         return normalizedPlan;
     }
 
-    /**
-     * Marks a provider as healthy.
-     * @param {string} providerType - The type of the provider.
-     * @param {object} providerConfig - The configuration of the provider to mark.
-     * @param {boolean} resetUsageCount - Whether to reset usage count (optional, default: false).
-     * @param {string} [healthCheckModel] - Optional model name used for health check.
-     */
-    markProviderHealthy(providerType, providerConfig, resetUsageCount = false, healthCheckModel = null) {
+    _markProviderHealthyState(providerType, providerConfig) {
         if (!providerConfig?.uuid) {
-            this._log('error', 'Invalid providerConfig in markProviderHealthy');
-            return;
+            this._log('error', 'Invalid providerConfig in provider health update');
+            return null;
         }
 
         const provider = this._findProvider(providerType, providerConfig.uuid);
@@ -3669,36 +3679,88 @@ export class ProviderPoolManager {
             const wasHealthy = provider.config.isHealthy;
             provider.config.isHealthy = true;
             provider.config.errorCount = 0;
-            provider.config.refreshCount = 0;
-            provider.config.needsRefresh = false;
-            provider.config.lastRefreshTime = Date.now(); // 标记为健康时也视为刚刷新完成
             provider.config.lastErrorTime = null;
             provider.config.lastErrorMessage = null;
+            provider.config.lastHealthStateTime = new Date().toISOString();
             provider.config._lastSelectionSeq = 0;
-            
-            // 更新健康检测信息
-            if (healthCheckModel) {
-                provider.config.lastHealthCheckTime = new Date().toISOString();
-                provider.config.lastHealthCheckModel = healthCheckModel;
-            }
-            
-            // 只有在明确要求重置使用计数时才重置
-            if (resetUsageCount) {
-                provider.config.usageCount = 0;
-            }else{
-                provider.config.usageCount++;
-                provider.config.lastUsed = new Date().toISOString();
-            }
-            
-            // 健康状态变化日志
             if (!wasHealthy) {
                 this._logHealthStatusChange(providerType, provider.config, 'unhealthy', 'healthy', null);
             }
-            
-            this._log('debug', `Marked provider as healthy: ${this._getDisplayName(provider.config)} for type ${providerType}${resetUsageCount ? ' (usage count reset)' : ''}`);
-            
-            this._debouncedSave(providerType);
+            return provider;
         }
+        return null;
+    }
+
+    /** Records a completed successful business request without changing routing or token-refresh timestamps. */
+    markProviderRequestSucceeded(providerType, providerConfig) {
+        const provider = this._markProviderHealthyState(providerType, providerConfig);
+        if (!provider) return;
+        provider.config.usageCount = (provider.config.usageCount || 0) + 1;
+        provider.config.lastSuccessTime = new Date().toISOString();
+        this._log('debug', `Recorded successful request for ${this._getDisplayName(provider.config)} (${providerType})`);
+        this._debouncedSave(providerType);
+    }
+
+    /** Records a completed successful health check without changing usage, LRU, or refresh state. */
+    markProviderHealthCheckSucceeded(providerType, providerConfig, healthCheckModel = null) {
+        const provider = this._markProviderHealthyState(providerType, providerConfig);
+        if (!provider) return;
+        provider.config.lastHealthCheckTime = new Date().toISOString();
+        if (healthCheckModel) provider.config.lastHealthCheckModel = healthCheckModel;
+        this._log('debug', `Recorded successful health check for ${this._getDisplayName(provider.config)} (${providerType})`);
+        this._debouncedSave(providerType);
+    }
+
+    /** Records a completed failed health check without polluting business-use or token-refresh fields. */
+    markProviderHealthCheckFailed(providerType, providerConfig, errorMessage = null, healthCheckModel = null, immediate = false) {
+        if (!providerConfig?.uuid) {
+            this._log('error', 'Invalid providerConfig in markProviderHealthCheckFailed');
+            return;
+        }
+        const provider = this._findProvider(providerType, providerConfig.uuid);
+        if (!provider) return;
+
+        const wasHealthy = provider.config.isHealthy;
+        const now = Date.now();
+        const lastErrorTime = provider.config.lastErrorTime ? Date.parse(provider.config.lastErrorTime) : 0;
+        if (immediate) {
+            provider.config.errorCount = this.maxErrorCount;
+            provider.config.isHealthy = false;
+        } else {
+            provider.config.errorCount = now - lastErrorTime > 10_000
+                ? 1
+                : (provider.config.errorCount || 0) + 1;
+            if (this.maxErrorCount > 0 && provider.config.errorCount >= this.maxErrorCount) {
+                provider.config.isHealthy = false;
+            }
+        }
+        provider.config.lastErrorTime = new Date(now).toISOString();
+        provider.config.lastErrorMessage = errorMessage || provider.config.lastErrorMessage || null;
+        provider.config.lastHealthStateTime = new Date(now).toISOString();
+        provider.config.lastHealthCheckTime = new Date(now).toISOString();
+        if (healthCheckModel) provider.config.lastHealthCheckModel = healthCheckModel;
+        if (wasHealthy && provider.config.isHealthy === false) {
+            this._logHealthStatusChange(providerType, provider.config, 'healthy', 'unhealthy', errorMessage);
+        }
+        this._debouncedSave(providerType);
+    }
+
+    /**
+     * Backward-compatible wrapper. New code should use the explicit business/health-check methods above.
+     */
+    markProviderHealthy(providerType, providerConfig, resetUsageCount = false, healthCheckModel = null) {
+        if (healthCheckModel) {
+            this.markProviderHealthCheckSucceeded(providerType, providerConfig, healthCheckModel);
+            return;
+        }
+        if (resetUsageCount) {
+            const provider = this._markProviderHealthyState(providerType, providerConfig);
+            if (!provider) return;
+            provider.config.usageCount = 0;
+            this._debouncedSave(providerType);
+            return;
+        }
+        this.markProviderRequestSucceeded(providerType, providerConfig);
     }
 
     /**
@@ -3718,8 +3780,6 @@ export class ProviderPoolManager {
             provider.config.needsRefresh = false;
             provider.config.refreshCount = 0;
             provider.config.lastRefreshTime = Date.now(); // 显式重置时也更新刷新时间
-            // 更新为可用
-            provider.config.lastHealthCheckTime = new Date().toISOString();
             // 标记为健康，以便立即投入使用
             this._log('info', `Reset refresh status and marked healthy for provider ${this._getDisplayName(provider.config)} (${providerType})`);
 
@@ -3745,6 +3805,7 @@ export class ProviderPoolManager {
             provider.config.isHealthy = true;
             provider.config.lastErrorTime = null;
             provider.config.lastErrorMessage = null;
+            provider.config.lastHealthStateTime = new Date().toISOString();
             provider.config._lastSelectionSeq = 0;
             this._log('info', `Reset provider counters: ${this._getDisplayName(provider.config)} for type ${providerType}`);
             
@@ -3765,6 +3826,7 @@ export class ProviderPoolManager {
             provider.config.errorCount = 0;
             provider.config.lastErrorTime = null;
             provider.config.lastErrorMessage = null;
+            provider.config.lastHealthStateTime = new Date().toISOString();
             provider.config.refreshCount = 0;
             provider.config.needsRefresh = false;
         });
@@ -3885,6 +3947,7 @@ export class ProviderPoolManager {
                         config.errorCount = 0;
                         config.lastErrorTime = null;
                         config.lastErrorMessage = null;
+                        config.lastHealthStateTime = new Date().toISOString();
                         config.scheduledRecoveryTime = null; // 清除恢复时间
                         
                         // 保存更改
@@ -4015,30 +4078,26 @@ export class ProviderPoolManager {
                         if (!providerStatus.config.isHealthy) {
                             // Provider was unhealthy but is now healthy
                             // 恢复健康时不重置使用计数，保持原有值
-                            this.markProviderHealthy(providerType, providerConfig, true, healthResult.modelName);
+                            if (!healthResult.reused) this.markProviderHealthCheckSucceeded(providerType, providerConfig, healthResult.modelName);
                             this._log('info', `Health check for ${this._getDisplayName(providerConfig)} (${providerType}): Marked Healthy (actual check)`);
                         } else {
                             // Provider was already healthy and still is
                             // 只在初始化时重置使用计数
-                            this.markProviderHealthy(providerType, providerConfig, true, healthResult.modelName);
+                            if (!healthResult.reused) this.markProviderHealthCheckSucceeded(providerType, providerConfig, healthResult.modelName);
                             this._log('debug', `Health check for ${this._getDisplayName(providerConfig)} (${providerType}): Still Healthy`);
                         }
                     } else {
                         // Provider is not healthy
                         this._log('warn', `Health check for ${this._getDisplayName(providerConfig)} (${providerType}) failed: ${healthResult.errorMessage || 'Provider is not responding correctly.'}`);
-                        this.markProviderUnhealthy(providerType, providerConfig, healthResult.errorMessage);
-                        
-                        // 更新健康检测时间和模型（即使失败也记录）
-                        providerStatus.config.lastHealthCheckTime = new Date().toISOString();
-                        if (healthResult.modelName) {
-                            providerStatus.config.lastHealthCheckModel = healthResult.modelName;
+                        if (!healthResult.reused) {
+                            this.markProviderHealthCheckFailed(providerType, providerConfig, healthResult.errorMessage, healthResult.modelName);
                         }
                     }
 
                 } catch (error) {
                     this._log('error', `Health check for ${this._getDisplayName(providerConfig)} (${providerType}) failed: ${error.message}`);
                     // If a health check fails, mark it unhealthy, which will update error count and lastErrorTime
-                    this.markProviderUnhealthy(providerType, providerConfig, error.message);
+                    this.markProviderHealthCheckFailed(providerType, providerConfig, error.message, null);
                 }
             }
         }
@@ -4126,18 +4185,20 @@ export class ProviderPoolManager {
                     // Provider is unhealthy
                     failCount++;
                     this._log('warn', `[ScheduledHealthCheck] ${displayName} (${providerType}) FAILED: ${result.errorMessage || 'Provider is not responding correctly.'} (${checkDuration}ms)`);
-                    this.markProviderUnhealthyImmediately(providerType, provider.config, result.errorMessage);
+                    if (!result.reused) {
+                        this.markProviderHealthCheckFailed(providerType, provider.config, result.errorMessage, result.modelName, true);
+                    }
                 } else {
                     // Provider is healthy
                     successCount++;
                     this._log('info', `[ScheduledHealthCheck] ${displayName} (${providerType}) PASSED: model=${result.modelName || checkModelName} (${checkDuration}ms)`);
-                    this.markProviderHealthy(providerType, provider.config, false, result.modelName);
+                    if (!result.reused) this.markProviderHealthCheckSucceeded(providerType, provider.config, result.modelName);
                 }
             } catch (error) {
                 const checkDuration = Date.now() - providerCheckStart;
                 failCount++;
                 this._log('error', `[ScheduledHealthCheck] ${displayName} (${providerType}) EXCEPTION: ${error.message} (${checkDuration}ms)`);
-                this.markProviderUnhealthyImmediately(providerType, provider.config, error.message);
+                this.markProviderHealthCheckFailed(providerType, provider.config, error.message, checkModelName, true);
             }
         }
         
@@ -4242,6 +4303,48 @@ export class ProviderPoolManager {
      * @returns {Promise<{success: boolean, modelName: string, errorMessage: string}>} - Health check result object.
      */
     async _checkProviderHealth(providerType, providerConfig) {
+        const healthCheckKey = providerConfig?.uuid ? `${providerType}:${providerConfig.uuid}` : null;
+        if (healthCheckKey && this.healthCheckPromises.has(healthCheckKey)) {
+            this._log('debug', `[HealthCheck] Reusing in-flight check for ${healthCheckKey}`);
+            return this.healthCheckPromises.get(healthCheckKey).then(result => ({ ...result, reused: true }));
+        }
+
+        const baseProviderType = this._getBaseProviderType(providerType);
+        const fallbackModelName = providerConfig.checkModelName ||
+            ProviderPoolManager.DEFAULT_HEALTH_CHECK_MODELS[providerType] ||
+            ProviderPoolManager.DEFAULT_HEALTH_CHECK_MODELS[baseProviderType] ||
+            null;
+        const healthCheckPromise = this._runProviderHealthCheck(providerType, providerConfig)
+            .catch(error => ({
+                success: false,
+                modelName: fallbackModelName,
+                errorMessage: error?.message || 'Health check failed'
+            }));
+        if (healthCheckKey) {
+            this.healthCheckPromises.set(healthCheckKey, healthCheckPromise);
+            healthCheckPromise.then(result => {
+                const release = () => {
+                    if (this.healthCheckPromises.get(healthCheckKey) === healthCheckPromise) {
+                        this.healthCheckPromises.delete(healthCheckKey);
+                    }
+                };
+                if (result?.timedOut) {
+                    const guardMs = Number(this.globalConfig?.HEALTH_CHECK_TIMEOUT_GUARD_MS ?? 60_000);
+                    const guardTimer = setTimeout(release, Math.max(0, guardMs));
+                    guardTimer.unref?.();
+                } else {
+                    release();
+                }
+            }, () => {
+                if (this.healthCheckPromises.get(healthCheckKey) === healthCheckPromise) {
+                    this.healthCheckPromises.delete(healthCheckKey);
+                }
+            });
+        }
+        return healthCheckPromise;
+    }
+
+    async _runProviderHealthCheck(providerType, providerConfig) {
         // 确定健康检查使用的模型名称
         const baseProviderType = this._getBaseProviderType(providerType);
         const modelName = providerConfig.checkModelName ||
@@ -4258,49 +4361,65 @@ export class ProviderPoolManager {
         }
 
         // ========== 实际 API 健康检查（带超时保护）==========
+        const healthCheckTimeout = 15000;
         const tempConfig = {
             ...this.globalConfig,
             ...providerConfig,
-            MODEL_PROVIDER: providerType
+            MODEL_PROVIDER: providerType,
+            HEALTH_CHECK_REQUEST_TIMEOUT_MS: healthCheckTimeout
         };
         delete tempConfig.providerPools;
-        const serviceAdapter = getServiceAdapter(tempConfig);
+        const serviceAdapter = this.serviceAdapterFactory(tempConfig);
 
         // 获取所有可能的请求格式
         const healthCheckRequests = this._buildHealthCheckRequests(providerType, modelName);
 
-        // 健康检查超时时间（15秒，避免长时间阻塞）
-        const healthCheckTimeout = 15000;
+        const deadline = Date.now() + healthCheckTimeout;
         let lastError = null;
 
         // 重试机制：尝试不同的请求格式
         for (let i = 0; i < healthCheckRequests.length; i++) {
             const healthCheckRequest = healthCheckRequests[i];
-            const abortController = new AbortController();
-            const timeoutId = setTimeout(() => abortController.abort(), healthCheckTimeout);
+            const remainingMs = Math.max(0, deadline - Date.now());
+            if (remainingMs === 0) {
+                lastError = new Error(`Health check timed out after ${healthCheckTimeout}ms`);
+                lastError.code = 'HEALTH_CHECK_TIMEOUT';
+                break;
+            }
+            let timeoutId;
 
             try {
-                // 尝试将 signal 注入请求体，供支持的适配器使用
-                const requestWithSignal = {
-                    ...healthCheckRequest,
-                    // signal: abortController.signal
-                };
-
-                await serviceAdapter.generateContent(modelName, requestWithSignal);
-                
+                const timeoutPromise = new Promise((_, reject) => {
+                    timeoutId = setTimeout(() => {
+                        const timeoutError = new Error(`Health check timed out after ${healthCheckTimeout}ms`);
+                        timeoutError.code = 'HEALTH_CHECK_TIMEOUT';
+                        reject(timeoutError);
+                    }, remainingMs);
+                    timeoutId.unref?.();
+                });
+                await Promise.race([
+                    serviceAdapter.generateContent(modelName, healthCheckRequest),
+                    timeoutPromise
+                ]);
                 clearTimeout(timeoutId);
                 // 注意：使用量计数由调用方处理（performHealthChecks/performInitialHealthChecks）
                 // 这里只返回成功结果，让调用方统一处理状态更新和计数
                 return { success: true, modelName, errorMessage: null };
             } catch (error) {
-                clearTimeout(timeoutId);
+                if (timeoutId) clearTimeout(timeoutId);
                 lastError = error;
+                if (error?.code === 'HEALTH_CHECK_TIMEOUT') break;
             }
         }
 
         // 所有尝试都失败
         this._log('warn', `[HealthCheck] ${providerType} failed after ${healthCheckRequests.length} attempts: ${lastError?.message}`);
-        return { success: false, modelName, errorMessage: lastError?.message || 'All health check attempts failed' };
+        return {
+            success: false,
+            modelName,
+            errorMessage: lastError?.message || 'All health check attempts failed',
+            timedOut: lastError?.code === 'HEALTH_CHECK_TIMEOUT'
+        };
     }
 
     /**

@@ -21,6 +21,21 @@ jest.mock('../src/services/service-manager.js', () => ({
 import { AntigravityApiService } from '../src/providers/gemini/antigravity-core.js';
 
 describe('Antigravity image payloads', () => {
+    test('passes the dedicated health-check timeout to the underlying request', async () => {
+        const service = new AntigravityApiService({
+            MODEL_PROVIDER: 'gemini-antigravity',
+            ANTIGRAVITY_BASE_URL: 'https://example.invalid',
+            PROJECT_ID: 'test-project',
+            HEALTH_CHECK_REQUEST_TIMEOUT_MS: 15_000,
+            REQUEST_MAX_RETRIES: 0
+        });
+        service.authClient.request = jest.fn(async () => ({ data: { ok: true } }));
+
+        await service.callApi('generateContent', { request: {} });
+
+        expect(service.authClient.request).toHaveBeenCalledWith(expect.objectContaining({ timeout: 15_000 }));
+    });
+
     test('preserves explicit official image config without converting legacy size', () => {
         const service = new AntigravityApiService({
             MODEL_PROVIDER: 'gemini-antigravity',

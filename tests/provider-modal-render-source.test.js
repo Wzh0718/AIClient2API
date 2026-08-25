@@ -38,4 +38,21 @@ describe('provider modal source regressions', () => {
         expect(source).not.toContain('installationId');
         expect(source).not.toContain('sessionId');
     });
+
+    test('provider cards do not expose the internal needsRefresh flag as a persistent loading state', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/modal.js'), 'utf8').replace(/\r\n/g, '\n');
+        const detailStart = source.indexOf('function renderProviderDetailList(providers)');
+        const detailEnd = source.indexOf('function renderProviderCardList(providers)', detailStart);
+        const cardEnd = source.indexOf('function renderProviderConfig(provider)', detailEnd);
+        const providerListRendering = source.slice(detailStart, cardEnd);
+
+        expect(providerListRendering).not.toContain('provider.needsRefresh');
+        expect(providerListRendering).not.toContain('providers.status.needsRefresh');
+        expect(providerListRendering).not.toContain('card-refresh-icon');
+    });
+
+    test('provider detail prefers the last successful request completion time', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/modal.js'), 'utf8').replace(/\r\n/g, '\n');
+        expect(source).toContain('provider.lastSuccessTime || provider.lastUsed');
+    });
 });

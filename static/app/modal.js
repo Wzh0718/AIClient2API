@@ -1252,7 +1252,8 @@ function renderProviderDetailList(providers) {
     return providers.map(provider => {
         const isHealthy = provider.isHealthy;
         const isDisabled = provider.isDisabled || false;
-        const lastUsed = provider.lastUsed ? new Date(provider.lastUsed).toLocaleString() : t('modal.provider.neverUsed');
+        const lastSuccessfulUse = provider.lastSuccessTime || provider.lastUsed;
+        const lastUsed = lastSuccessfulUse ? new Date(lastSuccessfulUse).toLocaleString() : t('modal.provider.neverUsed');
         const lastHealthCheckTime = provider.lastHealthCheckTime ? new Date(provider.lastHealthCheckTime).toLocaleString() : t('modal.provider.neverChecked');
         const lastHealthCheckModel = provider.lastHealthCheckModel || '-';
         const healthClass = isHealthy ? 'healthy' : 'unhealthy';
@@ -1270,7 +1271,6 @@ function renderProviderDetailList(providers) {
                             <i class="fas fa-key"></i> <span data-i18n="modal.provider.reauthorize">${t('modal.provider.reauthorize')}</span>
                         </button>
         ` : '';
-        const needsRefresh = !!provider.needsRefresh;
         
         // 构建错误信息显示
         let errorInfoHtml = '';
@@ -1291,7 +1291,6 @@ function renderProviderDetailList(providers) {
                     <div class="provider-info">
                         <div class="provider-name">
                             ${provider.customName || provider.uuid}
-                            ${needsRefresh ? `<span class="badge badge-warning" style="font-size: 10px; margin-left: 8px; vertical-align: middle;"><i class="fas fa-sync-alt fa-spin"></i> <span data-i18n="providers.status.needsRefresh">${t('providers.status.needsRefresh')}</span></span>` : ''}
                         </div>
                         <div class="provider-meta">
                             <span class="health-status">
@@ -1361,7 +1360,6 @@ function renderProviderCardList(providers) {
         const healthClass = isHealthy ? 'healthy' : 'unhealthy';
         const disabledClass = isDisabled ? 'disabled' : '';
         const displayName = provider.customName || provider.uuid;
-        const needsRefresh = !!provider.needsRefresh;
         const toggleButtonText = isDisabled ? t('modal.provider.enabled') : t('modal.provider.disabled');
         const toggleButtonIcon = isDisabled ? 'fas fa-play' : 'fas fa-ban';
         const toggleButtonClass = isDisabled ? 'btn-success' : 'btn-warning';
@@ -1377,7 +1375,6 @@ function renderProviderCardList(providers) {
                 <div class="card-header">
                     <div class="card-status-dot"></div>
                     <div class="card-name" title="${displayName}">${displayName}</div>
-                    ${needsRefresh ? '<i class="fas fa-sync-alt fa-spin card-refresh-icon"></i>' : ''}
                 </div>
                 <div class="card-body">
                     <div class="card-stat" title="${t('modal.provider.usageCount')}: ${provider.usageCount || 0}">

@@ -1641,9 +1641,8 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         if (providerPoolManager && pooluuid) {
             const customNameDisplay = customName ? `, ${customName}` : '';
             logger.info(`[Provider Pool] Increasing usage count for ${toProvider} (${pooluuid}${customNameDisplay}) after successful stream request`);
-            providerPoolManager.markProviderHealthy(toProvider, {
-                uuid: pooluuid
-            });
+            const recordSuccess = providerPoolManager.markProviderRequestSucceeded || providerPoolManager.markProviderHealthy;
+            recordSuccess.call(providerPoolManager, toProvider, { uuid: pooluuid });
         }
         recordTemporaryRouteResult(retryContext, {
             actualProviderType: toProvider,
@@ -2015,9 +2014,8 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         if (providerPoolManager && pooluuid) {
             const customNameDisplay = customName ? `, ${customName}` : '';
             logger.info(`[Provider Pool] Increasing usage count for ${toProvider} (${pooluuid}${customNameDisplay}) after successful unary request`);
-            providerPoolManager.markProviderHealthy(toProvider, {
-                uuid: pooluuid
-            });
+            const recordSuccess = providerPoolManager.markProviderRequestSucceeded || providerPoolManager.markProviderHealthy;
+            recordSuccess.call(providerPoolManager, toProvider, { uuid: pooluuid });
         }
         recordTemporaryRouteResult(retryContext, {
             actualProviderType: toProvider,

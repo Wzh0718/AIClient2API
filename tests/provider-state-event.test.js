@@ -38,4 +38,80 @@ describe('provider state persistence events', () => {
         expect(applyProviderStateEvent({ provider: [target] }, event, { revision: 5 })).toBe(true);
         expect(target.isHealthy).toBe(false);
     });
+
+    test('carries lastSuccessTime and keeps time fields monotonic when events arrive out of order', () => {
+        const target = {
+            uuid: 'one',
+            lastSuccessTime: '2026-08-25T07:00:00.000Z',
+            lastHealthCheckTime: '2026-08-25T07:05:00.000Z',
+            lastUsed: '2026-08-25T07:10:00.000Z',
+            lastRefreshTime: 200
+        };
+        const event = createProviderStateEvent('provider', {
+            uuid: 'one',
+            lastSuccessTime: '2026-08-25T06:00:00.000Z',
+            lastHealthCheckTime: '2026-08-25T06:05:00.000Z',
+            lastUsed: '2026-08-25T06:10:00.000Z',
+            lastRefreshTime: 100
+        });
+
+        expect(event.state.lastSuccessTime).toBe('2026-08-25T06:00:00.000Z');
+        expect(applyProviderStateEvent({ provider: [target] }, event)).toBe(true);
+        expect(target).toMatchObject({
+            lastSuccessTime: '2026-08-25T07:00:00.000Z',
+            lastHealthCheckTime: '2026-08-25T07:05:00.000Z',
+            lastUsed: '2026-08-25T07:10:00.000Z',
+            lastRefreshTime: 200
+        });
+    });
+
+    test('rejects null time regressions and applies health-check state atomically by completion time', () => {
+        const target = {
+            uuid: 'one',
+            isHealthy: true,
+            errorCount: 0,
+            lastErrorMessage: null,
+            lastHealthStateTime: '2026-08-25T07:05:00.000Z',
+            lastHealthCheckModel: 'new-model',
+            lastHealthCheckTime: '2026-08-25T07:05:00.000Z',
+            lastSuccessTime: '2026-08-25T07:00:00.000Z'
+        };
+
+        expect(applyProviderStateEvent({ provider: [target] }, {
+            providerType: 'provider',
+            uuid: 'one',
+            state: {
+                isHealthy: false,
+                errorCount: 10,
+                lastErrorMessage: 'older failure',
+                lastHealthStateTime: '2026-08-25T06:05:00.000Z',
+                lastHealthCheckModel: 'old-model',
+                lastHealthCheckTime: '2026-08-25T06:05:00.000Z',
+                lastSuccessTime: null
+            }
+        })).toBe(true);
+
+        expect(target).toMatchObject({
+            isHealthy: true,
+            errorCount: 0,
+            lastErrorMessage: null,
+            lastHealthStateTime: '2026-08-25T07:05:00.000Z',
+            lastHealthCheckModel: 'new-model',
+            lastHealthCheckTime: '2026-08-25T07:05:00.000Z',
+            lastSuccessTime: '2026-08-25T07:00:00.000Z'
+        });
+
+        expect(applyProviderStateEvent({ provider: [target] }, {
+            providerType: 'provider',
+            uuid: 'one',
+            state: {
+                isHealthy: true,
+                errorCount: 0,
+                lastErrorMessage: null,
+                lastHealthStateTime: '2026-08-25T07:10:00.000Z',
+                lastHealthCheckTime: '2026-08-25T06:05:00.000Z'
+            }
+        })).toBe(true);
+        expect(target.lastHealthStateTime).toBe('2026-08-25T07:10:00.000Z');
+    });
 });

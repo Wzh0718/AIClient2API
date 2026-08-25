@@ -353,6 +353,8 @@ export function createProviderConfig(options) {
         isDisabled: false,
         customName: typeof customName === 'string' ? customName.trim() : '',
         lastUsed: null,
+        lastSuccessTime: null,
+        lastHealthStateTime: null,
         usageCount: 0,
         errorCount: 0,
         lastErrorTime: null,

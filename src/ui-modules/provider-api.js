@@ -174,7 +174,9 @@ async function runProviderHealthCheck(providerPoolManager, providerType, provide
         });
 
         if (healthResult.success) {
-            providerPoolManager.markProviderHealthy(providerType, providerConfig, false, healthResult.modelName);
+            if (!healthResult.reused) {
+                providerPoolManager.markProviderHealthCheckSucceeded(providerType, providerConfig, healthResult.modelName);
+            }
             return {
                 uuid: providerConfig.uuid,
                 success: true,
@@ -188,15 +190,14 @@ async function runProviderHealthCheck(providerPoolManager, providerType, provide
         const isAuthError = isAuthHealthCheckError(errorMessage);
 
         if (isAuthError) {
-            providerPoolManager.markProviderUnhealthyImmediately(providerType, providerConfig, errorMessage);
-            logger.info(`[UI API] Auth error detected for ${providerConfig.uuid}, immediately marked as unhealthy`);
+            if (!healthResult.reused) {
+                providerPoolManager.markProviderHealthCheckFailed(providerType, providerConfig, errorMessage, healthResult.modelName, true);
+                logger.info(`[UI API] Auth error detected for ${providerConfig.uuid}, immediately marked as unhealthy`);
+            }
         } else {
-            providerPoolManager.markProviderUnhealthy(providerType, providerConfig, errorMessage);
-        }
-
-        providerStatus.config.lastHealthCheckTime = new Date().toISOString();
-        if (healthResult.modelName) {
-            providerStatus.config.lastHealthCheckModel = healthResult.modelName;
+            if (!healthResult.reused) {
+                providerPoolManager.markProviderHealthCheckFailed(providerType, providerConfig, errorMessage, healthResult.modelName);
+            }
         }
 
         return {
@@ -212,13 +213,11 @@ async function runProviderHealthCheck(providerPoolManager, providerType, provide
         const isAuthError = isAuthHealthCheckError(errorMessage);
 
         if (isAuthError) {
-            providerPoolManager.markProviderUnhealthyImmediately(providerType, providerConfig, errorMessage);
+            providerPoolManager.markProviderHealthCheckFailed(providerType, providerConfig, errorMessage, null, true);
             logger.info(`[UI API] Auth error detected for ${providerConfig.uuid}, immediately marked as unhealthy`);
         } else {
-            providerPoolManager.markProviderUnhealthy(providerType, providerConfig, errorMessage);
+            providerPoolManager.markProviderHealthCheckFailed(providerType, providerConfig, errorMessage);
         }
-
-        providerStatus.config.lastHealthCheckTime = new Date().toISOString();
 
         return {
             uuid: providerConfig.uuid,
@@ -494,6 +493,7 @@ async function _handleAddProvider(req, res, currentConfig, providerPoolManager, 
         // Set default values
         providerConfig.isHealthy = providerConfig.isHealthy !== undefined ? providerConfig.isHealthy : true;
         providerConfig.lastUsed = providerConfig.lastUsed || null;
+        providerConfig.lastSuccessTime = providerConfig.lastSuccessTime || null;
         providerConfig.usageCount = providerConfig.usageCount || 0;
         providerConfig.errorCount = providerConfig.errorCount || 0;
         providerConfig.lastErrorTime = providerConfig.lastErrorTime || null;
@@ -635,6 +635,7 @@ async function _handleUpdateProvider(req, res, currentConfig, providerPoolManage
             ...filteredConfig,
             uuid: providerUuid, // Ensure UUID doesn't change
             lastUsed: existingProvider.lastUsed, // Preserve usage stats
+            lastSuccessTime: existingProvider.lastSuccessTime,
             usageCount: existingProvider.usageCount,
             errorCount: existingProvider.errorCount,
             lastErrorTime: existingProvider.lastErrorTime
@@ -1189,7 +1190,9 @@ export async function handleHealthCheck(req, res, currentConfig, providerPoolMan
                 const healthResult = await providerPoolManager._checkProviderHealth(providerType, providerConfig);
                 
                 if (healthResult.success) {
-                    providerPoolManager.markProviderHealthy(providerType, providerConfig, false, healthResult.modelName);
+                    if (!healthResult.reused) {
+                        providerPoolManager.markProviderHealthCheckSucceeded(providerType, providerConfig, healthResult.modelName);
+                    }
                     results.push({
                         uuid: providerConfig.uuid,
                         success: true,
@@ -1203,16 +1206,16 @@ export async function handleHealthCheck(req, res, currentConfig, providerPoolMan
                                        /\b(Unauthorized|Forbidden|AccessDenied|InvalidToken|ExpiredToken)\b/i.test(errorMessage);
                     
                     if (isAuthError) {
-                        providerPoolManager.markProviderUnhealthyImmediately(providerType, providerConfig, errorMessage);
-                        logger.info(`[UI API] Auth error detected for ${providerConfig.uuid}, immediately marked as unhealthy`);
+                        if (!healthResult.reused) {
+                            providerPoolManager.markProviderHealthCheckFailed(providerType, providerConfig, errorMessage, healthResult.modelName, true);
+                            logger.info(`[UI API] Auth error detected for ${providerConfig.uuid}, immediately marked as unhealthy`);
+                        }
                     } else {
-                        providerPoolManager.markProviderUnhealthy(providerType, providerConfig, errorMessage);
+                        if (!healthResult.reused) {
+                            providerPoolManager.markProviderHealthCheckFailed(providerType, providerConfig, errorMessage, healthResult.modelName);
+                        }
                     }
                     
-                    providerStatus.config.lastHealthCheckTime = new Date().toISOString();
-                    if (healthResult.modelName) {
-                        providerStatus.config.lastHealthCheckModel = healthResult.modelName;
-                    }
                     results.push({
                         uuid: providerConfig.uuid,
                         success: false,
@@ -1228,10 +1231,10 @@ export async function handleHealthCheck(req, res, currentConfig, providerPoolMan
                                    /\b(Unauthorized|Forbidden|AccessDenied|InvalidToken|ExpiredToken)\b/i.test(errorMessage);
                 
                 if (isAuthError) {
-                    providerPoolManager.markProviderUnhealthyImmediately(providerType, providerConfig, errorMessage);
+                    providerPoolManager.markProviderHealthCheckFailed(providerType, providerConfig, errorMessage, null, true);
                     logger.info(`[UI API] Auth error detected for ${providerConfig.uuid}, immediately marked as unhealthy`);
                 } else {
-                    providerPoolManager.markProviderUnhealthy(providerType, providerConfig, errorMessage);
+                    providerPoolManager.markProviderHealthCheckFailed(providerType, providerConfig, errorMessage);
                 }
                 
                 results.push({
