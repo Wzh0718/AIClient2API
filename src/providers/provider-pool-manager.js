@@ -411,6 +411,17 @@ function isCodexQuotaBucketCoolingDown(config = {}, bucket = CODEX_QUOTA_BUCKET.
     return Number.isFinite(recoveryMs) && now < recoveryMs;
 }
 
+function getCodexRateLimitCooldownState(config = {}, bucket = CODEX_QUOTA_BUCKET.GENERAL) {
+    return config.codexRateLimitCooldown?.[bucket] || {};
+}
+
+function isCodexRateLimitCoolingDown(config = {}, bucket = CODEX_QUOTA_BUCKET.GENERAL, now = Date.now()) {
+    const state = getCodexRateLimitCooldownState(config, bucket);
+    if (state.isCoolingDown !== true) return false;
+    const recoveryMs = Date.parse(state.scheduledRecoveryTime || '');
+    return Number.isFinite(recoveryMs) && now < recoveryMs;
+}
+
 function getCodexAutomaticHealthCheckCooldown(providerType, config = {}) {
     if (!isCodexProviderType(providerType)) return null;
 
@@ -2608,6 +2619,16 @@ export class ProviderPoolManager {
         const now = Date.now();
 
         for (const provider of providers) {
+            const state = getCodexRateLimitCooldownState(provider.config, bucket);
+            if (state.isCoolingDown !== true || !state.scheduledRecoveryTime) continue;
+            const recoveryMs = Date.parse(state.scheduledRecoveryTime);
+            if (Number.isFinite(recoveryMs) && now >= recoveryMs) {
+                delete provider.config.codexRateLimitCooldown[bucket];
+                this._debouncedSave(providerType);
+            }
+        }
+
+        for (const provider of providers) {
             const uuid = provider.config?.uuid || provider.uuid;
             const planStatus = getCodexPlanStatusForProvider(providerType, uuid, usageCache, provider.config);
             if (!planStatus.allowed) {
@@ -2626,6 +2647,14 @@ export class ProviderPoolManager {
                 limitedCount += 1;
                 recordFilterReason('cooldown');
                 this._log('info', `Skipping Codex provider ${this._getDisplayName(provider.config)}: ${bucket} quota bucket is cooling down`);
+                continue;
+            }
+
+            if (isCodexRateLimitCoolingDown(provider.config, bucket, now)) {
+                limitedCount += 1;
+                recordFilterReason('rate_limit_cooldown');
+                const recoveryMs = Date.parse(getCodexRateLimitCooldownState(provider.config, bucket).scheduledRecoveryTime || '');
+                this._log('info', `Skipping Codex provider ${this._getDisplayName(provider.config)}: ${bucket} rate-limit cooldown is active until ${new Date(recoveryMs).toISOString()}`);
                 continue;
             }
 
@@ -3890,6 +3919,26 @@ export class ProviderPoolManager {
         this._debouncedSave(providerType);
     }
 
+    markCodexRateLimitCooldown(providerType, providerConfig, bucket, errorMessage = null, recoveryTime = null) {
+        if (!providerConfig?.uuid || !isCodexProviderType(providerType)) return;
+
+        const provider = this._findProvider(providerType, providerConfig.uuid);
+        if (!provider) return;
+
+        provider.config.codexRateLimitCooldown = provider.config.codexRateLimitCooldown || {};
+        provider.config.codexRateLimitCooldown[bucket] = {
+            ...(provider.config.codexRateLimitCooldown[bucket] || {}),
+            isCoolingDown: true,
+            lastErrorTime: new Date().toISOString(),
+            lastErrorMessage: errorMessage || null,
+            scheduledRecoveryTime: recoveryTime ? new Date(recoveryTime).toISOString() : null,
+            source: 'upstream_429'
+        };
+        provider.config.lastUsed = new Date().toISOString();
+        this._log('warn', `Marked Codex ${bucket} rate-limit cooldown for ${this._getDisplayName(provider.config)} (${providerType}) until ${provider.config.codexRateLimitCooldown[bucket].scheduledRecoveryTime || 'manual recovery'}`);
+        this._debouncedSave(providerType);
+    }
+
     markCodexQuotaBucketHealthy(providerType, providerConfig, bucket) {
         if (!providerConfig?.uuid || !isCodexProviderType(providerType)) {
             return;
@@ -4292,6 +4341,19 @@ export class ProviderPoolManager {
                     if (recoveredBucket) {
                         this._debouncedSave(type);
                     }
+                }
+
+                if (isCodexProviderType(type) && config.codexRateLimitCooldown && typeof config.codexRateLimitCooldown === 'object') {
+                    let recoveredRateLimit = false;
+                    for (const [bucket, state] of Object.entries(config.codexRateLimitCooldown)) {
+                        const recoveryTime = new Date(state?.scheduledRecoveryTime || '');
+                        if (state?.isCoolingDown === true && Number.isFinite(recoveryTime.getTime()) && now >= recoveryTime) {
+                            delete config.codexRateLimitCooldown[bucket];
+                            recoveredRateLimit = true;
+                            this._log('info', `Auto-recovered Codex ${bucket} rate-limit cooldown for ${this._getDisplayName(config)} (${type})`);
+                        }
+                    }
+                    if (recoveredRateLimit) this._debouncedSave(type);
                 }
 
                 if (isAntigravityProviderType(type) && config.antigravityQuotaHealth && typeof config.antigravityQuotaHealth === 'object') {
@@ -4784,6 +4846,7 @@ export class ProviderPoolManager {
                 for (const [, snapshots] of pending) {
                     for (const event of snapshots.values()) this.stateEventSink(event);
                 }
+
             }, Math.min(this.saveDebounceTime, 1000));
             this.stateEventTimer.unref?.();
             return;

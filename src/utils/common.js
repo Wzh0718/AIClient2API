@@ -672,6 +672,48 @@ export function getRateLimitCooldownRecoveryTime(error, config = {}, now = Date.
     return new Date(now + cappedCooldownMs + jitter);
 }
 
+const UPSTREAM_RESPONSE_LOG_LIMIT = 4096;
+
+export function getSafeUpstreamResponseSummary(error) {
+    const response = error?.response;
+    if (!response) return null;
+    let body = response.data;
+    if (body !== undefined && typeof body !== 'string') {
+        try { body = JSON.stringify(body); } catch { body = String(body); }
+    }
+    body = body === undefined || body === null ? null : String(body)
+        .replace(/("(?:access[_-]?token|refresh[_-]?token|authorization|cookie|proxy[_-]?auth)"\s*:\s*")([^"\\]*)/gi, '$1[REDACTED]')
+        .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]');
+    const truncated = body !== null && body.length > UPSTREAM_RESPONSE_LOG_LIMIT;
+    return {
+        status: Number(response.status || error.statusCode || error.status || 0) || null,
+        requestId: response.headers?.['x-request-id'] || response.headers?.['request-id'] || null,
+        retryAfter: response.headers?.['retry-after'] || error.retryAfter || null,
+        body: body === null ? null : body.slice(0, UPSTREAM_RESPONSE_LOG_LIMIT),
+        truncated
+    };
+}
+
+function logUpstreamResponse(error, scope) {
+    const summary = getSafeUpstreamResponseSummary(error);
+    if (summary) logger.error(`[${scope}] Upstream response: ${JSON.stringify(summary)}`);
+}
+
+function getCodexRateLimitCooldownRecoveryTime(error, config = {}, now = Date.now()) {
+    if (!config?.RATE_LIMIT_COOLDOWN_ENABLED || Number(getErrorStatusCode(error)) !== 429) {
+        return null;
+    }
+
+    const defaultCooldownMs = getPositiveInteger(config.CODEX_RATE_LIMIT_COOLDOWN_MS, 3000);
+    const maxCooldownMs = getPositiveInteger(config.CODEX_RATE_LIMIT_COOLDOWN_MAX_MS, 300000);
+    const retryAfterMs = getRetryAfterMs(error, now);
+    const baseCooldownMs = retryAfterMs === null ? defaultCooldownMs : retryAfterMs;
+    const cappedCooldownMs = retryAfterMs === null
+        ? Math.min(baseCooldownMs, Math.max(defaultCooldownMs, maxCooldownMs))
+        : Math.min(baseCooldownMs, Math.max(1000, maxCooldownMs));
+    return new Date(now + cappedCooldownMs);
+}
+
 const CODEX_QUOTA_BUCKET = {
     GENERAL: 'general',
     CODEX_53: 'codex53'
@@ -754,12 +796,15 @@ export function applyProviderRateLimitCooldown({
         }
     }
 
-    const rateLimitRecoveryTime = getRateLimitCooldownRecoveryTime(error, config);
+    const isCodexProvider = isCodexProviderType(providerType);
+    const rateLimitRecoveryTime = isCodexProvider
+        ? getCodexRateLimitCooldownRecoveryTime(error, config)
+        : getRateLimitCooldownRecoveryTime(error, config);
     if (!rateLimitRecoveryTime || !providerPoolManager || !providerUuid) {
         return false;
     }
 
-    if (isCodexProviderType(providerType) && isCodexUsageLimitReached(error)) {
+    if (isCodexProvider && isCodexUsageLimitReached(error)) {
         const bucket = resolveCodexQuotaBucketForModel(
             requestedModel,
             config?.CODEX_53_QUOTA_MODEL_PATTERNS || config?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS
@@ -775,6 +820,18 @@ export function applyProviderRateLimitCooldown({
 
         logger.warn(`${loggerPrefix} Codex usage_limit_reached for ${providerType} (${providerUuid}) could not be mapped to a quota bucket; skipping provider-level cooldown`);
         return true;
+    }
+
+    if (isCodexProvider && typeof providerPoolManager.markCodexRateLimitCooldown === 'function') {
+        const bucket = resolveCodexQuotaBucketForModel(
+            requestedModel,
+            config?.CODEX_53_QUOTA_MODEL_PATTERNS || config?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS
+        );
+        if (bucket) {
+            logger.info(`${loggerPrefix} Applying Codex ${bucket} rate-limit cooldown for ${providerType} (${providerUuid}) until ${rateLimitRecoveryTime.toISOString()}`);
+            providerPoolManager.markCodexRateLimitCooldown(providerType, { uuid: providerUuid }, bucket, '429 Too Many Requests - short cooldown', rateLimitRecoveryTime);
+            return true;
+        }
     }
 
     logger.info(`${loggerPrefix} Applying 429 cooldown for ${providerType} (${providerUuid}) until ${rateLimitRecoveryTime.toISOString()}`);
@@ -1686,6 +1743,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
 
     }  catch (error) {
         logger.error('\n[Server] Error during stream processing:', error.stack);
+        logUpstreamResponse(error, 'Server');
 
         if (error.recordProviderForNextRequest && pooluuid && CONFIG?._codexOverloadFailoverKey) {
             codexOverloadFailoverStore.recordFailure(CONFIG._codexOverloadFailoverKey, pooluuid);
@@ -2071,6 +2129,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         });
     } catch (error) {
         logger.error('\n[Server] Error during unary processing:', error.stack);
+        logUpstreamResponse(error, 'Server');
 
         if (error.recordProviderForNextRequest && pooluuid && CONFIG?._codexOverloadFailoverKey) {
             codexOverloadFailoverStore.recordFailure(CONFIG._codexOverloadFailoverKey, pooluuid);
@@ -2925,6 +2984,7 @@ function _applyCustomModelParameters(requestBody, customConfig, provider) {
 export function handleError(res, error, provider = null, fromProvider = null, req = null) {
     const rawStatusCode = error.response?.status || error.statusCode || error.status || error.code || 500;
     const statusCode = ensureValidStatusCode(rawStatusCode);
+    logUpstreamResponse(error, 'Server Request Failed');
     
     // 如果没有提供 fromProvider 但提供了 req，尝试从路径推断
     if (!fromProvider && req && req.url) {

@@ -2,7 +2,7 @@ const MUTABLE_STATE_FIELDS = [
     'isHealthy', 'isDisabled', 'needsRefresh', 'errorCount', 'usageCount',
     'lastUsed', 'lastSuccessTime', 'lastRefreshTime', 'lastRefreshAttemptTime', 'lastHealthStateTime', 'lastErrorTime', 'lastErrorMessage', 'lastHealthCheckTime',
     'lastHealthCheckModel', 'scheduledRecoveryTime', 'refreshCount',
-    'antigravityQuotaHealth', 'codexQuotaHealth', 'lastKnownAntigravityPlan',
+    'antigravityQuotaHealth', 'codexQuotaHealth', 'codexRateLimitCooldown', 'lastKnownAntigravityPlan',
     'lastKnownCodexPlan'
 ];
 
