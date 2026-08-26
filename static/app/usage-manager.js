@@ -13,6 +13,14 @@ const USAGE_REFRESH_POLL_INTERVAL_MS = 1500;
 const USAGE_REFRESH_WAIT_TIMEOUT_MS = 150000;
 const ANTIGRAVITY_PROVIDER_TYPE = 'gemini-antigravity';
 const ANTIGRAVITY_VISIBLE_MODEL_LIMIT = 3;
+const ANTIGRAVITY_KNOWN_GEMINI_MODELS = [
+    'gemini-3-flash', 'gemini-3.5-flash-low', 'gemini-3.5-flash-high',
+    'gemini-3.6-flash', 'gemini-3.6-flash-low', 'gemini-3.6-flash-high',
+    'gemini-3.7-flash', 'gemini-3.7-flash-low', 'gemini-3.7-flash-high',
+    'gemini-3.1-pro-low', 'gemini-3.1-pro-high', 'gemini-3.1-flash-lite', 'gemini-3.1-flash-image',
+    'gemini-3-flash-agent', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
+    'gemini-2.5-flash-thinking'
+];
 
 function sleepForUsageRefresh(delayMs) {
     return new Promise(resolve => setTimeout(resolve, delayMs));
@@ -547,10 +555,7 @@ function renderCollapsedStatusIcons(instance, providerType) {
         );
     }
     if (providerType === 'gemini-antigravity') {
-        icons.push(
-            renderStatusIcon('Gemini额度', getQuotaStatusState(instance.antigravityQuotaHealth?.families?.gemini)),
-            renderStatusIcon('Claude+GPT额度', getQuotaStatusState(instance.antigravityQuotaHealth?.families?.thirdParty))
-        );
+        icons.push(renderStatusIcon('Gemini额度', getQuotaStatusState(instance.antigravityQuotaHealth?.families?.gemini)));
     }
 
     return icons.join('');
@@ -594,34 +599,13 @@ function renderAntigravityQuotaHealthBadges(instance, providerType) {
         const title = titleParts.length > 0 ? ` title="${escapeHtml(titleParts.join('；'))}"` : '';
         return `<span class="badge ${isHealthy ? 'badge-healthy' : 'badge-unhealthy'}"${title}>${label}：${isHealthy ? '正常' : '受限'}</span>`;
     };
-    return [
-        renderBadge('Gemini', quotaHealth.families?.gemini),
-        renderBadge('Claude+GPT', quotaHealth.families?.thirdParty)
-    ].join('');
+    return renderBadge('Gemini', quotaHealth.families?.gemini);
 }
 
 function renderAntigravityProviderQuotaStack(instances, providerType) {
     if (providerType !== ANTIGRAVITY_PROVIDER_TYPE) return '';
 
-    const activeInstances = (Array.isArray(instances) ? instances : [])
-        .filter(instance => !instance?.isDisabled && !instance?.error?.includes('not initialized'));
-    const familyState = family => {
-        const states = activeInstances
-            .map(instance => instance.antigravityQuotaHealth?.families?.[family])
-            .filter(Boolean);
-        if (states.length === 0) return {};
-        const limited = states.find(state => state.isHealthy === false);
-        return limited || states[0];
-    };
-    const renderBadge = (label, state = {}) => {
-        const isHealthy = state?.isHealthy !== false;
-        const titleParts = [];
-        if (state?.lastErrorMessage) titleParts.push(state.lastErrorMessage);
-        if (state?.scheduledRecoveryTime) titleParts.push(`恢复时间: ${formatDate(state.scheduledRecoveryTime)}`);
-        const title = titleParts.length > 0 ? ` title="${escapeHtml(titleParts.join('；'))}"` : '';
-        return `<span class="badge ${isHealthy ? 'badge-healthy' : 'badge-unhealthy'}"${title}>${label}：${isHealthy ? '正常' : '受限'}</span>`;
-    };
-    return `<span class="antigravity-quota-stack" aria-label="Gemini 额度状态">${renderBadge('Gemini', familyState('gemini'))}${renderBadge('Claude+GPT', familyState('thirdParty'))}</span>`;
+    return renderAntigravityModelAvailabilitySummary(instances, providerType);
 }
 
 function getAntigravityRecoveryTimestamp(value) {
@@ -702,44 +686,89 @@ export function getAntigravityModelAvailabilitySummaries(providerType, instances
         return [];
     }
 
-    const activeInstances = instances.filter(instance => (
-        !instance?.isDisabled && !instance?.error?.includes('not initialized')
-    ));
+    const activeInstances = instances.filter(instance => !instance?.error?.includes('not initialized'));
     if (activeInstances.length === 0) return [];
 
-    const models = new Set();
-    activeInstances.forEach(instance => {
-        Object.keys(instance.antigravityQuotaHealth?.models || {}).forEach(model => models.add(model));
-    });
+    const models = new Set(ANTIGRAVITY_KNOWN_GEMINI_MODELS);
+    activeInstances.forEach(instance => Object.keys(instance.antigravityQuotaHealth?.models || {})
+        .filter(model => model.startsWith('gemini-'))
+        .forEach(model => models.add(model)));
 
     return [...models].map(model => {
-        const unavailable = activeInstances.map(instance => {
-            const modelState = instance.antigravityQuotaHealth?.models?.[model];
-            const baseUnavailable = instance.needsRefresh === true || instance.isHealthy === false;
-            const modelUnavailable = modelState?.isHealthy === false;
-            return {
-                unavailable: baseUnavailable || modelUnavailable,
-                recoveryTime: baseUnavailable
-                    ? instance.scheduledRecoveryTime || null
-                    : modelState?.scheduledRecoveryTime || null
-            };
-        }).filter(item => item.unavailable);
-        const totalCount = activeInstances.length;
-        const availableCount = totalCount - unavailable.length;
-        const recoveryTimes = unavailable
-            .map(item => ({ value: item.recoveryTime, timestamp: getAntigravityRecoveryTimestamp(item.recoveryTime) }))
-            .filter(item => item.timestamp !== null)
-            .sort((left, right) => left.timestamp - right.timestamp);
+        let availableCount = 0;
+        let quotaExhaustedCount = 0;
+        let credentialUnavailableCount = 0;
+        let unprobedCount = 0;
+        const recoveryTimes = [];
 
-        return {
-            model,
-            availableCount,
-            totalCount,
-            earliestRecoveryTime: availableCount === 0 ? recoveryTimes[0]?.value || null : null
-        };
+        activeInstances.forEach(instance => {
+            const credentialUnavailable = instance.isDisabled === true
+                || instance.needsRefresh === true
+                || instance.isHealthy === false
+                || Boolean(instance.error);
+            const modelState = instance.antigravityQuotaHealth?.models?.[model];
+            if (credentialUnavailable) {
+                credentialUnavailableCount++;
+                return;
+            }
+            if (!modelState) {
+                unprobedCount++;
+                return;
+            }
+            if (modelState.isHealthy === true) {
+                availableCount++;
+                return;
+            }
+            const reason = `${modelState.source || ''} ${modelState.lastErrorMessage || ''}`.toLowerCase();
+            const isQuotaExhausted = modelState.isHealthy === false && (
+                modelState.source === 'upstream_429'
+                || Boolean(modelState.scheduledRecoveryTime)
+                || /quota|cooldown|rate[ -]?limit|429|exhausted|too many requests/.test(reason)
+            );
+            if (isQuotaExhausted) {
+                quotaExhaustedCount++;
+                if (modelState.scheduledRecoveryTime) recoveryTimes.push(modelState.scheduledRecoveryTime);
+            } else {
+                credentialUnavailableCount++;
+            }
+        });
+
+        const earliestRecoveryTime = recoveryTimes
+            .map(value => ({ value, timestamp: getAntigravityRecoveryTimestamp(value) }))
+            .filter(item => item.timestamp !== null)
+            .sort((left, right) => left.timestamp - right.timestamp)[0]?.value || null;
+
+        return { model, availableCount, quotaExhaustedCount, credentialUnavailableCount, unprobedCount, earliestRecoveryTime };
     })
-        .filter(summary => summary.availableCount < summary.totalCount)
+        .filter(summary => summary.quotaExhaustedCount > 0 || summary.credentialUnavailableCount > 0)
         .sort((left, right) => left.model.localeCompare(right.model));
+}
+
+function renderAntigravityModelAvailabilitySummary(instances, providerType) {
+    if (providerType !== ANTIGRAVITY_PROVIDER_TYPE) return '';
+    const summaries = getAntigravityModelAvailabilitySummaries(providerType, instances);
+    if (summaries.length === 0) return '';
+    const renderCount = (symbol, label, count, className) => count > 0
+        ? `<span class="antigravity-model-availability-count ${className}" aria-label="${label} ${count} 个凭据" title="${label}：${count} 个凭据">${symbol}${count}</span>`
+        : '';
+    const rows = summaries.map(summary => {
+        const details = [
+            t('usage.antigravity.availability.available', { count: summary.availableCount }),
+            t('usage.antigravity.availability.quotaExhausted', { count: summary.quotaExhaustedCount }),
+            t('usage.antigravity.availability.credentialUnavailable', { count: summary.credentialUnavailableCount }),
+            t('usage.antigravity.availability.unprobed', { count: summary.unprobedCount })
+        ];
+        if (summary.earliestRecoveryTime) details.push(t('usage.antigravity.availability.recoveryAt', { time: formatDate(summary.earliestRecoveryTime) }));
+        return `<div class="antigravity-model-availability-row" title="${escapeHtml(details.join('；'))}">
+            <code class="antigravity-model-availability-name">${escapeHtml(summary.model)}</code>
+            <span class="antigravity-model-availability-counts" aria-label="${escapeHtml(details.join('；'))}">
+                ${renderCount('✓', t('usage.antigravity.availability.availableLabel'), summary.availableCount, 'is-available')}
+                ${renderCount('⚠', t('usage.antigravity.availability.quotaExhaustedLabel'), summary.quotaExhaustedCount, 'is-quota-exhausted')}
+                ${renderCount('✕', t('usage.antigravity.availability.credentialUnavailableLabel'), summary.credentialUnavailableCount, 'is-credential-unavailable')}
+            </span>
+        </div>`;
+    }).join('');
+    return `<div class="antigravity-model-availability-summary" aria-label="Gemini 模型可用性摘要">${rows}</div>`;
 }
 
 function formatAntigravityCompactRecovery(value) {
@@ -1086,7 +1115,6 @@ function createInstanceUsageCard(instance, providerType) {
                         <button class="btn-refresh-usage" title="${t('usage.card.refresh')}"><i class="fas fa-sync-alt"></i></button>
                         ${renderBaseStatusBadge(instance)}
                         ${renderCodexQuotaHealthBadges(instance, providerType)}
-                        ${renderAntigravityQuotaHealthBadges(instance, providerType)}
                     </div>
                 </div>
                 <div class="instance-name"><span class="instance-name-text" title="${displayName}">${displayName}</span></div>

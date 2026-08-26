@@ -7,10 +7,14 @@ describe('usage manager display source regressions', () => {
         const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
 
         expect(source).toContain("group.className = 'usage-provider-group is-full-width collapsed'");
-        expect(source).toContain('antigravity-quota-stack');
+        expect(source).toContain('antigravity-model-availability-summary');
+        expect(source).toContain('quotaExhaustedCount');
+        expect(source).toContain('credentialUnavailableCount');
+        expect(source).not.toContain('Claude+GPT');
         expect(source).not.toContain('usage-provider-summary-tooltip');
         expect(css).toMatch(/\.usage-provider-groups\s*\{[^}]*grid-template-columns:\s*1fr;/s);
-        expect(css).toMatch(/\.antigravity-quota-stack\s*\{[^}]*flex-direction:\s*column;/s);
+        expect(css).toContain('.antigravity-model-availability-summary');
+        expect(css).toContain('.antigravity-model-availability-row');
     });
 
     test('usage details prefer backend-provided display values for token units', () => {

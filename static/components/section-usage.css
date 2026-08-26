@@ -311,24 +311,7 @@
     min-width: 0;
 }
 
-.antigravity-quota-stack {
-    display: inline-flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0.25rem;
-    min-width: 7.5rem;
-    margin-left: 0.5rem;
-}
-
-.antigravity-quota-stack .badge {
-    width: 100%;
-    justify-content: flex-start;
-    background: var(--warning-bg);
-    color: var(--warning-text);
-    border-color: color-mix(in srgb, var(--warning-color) 28%, var(--border-color));
-}
-
-/* Provider header remains a single row while the Gemini quota badges stack vertically. */
+/* Provider header remains a single row while model availability is shown below. */
 .usage-provider-group.is-full-width .usage-group-header {
     min-width: 0;
 }
@@ -546,28 +529,51 @@
 }
 
 .antigravity-model-availability-summary {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
+    display: grid;
+    gap: 0.2rem;
     min-width: 0;
     margin-left: 0.35rem;
 }
 
-.antigravity-model-availability {
-    max-width: 16rem;
-    overflow: hidden;
-    padding: 0.1rem 0.45rem;
-    border-radius: 999px;
-    background: var(--warning-bg);
-    color: var(--warning-text);
+.antigravity-model-availability-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.55rem;
+    align-items: center;
+    min-width: 0;
     font-size: 0.72rem;
+}
+
+.antigravity-model-availability-name {
+    min-width: 0;
+    overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.antigravity-model-availability.is-unavailable {
-    background: color-mix(in srgb, var(--danger-bg) 72%, var(--bg-primary));
-    color: var(--danger-text);
+.antigravity-model-availability-counts {
+    display: inline-flex;
+    gap: 0.4rem;
+    align-items: center;
+    white-space: nowrap;
+}
+
+.antigravity-model-availability-count {
+    font-weight: 700;
+}
+
+.antigravity-model-availability-count.is-available { color: var(--success-color); }
+.antigravity-model-availability-count.is-quota-exhausted { color: var(--warning-color); }
+.antigravity-model-availability-count.is-credential-unavailable { color: var(--danger-color); }
+
+@media (max-width: 520px) {
+    .antigravity-model-availability-row {
+        grid-template-columns: 1fr;
+        gap: 0.15rem;
+    }
+    .antigravity-model-availability-counts {
+        justify-content: flex-start;
+    }
 }
 
 .antigravity-model-status-list {

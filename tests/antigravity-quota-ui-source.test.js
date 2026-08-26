@@ -24,12 +24,17 @@ describe('Antigravity quota UI source', () => {
         const i18n = readSource('static/app/i18n.js');
 
         expect(source).toContain('function renderAntigravityQuotaHealthBadges(instance, providerType)');
-        expect(source).toContain("renderBadge('Gemini', quotaHealth.families?.gemini)");
-        expect(source).toContain("renderBadge('Claude+GPT', quotaHealth.families?.thirdParty)");
-        expect(source).toContain('antigravity-quota-stack');
+        expect(source).toContain('getAntigravityModelAvailabilitySummaries(providerType, instances)');
+        expect(source).toContain('gemini-3.1-flash-image');
+        expect(source).toContain('quotaExhaustedCount');
+        expect(source).toContain('credentialUnavailableCount');
+        expect(source).toContain('unprobedCount');
+        expect(source).toContain('aria-label="Gemini 模型可用性摘要"');
+        expect(source).toContain('availability.unprobed');
+        expect(source).not.toContain("renderBadge('Claude+GPT'");
+        expect(source).not.toContain('Claude+GPT');
         expect(source).toContain('usage-provider-group is-full-width');
         expect(source).toContain('Object.entries(quotaHealth.models || {})');
-        expect(source).toContain('renderAntigravityQuotaHealthBadges(instance, providerType)');
         expect(source).toContain('renderAntigravityUnavailableModels(instance, providerType)');
         expect(source).toContain("Object.entries(instance.antigravityQuotaHealth?.models || {})");
         expect(source).toContain('getAntigravityPoolUnavailableModels(providerType, instances)');
@@ -37,7 +42,7 @@ describe('Antigravity quota UI source', () => {
         expect(source).not.toContain('usage-provider-summary-grid');
         expect(source).toContain('antigravity-model-status-toggle');
         expect(source).toContain('slice(0, ANTIGRAVITY_VISIBLE_MODEL_LIMIT)');
-        expect(css).toContain('.antigravity-quota-stack');
+        expect(css).toContain('.antigravity-model-availability-summary');
         expect(css).toContain('.usage-provider-group.is-full-width');
         expect(css).toContain('.antigravity-model-status-row.is-extra');
         expect(css).toMatch(/@media \(max-width: 520px\)[\s\S]*\.antigravity-model-recovery\s*\{[^}]*grid-column:\s*2 \/ -1;/s);

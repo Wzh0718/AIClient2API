@@ -96,15 +96,19 @@ describe('Antigravity cooldown UI behavior', () => {
         expect(usageManager.getAntigravityModelAvailabilitySummaries('gemini-antigravity', instances)).toEqual([
             {
                 model: 'gemini-2.5-flash',
-                availableCount: 2,
-                totalCount: 3,
-                earliestRecoveryTime: null
+                availableCount: 0,
+                quotaExhaustedCount: 1,
+                credentialUnavailableCount: 0,
+                unprobedCount: 2,
+                earliestRecoveryTime: '2026-08-25T10:30:00.000Z'
             },
             {
                 model: 'gemini-2.5-pro',
-                availableCount: 1,
-                totalCount: 3,
-                earliestRecoveryTime: null
+                availableCount: 0,
+                quotaExhaustedCount: 2,
+                credentialUnavailableCount: 0,
+                unprobedCount: 1,
+                earliestRecoveryTime: '2026-08-25T09:30:00.000Z'
             }
         ]);
 
@@ -127,10 +131,59 @@ describe('Antigravity cooldown UI behavior', () => {
             {
                 model: 'gemini-2.5-pro',
                 availableCount: 0,
-                totalCount: 3,
+                quotaExhaustedCount: 3,
+                credentialUnavailableCount: 0,
+                unprobedCount: 0,
                 earliestRecoveryTime: '2026-08-25T09:30:00.000Z'
             }
         ]);
+    });
+
+    test('includes known Gemini image model and keeps missing model states as unprobed', async () => {
+        const usageManager = await import('../static/app/usage-manager.js');
+        const instances = [
+            { isHealthy: true, antigravityQuotaHealth: { models: {
+                'gemini-3.1-flash-image': { isHealthy: true },
+                'gemini-3.1-flash-lite': { isHealthy: false, source: 'upstream_429', scheduledRecoveryTime: '2026-08-25T13:00:00.000Z' }
+            } } },
+            { isHealthy: true, antigravityQuotaHealth: { models: { 'gemini-3.1-flash-image': { isHealthy: false, source: 'upstream_429', scheduledRecoveryTime: '2026-08-25T12:00:00.000Z' } } } },
+            { isHealthy: true, antigravityQuotaHealth: { models: {} } },
+            { isHealthy: false, antigravityQuotaHealth: { models: {} } }
+        ];
+
+        expect(usageManager.getAntigravityModelAvailabilitySummaries('gemini-antigravity', instances)).toContainEqual({
+            model: 'gemini-3.1-flash-image',
+            availableCount: 1,
+            quotaExhaustedCount: 1,
+            credentialUnavailableCount: 1,
+            unprobedCount: 1,
+            earliestRecoveryTime: '2026-08-25T12:00:00.000Z'
+        });
+        expect(usageManager.getAntigravityModelAvailabilitySummaries('gemini-antigravity', instances)).toContainEqual({
+            model: 'gemini-3.1-flash-lite',
+            availableCount: 0,
+            quotaExhaustedCount: 1,
+            credentialUnavailableCount: 1,
+            unprobedCount: 2,
+            earliestRecoveryTime: '2026-08-25T13:00:00.000Z'
+        });
+    });
+
+    test('does not expose healthy-only models and classifies needsRefresh as credential unavailable', async () => {
+        const usageManager = await import('../static/app/usage-manager.js');
+        const instances = [
+            { isHealthy: true, antigravityQuotaHealth: { models: { 'gemini-3.1-flash-image': { isHealthy: true } } } },
+            { isHealthy: true, needsRefresh: true, antigravityQuotaHealth: { models: { 'gemini-3.1-flash-image': { isHealthy: true } } } }
+        ];
+        expect(usageManager.getAntigravityModelAvailabilitySummaries('gemini-antigravity', instances)).toContainEqual({
+            model: 'gemini-3.1-flash-image',
+            availableCount: 1,
+            quotaExhaustedCount: 0,
+            credentialUnavailableCount: 1,
+            unprobedCount: 0,
+            earliestRecoveryTime: null
+        });
+        expect(usageManager.getAntigravityModelAvailabilitySummaries('gemini-cli-oauth', instances)).toEqual([]);
     });
 
     test('ignores disabled, refresh-blocked, unhealthy, and uninitialized instances in the pool calculation', async () => {
