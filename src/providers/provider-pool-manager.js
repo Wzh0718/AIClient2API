@@ -25,14 +25,19 @@ import { normalizeCodexRateLimitWindows } from '../utils/codex-rate-limit.js';
 import requestContext from '../utils/context.js';
 import { performance } from 'node:perf_hooks';
 import { createProviderStateEvent, applyProviderStateEvent } from '../runtime/provider-state-event.js';
-import { DEFAULT_CODEX_FALLBACK_MODEL, matchesModelFamily } from './openai/codex-model-routing.js';
+import { matchesModelFamily } from './openai/codex-model-routing.js';
 
 const ANTIGRAVITY_ELASTIC_SOURCE_MODEL = 'gemini-2.5-flash-lite';
+const ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS = Object.freeze({
+    'gemini-2.5-flash': ['gemini-3.1-flash-lite'],
+    'gemini-2.5-flash-lite': ['gemini-2.5-flash', 'gemini-3.1-flash-lite'],
+    'gemini-3.1-flash-lite': []
+});
 const ANTIGRAVITY_ELASTIC_DEFAULTS = Object.freeze({
     enabled: true,
     maxQueueWaitMs: 45_000,
     preferOriginalWaitMs: 10_000,
-    fallbackModels: ['gemini-3.1-flash-lite', 'gemini-2.5-flash'],
+    fallbackModels: ['gemini-2.5-flash', 'gemini-3.1-flash-lite'],
     globalQueueLimit: 512,
     perKeyModelQueueLimit: 256,
     globalQueuedBytesLimit: 64 * 1024 * 1024,
@@ -93,6 +98,10 @@ function isCodexProviderType(providerType) {
 
 function isAntigravityProviderType(providerType) {
     return providerType === MODEL_PROVIDER.ANTIGRAVITY;
+}
+
+function isGeminiProviderType(providerType) {
+    return providerType === MODEL_PROVIDER.GEMINI_CLI || providerType === MODEL_PROVIDER.ANTIGRAVITY;
 }
 
 function normalizeAntigravityPlan(plan) {
@@ -2837,7 +2846,7 @@ export class ProviderPoolManager {
             enabled: configured.enabled !== false,
             maxQueueWaitMs: positiveInteger(configured.maxQueueWaitMs, ANTIGRAVITY_ELASTIC_DEFAULTS.maxQueueWaitMs),
             preferOriginalWaitMs: positiveInteger(configured.preferOriginalWaitMs, ANTIGRAVITY_ELASTIC_DEFAULTS.preferOriginalWaitMs, { allowZero: true }),
-            fallbackModels: ANTIGRAVITY_ELASTIC_DEFAULTS.fallbackModels.filter(model => configuredFallbacks.includes(model)),
+            fallbackModels: configuredFallbacks,
             globalQueueLimit: positiveInteger(configured.globalQueueLimit, ANTIGRAVITY_ELASTIC_DEFAULTS.globalQueueLimit),
             perKeyModelQueueLimit: positiveInteger(configured.perKeyModelQueueLimit, ANTIGRAVITY_ELASTIC_DEFAULTS.perKeyModelQueueLimit),
             globalQueuedBytesLimit: positiveInteger(configured.globalQueuedBytesLimit, ANTIGRAVITY_ELASTIC_DEFAULTS.globalQueuedBytesLimit),
@@ -2849,7 +2858,7 @@ export class ProviderPoolManager {
     _isAntigravityElasticRoutingEligible(providerType, requestedModel) {
         return this._getAntigravityElasticRoutingConfig().enabled
             && isAntigravityProviderType(providerType)
-            && normalizeAntigravityQuotaModel(requestedModel) === ANTIGRAVITY_ELASTIC_SOURCE_MODEL;
+            && Object.prototype.hasOwnProperty.call(ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS, normalizeAntigravityQuotaModel(requestedModel));
     }
 
     getGeminiElasticQueueSnapshot() {
@@ -2972,7 +2981,10 @@ export class ProviderPoolManager {
 
     async _acquireAntigravityElasticSlot(providerType, requestedModel, options = {}) {
         const policy = this._getAntigravityElasticRoutingConfig();
-        const models = [requestedModel, ...policy.fallbackModels];
+        const canonicalRequestedModel = normalizeAntigravityQuotaModel(requestedModel);
+        const configuredFallbacks = Array.isArray(policy.fallbackModels) ? policy.fallbackModels : [];
+        const allowedFallbacks = ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS[canonicalRequestedModel] || [];
+        const models = [requestedModel, ...allowedFallbacks.filter(model => configuredFallbacks.length === 0 || configuredFallbacks.includes(model))];
         const startedAt = Date.now();
         const deadline = startedAt + policy.maxQueueWaitMs;
         let queueEntry = null;
@@ -3104,6 +3116,15 @@ export class ProviderPoolManager {
 
         if (this._isAntigravityElasticRoutingEligible(providerType, requestedModel)) {
             return this._acquireAntigravityElasticSlot(providerType, requestedModel, options);
+        }
+
+        // Gemini routing is strictly same-provider. Do not consult global provider
+        // chains or model mappings for Gemini requests.
+        if (isGeminiProviderType(providerType)) {
+            const selectedConfig = await this.acquireSlot(providerType, requestedModel, options);
+            return selectedConfig
+                ? { config: selectedConfig, actualProviderType: providerType, actualModel: requestedModel, isFallback: false }
+                : null;
         }
 
         if (options.disableProviderFallback === true) {
@@ -3291,6 +3312,19 @@ export class ProviderPoolManager {
         if (!providerType || typeof providerType !== 'string') {
             this._log('error', `Invalid providerType: ${providerType}`);
             return null;
+        }
+
+        if (this._isAntigravityElasticRoutingEligible(providerType, requestedModel)) {
+            return this._acquireAntigravityElasticSlot(providerType, requestedModel, options);
+        }
+
+        // Gemini requests may only use the requested Gemini model/provider. Any
+        // allowed Antigravity model fallback is handled above.
+        if (isGeminiProviderType(providerType)) {
+            const selectedConfig = await this.selectProvider(providerType, requestedModel, options);
+            return selectedConfig
+                ? { config: selectedConfig, actualProviderType: providerType, actualModel: requestedModel, isFallback: false }
+                : null;
         }
 
         if (options.disableProviderFallback === true) {
@@ -4382,6 +4416,7 @@ export class ProviderPoolManager {
                 }
             }
         }
+
     }
 
     reconcileProviderForRouting(providerType, uuid) {

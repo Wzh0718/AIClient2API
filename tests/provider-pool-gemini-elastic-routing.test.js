@@ -13,8 +13,8 @@ jest.mock('../src/ui-modules/event-broadcast.js', () => ({
 
 const providerType = 'gemini-antigravity';
 const sourceModel = 'gemini-2.5-flash-lite';
-const firstFallback = 'gemini-3.1-flash-lite';
-const secondFallback = 'gemini-2.5-flash';
+const firstFallback = 'gemini-2.5-flash';
+const secondFallback = 'gemini-3.1-flash-lite';
 
 function coolingUntil(delayMs) {
     return {
@@ -84,7 +84,7 @@ describe('Antigravity elastic queue and model fallback', () => {
         });
     });
 
-    test('uses 3.1 Flash Lite immediately when the source cooldown is not short', async () => {
+    test('uses 2.5 Flash immediately when the source cooldown is not short', async () => {
         const manager = createManager([
             provider('gemini-a', { [sourceModel]: coolingUntil(500) })
         ]);
@@ -100,11 +100,11 @@ describe('Antigravity elastic queue and model fallback', () => {
         });
     });
 
-    test('continues to 2.5 Flash when 3.1 Flash Lite is also cooling down', async () => {
+    test('continues to 3.1 Flash Lite when 2.5 Flash is also cooling down', async () => {
         const manager = createManager([
             provider('gemini-a', {
                 [sourceModel]: coolingUntil(500),
-                [firstFallback]: coolingUntil(500)
+                [secondFallback]: coolingUntil(500)
             })
         ]);
 
@@ -112,7 +112,7 @@ describe('Antigravity elastic queue and model fallback', () => {
             queueKey: 'key-a'
         });
 
-        expect(result.actualModel).toBe(secondFallback);
+        expect(result.actualModel).toBe(firstFallback);
         expect([sourceModel, firstFallback, secondFallback]).toContain(result.actualModel);
     });
 

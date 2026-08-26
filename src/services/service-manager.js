@@ -24,10 +24,7 @@ import { readGeminiCredentialEmail } from '../utils/gemini-account.js';
 import { normalizeCodexFingerprintProviderConfig } from '../utils/codex-fingerprint-migration.js';
 import { CredentialGroupService, resolveKeyRoutingAssignment, routeKeyToCredentialCandidates } from './codex-credential-group-service.js';
 import { getCodexRoutingConsistencyStatus } from './codex-routing-integrity.js';
-import {
-    DEFAULT_CODEX_FALLBACK_MODEL,
-    resolveCodexEntryModel
-} from '../providers/openai/codex-model-routing.js';
+import { resolveCodexEntryModel } from '../providers/openai/codex-model-routing.js';
 import { performance } from 'node:perf_hooks';
 import { runtimeMetrics } from '../runtime/runtime-metrics.js';
 

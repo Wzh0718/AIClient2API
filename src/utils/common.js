@@ -20,7 +20,7 @@ import {
     CODEX_FINGERPRINT_CONTEXT_KEY,
     extractOriginalCodexSessionId
 } from '../providers/openai/codex-fingerprint.js';
-import { DEFAULT_CODEX_FALLBACK_MODEL, matchesModelFamily } from '../providers/openai/codex-model-routing.js';
+import { matchesModelFamily } from '../providers/openai/codex-model-routing.js';
 import requestContext from './context.js';
 import { assertCodexRoutingIntegrity } from '../services/codex-routing-integrity.js';
 import {
@@ -2024,7 +2024,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                     );
                 }
             } catch (fallbackError) {
-                logger.error(`[Temporary Route] ${DEFAULT_CODEX_FALLBACK_MODEL} stream fallback failed:`, fallbackError.message);
+                logger.error('[Temporary Route] scoped stream fallback failed:', fallbackError.message);
             }
         }
 
@@ -2382,7 +2382,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 );
             }
         } catch (fallbackError) {
-            logger.error(`[Temporary Route] ${DEFAULT_CODEX_FALLBACK_MODEL} unary fallback failed:`, fallbackError.message);
+                logger.error('[Temporary Route] scoped unary fallback failed:', fallbackError.message);
         }
 
         // 使用新方法创建符合 fromProvider 格式的错误响应
@@ -2643,8 +2643,8 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     let temporaryRouteFallbackUsed = Boolean(temporaryRoute?.scheduleBypass);
     const temporaryFallbackModel = temporaryRoute?.fallbackModel
         || temporaryRoute?.scheduleBypass?.fallbackModel
-        || DEFAULT_CODEX_FALLBACK_MODEL;
-    const buildTemporaryLunaFallback = temporaryRoute?.fallbackToOriginal
+        || null;
+    const buildTemporaryLunaFallback = temporaryRoute?.fallbackToOriginal && temporaryFallbackModel
         ? async () => {
             const fallbackProviderType = temporaryRoute.scheduleBypass?.fallbackProviderType
                 || temporaryRoute.originalProviderType;

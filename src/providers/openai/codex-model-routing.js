@@ -1,4 +1,5 @@
-export const DEFAULT_CODEX_FALLBACK_MODEL = 'gpt-5.6-luna';
+// No implicit cross-model fallback. Callers must provide an explicit, scoped fallback.
+export const DEFAULT_CODEX_FALLBACK_MODEL = null;
 
 export function matchesModelFamily(model, family) {
     const normalizedModel = String(model || '').trim().toLowerCase();

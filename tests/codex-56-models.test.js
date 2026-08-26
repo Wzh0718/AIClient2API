@@ -30,10 +30,8 @@ describe('codex 5.6 model registration', () => {
         const codexSource = fs.readFileSync(path.join(repoRoot, 'src', 'providers', 'openai', 'codex-core.js'), 'utf8');
 
         expect(routingSource).not.toContain("'openai-codex-oauth:gpt-5.6': 'gpt-5.6-sol'");
-        expect(routingSource).toContain("DEFAULT_CODEX_FALLBACK_MODEL");
-        expect(routingSource).toContain("DEFAULT_CODEX_FALLBACK_MODEL");
         expect(routingSource).toContain('resolveCodexEntryModel');
-        expect(modelRoutingSource).toContain("DEFAULT_CODEX_FALLBACK_MODEL = 'gpt-5.6-luna'");
+        expect(modelRoutingSource).toContain('DEFAULT_CODEX_FALLBACK_MODEL = null');
         expect(codexSource).toContain('不支持的模型');
         expect(codexSource).not.toContain('selectedModel = DEFAULT_CODEX_FALLBACK_MODEL;');
     });
