@@ -188,4 +188,23 @@ describe('usage cache TTL', () => {
         expect(cache.providers['gemini-antigravity'].lastSuccessfulRefreshAt).toBe('2026-06-16T12:00:00.000Z');
         expect(cache.providers['openai-codex-oauth'].lastSuccessfulRefreshAt).toBe('2026-06-16T11:00:00.000Z');
     });
+
+    test('serializes concurrent provider cache updates without losing sibling providers', async () => {
+        writeCache({
+            timestamp: '2026-06-16T11:50:00.000Z',
+            providers: {}
+        });
+
+        const { updateProviderUsageCache, readUsageCache } = await loadUsageCacheModule();
+        await Promise.all([
+            updateProviderUsageCache('gemini-antigravity', { providerType: 'gemini-antigravity', instances: [{ uuid: 'gemini-a' }] }),
+            updateProviderUsageCache('openai-codex-oauth', { providerType: 'openai-codex-oauth', instances: [{ uuid: 'codex-a' }] })
+        ]);
+
+        const cache = await readUsageCache({ maxAgeMs: null });
+        expect(cache.providers).toEqual(expect.objectContaining({
+            'gemini-antigravity': expect.objectContaining({ instances: [{ uuid: 'gemini-a' }] }),
+            'openai-codex-oauth': expect.objectContaining({ instances: [{ uuid: 'codex-a' }] })
+        }));
+    });
 });

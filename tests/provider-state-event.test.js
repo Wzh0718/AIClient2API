@@ -157,4 +157,106 @@ describe('provider state persistence events', () => {
         expect(applied).toBe(true);
         expect(providerPools.test[0].needsRefresh).toBe(false);
     });
+
+    test('does not let a stale refresh clear overwrite a newer refresh request', () => {
+        const providerPools = { test: [{
+            uuid: 'one',
+            needsRefresh: true,
+            lastHealthStateTime: '2026-08-26T08:01:00.000Z'
+        }] };
+
+        applyProviderStateEvent(providerPools, {
+            type: 'provider_state',
+            providerType: 'test',
+            uuid: 'one',
+            configRevision: 1,
+            occurredAt: '2026-08-26T08:02:00.000Z',
+            state: {
+                needsRefresh: false,
+                lastHealthStateTime: '2026-08-26T08:00:00.000Z'
+            }
+        }, { revision: 1 });
+
+        expect(providerPools.test[0].needsRefresh).toBe(true);
+    });
+
+    test('ignores isDisabled from runtime state events', () => {
+        const providerPools = { test: [{ uuid: 'one', isDisabled: true }] };
+
+        applyProviderStateEvent(providerPools, {
+            type: 'provider_state',
+            providerType: 'test',
+            uuid: 'one',
+            configRevision: 1,
+            occurredAt: '2026-08-26T08:02:00.000Z',
+            state: { isDisabled: false }
+        }, { revision: 1 });
+
+        expect(providerPools.test[0].isDisabled).toBe(true);
+    });
+
+    test('merges quota state children instead of replacing newer entries', () => {
+        const providerPools = { test: [{
+            uuid: 'one',
+            antigravityQuotaHealth: { models: { 'gpt-new': { isHealthy: false } } }
+        }] };
+
+        applyProviderStateEvent(providerPools, {
+            type: 'provider_state',
+            providerType: 'test',
+            uuid: 'one',
+            configRevision: 1,
+            occurredAt: '2026-08-26T08:02:00.000Z',
+            state: { antigravityQuotaHealth: { models: { 'gpt-old': { isHealthy: true } } } }
+        }, { revision: 1 });
+
+        expect(providerPools.test[0].antigravityQuotaHealth.models).toEqual({
+            'gpt-new': { isHealthy: false },
+            'gpt-old': { isHealthy: true }
+        });
+    });
+
+    test('does not let an older usage snapshot roll back usageCount', () => {
+        const providerPools = { test: [{
+            uuid: 'one',
+            usageCount: 12,
+            lastHealthStateTime: '2026-08-26T08:01:00.000Z'
+        }] };
+
+        applyProviderStateEvent(providerPools, {
+            type: 'provider_state',
+            providerType: 'test',
+            uuid: 'one',
+            configRevision: 1,
+            occurredAt: '2026-08-26T08:02:00.000Z',
+            state: {
+                usageCount: 3,
+                lastHealthStateTime: '2026-08-26T08:00:00.000Z'
+            }
+        }, { revision: 1 });
+
+        expect(providerPools.test[0].usageCount).toBe(12);
+    });
+
+    test('does not let an older recovery event roll back scheduledRecoveryTime', () => {
+        const providerPools = { test: [{
+            uuid: 'one',
+            scheduledRecoveryTime: '2026-08-26T09:00:00.000Z',
+            lastHealthStateTime: '2026-08-26T08:01:00.000Z'
+        }] };
+
+        applyProviderStateEvent(providerPools, {
+            type: 'provider_state',
+            providerType: 'test',
+            uuid: 'one',
+            configRevision: 1,
+            occurredAt: '2026-08-26T08:02:00.000Z',
+            state: {
+                scheduledRecoveryTime: '2026-08-26T08:30:00.000Z',
+                lastHealthStateTime: '2026-08-26T08:00:00.000Z'
+            }
+        }, { revision: 1 });
+
+        expect(providerPools.test[0].scheduledRecoveryTime).toBe('2026-08-26T09:00:00.000Z');
+    });
 });

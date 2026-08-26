@@ -3,6 +3,7 @@ import { existsSync } from 'fs';
 import logger from '../utils/logger.js';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { withFileLock } from '../utils/file-lock.js';
 
 // 用量缓存文件路径
 const USAGE_CACHE_FILE = path.join(process.cwd(), 'configs', 'usage-cache.json');
@@ -232,7 +233,7 @@ export async function readUsageDisplayCache(options = {}) {
  * 写入用量缓存文件
  * @param {Object} usageData - 用量数据
  */
-export async function writeUsageCache(usageData) {
+export async function writeUsageCacheUnlocked(usageData) {
     try {
         const safeUsageData = await mergeUsageDataWithExistingLastSuccessfulUsage(usageData);
         await fs.mkdir(path.dirname(USAGE_CACHE_FILE), { recursive: true });
@@ -249,6 +250,10 @@ export async function writeUsageCache(usageData) {
     } catch (error) {
         logger.error('[Usage Cache] Failed to write usage cache:', error.message);
     }
+}
+
+export async function writeUsageCache(usageData) {
+    return withFileLock(USAGE_CACHE_FILE, () => writeUsageCacheUnlocked(usageData));
 }
 
 /**
@@ -275,17 +280,19 @@ export async function readProviderUsageCache(providerType, options = {}) {
  * @param {Object} usageData - 用量数据
  */
 export async function updateProviderUsageCache(providerType, usageData, refreshedAt = null) {
-    let cache = await readUsageCache({ maxAgeMs: null });
-    if (!cache) {
-        cache = {
-            timestamp: new Date().toISOString(),
-            providers: {}
+    await withFileLock(USAGE_CACHE_FILE, async () => {
+        let cache = await readUsageCache({ maxAgeMs: null });
+        if (!cache) {
+            cache = {
+                timestamp: new Date().toISOString(),
+                providers: {}
+            };
+        }
+        cache.providers[providerType] = {
+            ...usageData,
+            lastSuccessfulRefreshAt: refreshedAt || usageData?.lastSuccessfulRefreshAt || new Date().toISOString()
         };
-    }
-    cache.providers[providerType] = {
-        ...usageData,
-        lastSuccessfulRefreshAt: refreshedAt || usageData?.lastSuccessfulRefreshAt || new Date().toISOString()
-    };
-    cache.timestamp = new Date().toISOString();
-    await writeUsageCache(cache);
+        cache.timestamp = new Date().toISOString();
+        await writeUsageCacheUnlocked(cache);
+    });
 }
