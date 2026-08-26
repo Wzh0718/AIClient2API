@@ -235,7 +235,14 @@ function renderCredentialGroupSummary() {
             <span>${escapeHtml(t(labelKey))}</span>
             <strong>${escapeHtml(value)}</strong>
         </div>
-    `).join('');
+    `).join('') + `
+        <div class="credential-groups-summary-notice" role="note">
+            <i class="fas fa-filter" aria-hidden="true"></i>
+            <span>${escapeHtml(t('providers.credentialGroups.demandFilterNotice', {
+                modelFilter: credentialGroupView.demandModelFilter || 'gpt-*'
+            }))}</span>
+        </div>
+    `;
 }
 
 function renderCredentialGroupPolicy() {
@@ -528,6 +535,7 @@ function renderCredentialGroupPreview() {
         ['providers.credentialGroups.preview.healthyCredentials', formatCredentialGroupNumber(suggestion.healthyCredentialCount, 0)],
         ['providers.credentialGroups.preview.groupCount', formatCredentialGroupNumber(suggestion.groupCount, 0)],
         ['providers.credentialGroups.preview.history', `${formatCredentialGroupNumber(suggestion.historyDays || 7, 0)} ${getCurrentLanguage() === 'en-US' ? 'days' : '天'}`],
+        ['providers.credentialGroups.preview.demandFilter', suggestion.demandModelFilter || 'gpt-*'],
         ['providers.credentialGroups.preview.generatedAt', formatCredentialGroupDate(suggestion.generatedAt)]
     ].map(([labelKey, value]) => `
         <div class="credential-groups-preview-meta-card">

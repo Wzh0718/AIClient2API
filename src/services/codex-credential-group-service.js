@@ -7,6 +7,8 @@ const DEFAULT_HISTORY_DAYS = 7;
 const DEFAULT_UNKNOWN_CAPACITY = 0.5;
 const STORE_VERSION = 1;
 const MAX_CREDENTIALS_PER_GROUP = 2;
+const DEMAND_MODEL_FILTER = 'gpt-*';
+const DEMAND_MODEL_FILTER_CASE_SENSITIVE = false;
 
 function toFiniteNumber(value, fallback = 0) {
     const number = Number(value);
@@ -346,13 +348,18 @@ export function summarizeKeyDemand(key = {}, options = {}) {
 
     for (const [date, day] of Object.entries(key.usageHistory || {})) {
         if (date < startDate || date > endDate) continue;
-        const summary = day?.summary || day || {};
-        actualUsd += toFiniteNumber(summary?.cost?.actualUsd, 0);
-        estimatedUsd += toFiniteNumber(summary?.cost?.estimatedUsd, 0);
-        missingPriceTokens += toFiniteNumber(summary?.cost?.missingPriceTokens, 0);
-        estimatedPriceTokens += toFiniteNumber(summary?.cost?.estimatedPriceTokens, 0);
-        totalTokens += toFiniteNumber(summary.totalTokens, 0);
-        requestCount += toFiniteNumber(summary.requestCount, 0);
+        const models = day?.models && typeof day.models === 'object' ? day.models : {};
+        for (const [modelName, modelUsage] of Object.entries(models)) {
+            if (!String(modelName || '').toLowerCase().startsWith('gpt-')) continue;
+            const usage = modelUsage && typeof modelUsage === 'object' ? modelUsage : {};
+            const cost = usage.cost && typeof usage.cost === 'object' ? usage.cost : {};
+            actualUsd += toFiniteNumber(cost.actualUsd, 0);
+            estimatedUsd += toFiniteNumber(cost.estimatedUsd, 0);
+            missingPriceTokens += toFiniteNumber(cost.missingPriceTokens, 0);
+            estimatedPriceTokens += toFiniteNumber(cost.estimatedPriceTokens, 0);
+            totalTokens += toFiniteNumber(usage.totalTokens, 0);
+            requestCount += toFiniteNumber(usage.requestCount, 0);
+        }
     }
 
     let metric = 'newKey';
@@ -386,7 +393,9 @@ export function summarizeKeyDemand(key = {}, options = {}) {
         requestCount,
         metric,
         totalDemand,
-        isNew: totalDemand === 0
+        isNew: totalDemand === 0,
+        demandModelFilter: DEMAND_MODEL_FILTER,
+        demandModelFilterCaseSensitive: DEMAND_MODEL_FILTER_CASE_SENSITIVE
     };
 }
 
@@ -736,6 +745,8 @@ export function generateCredentialGroupSuggestion(options = {}) {
         applicable: true,
         generatedAt: now.toISOString(),
         demandMetric,
+        demandModelFilter: DEMAND_MODEL_FILTER,
+        demandModelFilterCaseSensitive: DEMAND_MODEL_FILTER_CASE_SENSITIVE,
         timeZone: options.timeZone || DEFAULT_TIME_ZONE,
         historyDays: options.days || DEFAULT_HISTORY_DAYS,
         groupCount: publicGroups.length,
@@ -983,7 +994,9 @@ export class CredentialGroupService {
             keyAssignments: (suggestion.keyAssignments || []).map(normalizeKeyAssignment),
             generatedAt: suggestion.generatedAt || null,
             timeZone: suggestion.timeZone || DEFAULT_TIME_ZONE,
-            historyDays: suggestion.historyDays || DEFAULT_HISTORY_DAYS
+            historyDays: suggestion.historyDays || DEFAULT_HISTORY_DAYS,
+            demandModelFilter: suggestion.demandModelFilter || DEMAND_MODEL_FILTER,
+            demandModelFilterCaseSensitive: suggestion.demandModelFilterCaseSensitive === true
         };
         const entry = {
             revision,

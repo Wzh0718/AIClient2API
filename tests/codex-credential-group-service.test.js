@@ -22,13 +22,15 @@ function makeTempFile() {
     return path.join(dir, 'codex-credential-groups.json');
 }
 
-function day(summary = {}) {
+function day(summary = {}, models = null) {
+    const normalizedSummary = {
+        requestCount: summary.requestCount || 0,
+        totalTokens: summary.totalTokens || 0,
+        cost: summary.cost || undefined
+    };
     return {
-        summary: {
-            requestCount: summary.requestCount || 0,
-            totalTokens: summary.totalTokens || 0,
-            cost: summary.cost || undefined
-        }
+        summary: normalizedSummary,
+        models: models || { 'gpt-5': { ...normalizedSummary } }
     };
 }
 
@@ -151,6 +153,62 @@ describe('Codex credential group sizing and capacity', () => {
 });
 
 describe('Codex key demand and capacity-aware assignment', () => {
+    test('only aggregates case-insensitive gpt-* models across the selected date range', () => {
+        const demand = summarizeKeyDemand({
+            usageHistory: {
+                '2026-08-08': day({}, {
+                    'gpt-5': { requestCount: 2, totalTokens: 200, cost: { actualUsd: 2 } },
+                    'claude-sonnet-4': { requestCount: 200, totalTokens: 20000, cost: { actualUsd: 200 } }
+                }),
+                '2026-08-13': day({}, {
+                    'GPT-5.1': { requestCount: 3, totalTokens: 300, cost: { estimatedUsd: 3, missingPriceTokens: 30, estimatedPriceTokens: 20 } },
+                    'gemini-3-flash': { requestCount: 300, totalTokens: 30000, cost: { estimatedUsd: 300 } }
+                }),
+                '2026-08-14': day({}, {
+                    'gpt-5-mini': { requestCount: 4, totalTokens: 400, cost: { actualUsd: 4 } }
+                })
+            }
+        }, { now: NOW, timeZone: 'Asia/Shanghai' });
+
+        expect(demand).toMatchObject({
+            metric: 'usd',
+            usd: 9,
+            actualUsd: 6,
+            estimatedUsd: 3,
+            missingPriceTokens: 30,
+            estimatedPriceTokens: 20,
+            totalTokens: 900,
+            requestCount: 9,
+            totalDemand: 9,
+            isNew: false
+        });
+    });
+
+    test('treats missing or non-gpt model history as a new key without summary fallback', () => {
+        const demand = summarizeKeyDemand({
+            usageHistory: {
+                '2026-08-13': {
+                    summary: { requestCount: 999, totalTokens: 999999, cost: { actualUsd: 999 } }
+                },
+                '2026-08-14': day({}, {
+                    gpt: { requestCount: 10, totalTokens: 1000 },
+                    'gptish-5': { requestCount: 20, totalTokens: 2000 },
+                    '': { requestCount: 30, totalTokens: 3000 },
+                    'claude-sonnet-4': { requestCount: 40, totalTokens: 4000 }
+                })
+            }
+        }, { now: NOW });
+
+        expect(demand).toMatchObject({
+            metric: 'newKey',
+            usd: 0,
+            totalTokens: 0,
+            requestCount: 0,
+            totalDemand: 0,
+            isNew: true
+        });
+    });
+
     test('uses the current Asia/Shanghai day plus the previous six calendar days', () => {
         const demand = summarizeKeyDemand({
             id: 'key-1',
@@ -230,6 +288,35 @@ describe('Codex key demand and capacity-aware assignment', () => {
         expect(suggestion.keyAssignments.find(item => item.keyId === 'key-unpriced-huge').highConsumption).toBe(false);
         expect(suggestion.groups.reduce((sum, group) => sum + group.predictedDemand, 0)).toBeCloseTo(101, 10);
         expect(suggestion.groups.reduce((sum, group) => sum + group.predictedDemandUsd, 0)).toBeCloseTo(101, 10);
+    });
+
+    test('does not let large non-gpt usage increase a key assignment demand', () => {
+        const suggestion = generateCredentialGroupSuggestion({
+            credentials: createCredentials(3),
+            keys: [
+                {
+                    id: 'key-mixed',
+                    usageHistory: {
+                        '2026-08-14': day({}, {
+                            'gpt-5': { totalTokens: 10, requestCount: 1 },
+                            'claude-sonnet-4': { totalTokens: 1_000_000, requestCount: 10_000 }
+                        })
+                    }
+                },
+                { id: 'key-gpt', usageHistory: { '2026-08-14': day({ totalTokens: 100, requestCount: 2 }) } }
+            ],
+            now: NOW
+        });
+
+        expect(suggestion).toMatchObject({
+            demandModelFilter: 'gpt-*',
+            demandModelFilterCaseSensitive: false,
+            demandMetric: 'totalTokens'
+        });
+        expect(suggestion.keyAssignments.find(item => item.keyId === 'key-mixed').demand).toMatchObject({
+            totalTokens: 10,
+            requestCount: 1
+        });
     });
 
     test('reports group demand share, capacity share, and capacity load index', () => {

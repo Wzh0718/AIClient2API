@@ -356,21 +356,33 @@ describe('Potluck Codex credential group management API', () => {
                     id: 'maki_expensive',
                     name: 'Expensive',
                     usageHistory: {
-                        '2026-08-14': { summary: { totalTokens: 100, requestCount: 1, cost: { actualUsd: 90 } } }
+                        '2026-08-14': {
+                            summary: { totalTokens: 100, requestCount: 1, cost: { actualUsd: 90 } },
+                            models: { 'gpt-5': { totalTokens: 100, requestCount: 1, cost: { actualUsd: 90 } } }
+                        }
                     }
                 },
                 {
                     id: 'maki_small',
                     name: 'Small',
                     usageHistory: {
-                        '2026-08-14': { summary: { totalTokens: 1000, requestCount: 10, cost: { actualUsd: 10 } } }
+                        '2026-08-14': {
+                            summary: { totalTokens: 1000, requestCount: 10, cost: { actualUsd: 10 } },
+                            models: { 'gpt-5-mini': { totalTokens: 1000, requestCount: 10, cost: { actualUsd: 10 } } }
+                        }
                     }
                 }
             ]
         });
 
         const groups = response.body.data.suggestion.groups;
-        expect(response.body.data.suggestion.demandMetric).toBe('usd');
+        expect(response.body.data.suggestion).toMatchObject({
+            demandMetric: 'usd',
+            demandModelFilter: 'gpt-*',
+            demandModelFilterCaseSensitive: false,
+            historyDays: 7,
+            timeZone: 'Asia/Shanghai'
+        });
         expect(groups.reduce((sum, group) => sum + group.demandShare, 0)).toBeCloseTo(1, 10);
         expect(groups.reduce((sum, group) => sum + group.capacityShare, 0)).toBeCloseTo(1, 10);
         expect(groups.every(group => Number.isFinite(group.loadIndex))).toBe(true);

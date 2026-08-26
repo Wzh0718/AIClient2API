@@ -94,6 +94,11 @@ describe('Codex credential-group UI source', () => {
         expect(providerManager).not.toContain("t('providers.credentialGroups.label.utilization')");
     });
 
+    test('explains that allocation demand only includes gpt-* model usage', () => {
+        expect(providerManager).toContain("t('providers.credentialGroups.demandFilterNotice'");
+        expect(providerManager).toContain('demandModelFilter');
+    });
+
     test('shows a compact safe Potluck routing badge beside the key-name editor', () => {
         const helperStart = potluckHtml.indexOf('function renderKeyRoutingSummary');
         const helperEnd = potluckHtml.indexOf('function renderKeys', helperStart);
