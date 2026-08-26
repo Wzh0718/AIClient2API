@@ -1432,6 +1432,15 @@ export class ProviderPoolManager {
                 
                 // 只有在真正执行了刷新操作时，才更新 lastRefreshTime
                 // 这可以防止 heartbeat 的 no-op 刷新误更新时间，导致后续真正的刷新被 markProviderNeedRefresh 拦截（30秒保护）
+                if (isAntigravityProviderType(providerType)) {
+                    const postcondition = this._validateAntigravityRefreshPostcondition(config);
+                    if (!postcondition.ok) {
+                        const postconditionError = new Error(`REFRESH_POSTCONDITION_FAILED: ${postcondition.reason}`);
+                        postconditionError.code = 'REFRESH_POSTCONDITION_FAILED';
+                        postconditionError.skipErrorCount = false;
+                        throw postconditionError;
+                    }
+                }
                 if (refreshResult === true) {
                     this._log('info', `Token refresh successful for node ${this._getDisplayName(config)} (Duration: ${duration}ms)`);
                     config.lastRefreshTime = Date.now(); // 记录最后实际刷新成功时间
@@ -1444,6 +1453,9 @@ export class ProviderPoolManager {
                 config.refreshCount = 0;
                 config.errorCount = 0; // 成功/无操作也重置错误计数
                 config.lastHealthStateTime = new Date().toISOString();
+                if (isAntigravityProviderType(providerType)) {
+                    invalidateServiceAdapter(providerType, config.uuid);
+                }
                 
                 this._debouncedSave(providerType);
             } else {
@@ -1467,6 +1479,11 @@ export class ProviderPoolManager {
             // 注意：refreshCount 在进入本方法后的 try 块前已经自增（L466）
             if (error.code === 'STALE_REFRESH_FENCE') {
                 config.needsRefresh = false;
+            } else if (error.code === 'REFRESH_POSTCONDITION_FAILED') {
+                config.needsRefresh = true;
+                config.lastRefreshAttemptTime = Date.now();
+                config.lastErrorMessage = error.message;
+                this._debouncedSave(providerType);
             } else if (config.refreshCount >= 5) {
                 this.markProviderUnhealthyImmediately(providerType, config, `Refresh failed after maximum attempts (5): ${error.message}`);
             } else {
@@ -1488,6 +1505,24 @@ export class ProviderPoolManager {
                     this._log('warn', `Failed to release refresh fence for ${providerType}/${config.uuid}: ${error.message}`);
                 });
             }
+        }
+    }
+
+    _validateAntigravityRefreshPostcondition(providerConfig) {
+        const filePath = providerConfig?.ANTIGRAVITY_OAUTH_CREDS_FILE_PATH;
+        if (!filePath) return { ok: false, reason: 'credential_path_missing' };
+
+        try {
+            const resolvedPath = path.resolve(filePath);
+            const credentials = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
+            const expiryTime = Number(credentials.expiry_date);
+            const safetyWindowMs = 5 * 60 * 1000;
+            if (!credentials.access_token) return { ok: false, reason: 'access_token_missing' };
+            if (!Number.isFinite(expiryTime)) return { ok: false, reason: 'expiry_date_invalid' };
+            if (expiryTime <= Date.now() + safetyWindowMs) return { ok: false, reason: 'expiry_date_not_in_future_window' };
+            return { ok: true, expiryTime };
+        } catch (error) {
+            return { ok: false, reason: error?.code === 'ENOENT' ? 'credential_file_missing' : 'credential_file_invalid' };
         }
     }
 
@@ -3752,6 +3787,7 @@ export class ProviderPoolManager {
             }
 
             provider.config.needsRefresh = true;
+            provider.config.lastHealthStateTime = new Date().toISOString();
             this._log('info', `Marked provider ${this._getDisplayName(providerConfig)} as needsRefresh. Enqueuing...`);
             
             // 推入异步刷新队列
@@ -5015,7 +5051,12 @@ export class ProviderPoolManager {
         if (!applied) return false;
         this.providerStateEventTimes.set(stateKey, event.occurredAt);
         const provider = this._findProvider(event?.providerType, event?.uuid);
-        if (provider) applyProviderStateEvent({ [event.providerType]: [provider.config] }, event, { revision: this.providerConfigRevision });
+        if (provider) {
+            applyProviderStateEvent({ [event.providerType]: [provider.config] }, event, { revision: this.providerConfigRevision });
+            if (isAntigravityProviderType(event.providerType) && event.state?.needsRefresh === false) {
+                invalidateServiceAdapter(event.providerType, event.uuid);
+            }
+        }
         if (applied && this.persistenceEnabled) this._debouncedSave(event.providerType, { publishStateEvent: false });
         return applied || Boolean(provider);
     }

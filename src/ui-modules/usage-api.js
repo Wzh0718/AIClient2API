@@ -2,9 +2,10 @@ import { CONFIG } from '../core/config-manager.js';
 import logger from '../utils/logger.js';
 import { serviceInstances, getServiceAdapter } from '../providers/adapter.js';
 import { usageService } from '../services/usage-service.js';
-import { readUsageCache, readUsageDisplayCache, writeUsageCache, readProviderUsageCache, updateProviderUsageCache } from './usage-cache.js';
+import { readUsageCache, readUsageDisplayCache, writeUsageCache, writeUsageCacheUnlocked, readProviderUsageCache, updateProviderUsageCache } from './usage-cache.js';
 import { PROVIDER_MAPPINGS } from '../utils/provider-utils.js';
 import { MODEL_PROVIDER, getRequestBody } from '../utils/common.js';
+import { withFileLock } from '../utils/file-lock.js';
 import path from 'path';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import {
@@ -841,34 +842,37 @@ async function resolveProviderInstance(currentConfig, providerPoolManager, provi
 
 async function updateSingleInstanceInCache(providerType, uuid, instanceResult) {
     try {
-        const cache = await readUsageCache({ maxAgeMs: null });
-        if (!cache?.providers?.[providerType]?.instances || !Array.isArray(cache.providers[providerType].instances)) {
-            return;
-        }
-
-        const providerCache = cache.providers[providerType];
-        const idx = providerCache.instances.findIndex(inst => inst.uuid === uuid);
-        if (idx !== -1) {
-            providerCache.instances[idx] = instanceResult;
-        } else {
-            providerCache.instances.push(instanceResult);
-        }
-
-        let successCount = 0;
-        let errorCount = 0;
-        providerCache.instances.forEach(inst => {
-            if (inst.success) {
-                successCount++;
-            } else {
-                errorCount++;
+        const usageCachePath = path.join(process.cwd(), 'configs', 'usage-cache.json');
+        await withFileLock(usageCachePath, async () => {
+            const cache = await readUsageCache({ maxAgeMs: null });
+            if (!cache?.providers?.[providerType]?.instances || !Array.isArray(cache.providers[providerType].instances)) {
+                return;
             }
-        });
-        providerCache.successCount = successCount;
-        providerCache.errorCount = errorCount;
-        providerCache.totalCount = providerCache.instances.length;
 
-        cache.timestamp = new Date().toISOString();
-        await writeUsageCache(cache);
+            const providerCache = cache.providers[providerType];
+            const idx = providerCache.instances.findIndex(inst => inst.uuid === uuid);
+            if (idx !== -1) {
+                providerCache.instances[idx] = instanceResult;
+            } else {
+                providerCache.instances.push(instanceResult);
+            }
+
+            let successCount = 0;
+            let errorCount = 0;
+            providerCache.instances.forEach(inst => {
+                if (inst.success) {
+                    successCount++;
+                } else {
+                    errorCount++;
+                }
+            });
+            providerCache.successCount = successCount;
+            providerCache.errorCount = errorCount;
+            providerCache.totalCount = providerCache.instances.length;
+
+            cache.timestamp = new Date().toISOString();
+            await writeUsageCacheUnlocked(cache);
+        });
         logger.info(`[Usage API] Updated global usage cache for single instance ${providerType}:${uuid}`);
     } catch (cacheError) {
         logger.warn('[Usage API] Failed to update global usage cache for single instance:', cacheError.message);

@@ -1,4 +1,7 @@
 import { ProviderPoolManager } from '../src/providers/provider-pool-manager.js';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 jest.mock('../src/providers/adapter.js', () => ({
     getServiceAdapter: jest.fn(),
@@ -59,5 +62,32 @@ describe('provider refresh fencing', () => {
 
         expect(status.config.lastRefreshTime).toBe(123);
         expect(status.config.lastRefreshAttemptTime).toEqual(expect.any(Number));
+    });
+
+    test('antigravity refresh rejects a successful adapter result when the credential file remains expired', async () => {
+        const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'antigravity-refresh-'));
+        const credentialPath = path.join(tempDir, 'oauth.json');
+        fs.writeFileSync(credentialPath, JSON.stringify({
+            access_token: 'expired-access-token',
+            refresh_token: 'refresh-token',
+            expiry_date: Date.now() - 60_000
+        }));
+        const manager = new ProviderPoolManager({ 'gemini-antigravity': [{
+            uuid: 'one',
+            ANTIGRAVITY_OAUTH_CREDS_FILE_PATH: credentialPath,
+            needsRefresh: true
+        }] }, {
+            persistenceEnabled: false,
+            serviceAdapterFactory: () => ({
+                refreshToken: jest.fn(async () => true),
+                forceRefreshToken: jest.fn(async () => true)
+            })
+        });
+
+        const status = manager.providerStatus['gemini-antigravity'][0];
+        await expect(manager._refreshNodeToken('gemini-antigravity', status, true))
+            .rejects.toMatchObject({ code: 'REFRESH_POSTCONDITION_FAILED' });
+        expect(status.config.needsRefresh).toBe(true);
+        expect(status.config.lastErrorMessage).toContain('REFRESH_POSTCONDITION_FAILED');
     });
 });
