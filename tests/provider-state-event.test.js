@@ -133,4 +133,28 @@ describe('provider state persistence events', () => {
         expect(applyProviderStateEvent({ provider: [target] }, older, { stateEventAt: newer.occurredAt })).toBe(false);
         expect(target.needsRefresh).toBe(false);
     });
+
+    test('does not let a stale refresh request overwrite a newer successful refresh', () => {
+        const providerPools = { test: [{
+            uuid: 'one',
+            needsRefresh: false,
+            lastRefreshTime: '2026-08-26T08:00:00.000Z',
+            lastHealthStateTime: '2026-08-26T08:00:00.000Z'
+        }] };
+        const applied = applyProviderStateEvent(providerPools, {
+            type: 'provider_state',
+            providerType: 'test',
+            uuid: 'one',
+            configRevision: 1,
+            occurredAt: '2026-08-26T08:00:05.000Z',
+            state: {
+                needsRefresh: true,
+                lastHealthStateTime: '2026-08-26T07:59:00.000Z',
+                lastRefreshTime: '2026-08-26T07:59:00.000Z'
+            }
+        }, { revision: 1 });
+
+        expect(applied).toBe(true);
+        expect(providerPools.test[0].needsRefresh).toBe(false);
+    });
 });

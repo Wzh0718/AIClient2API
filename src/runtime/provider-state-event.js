@@ -66,8 +66,13 @@ export function applyProviderStateEvent(providerPools, event, current = {}) {
     const currentHealthCheckTime = toTimestamp(target.lastHealthCheckTime);
     const healthCheckMetadataIsStale = currentHealthCheckTime !== null &&
         (incomingHealthCheckTime === null || incomingHealthCheckTime < currentHealthCheckTime);
+    const incomingRefreshRequestIsStale = event.state?.needsRefresh === true &&
+        target.needsRefresh !== true &&
+        currentHealthStateTime !== null &&
+        (incomingHealthStateTime === null || incomingHealthStateTime < currentHealthStateTime);
     for (const field of MUTABLE_STATE_FIELDS) {
         if (event.state?.[field] === undefined) continue;
+        if (field === 'needsRefresh' && incomingRefreshRequestIsStale) continue;
         if (healthStateIsStale && HEALTH_STATE_FIELDS.has(field)) continue;
         if (healthCheckMetadataIsStale && HEALTH_CHECK_METADATA_FIELDS.has(field)) continue;
         if (MONOTONIC_TIME_FIELDS.has(field)) {
