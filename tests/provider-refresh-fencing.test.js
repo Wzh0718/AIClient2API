@@ -90,4 +90,68 @@ describe('provider refresh fencing', () => {
         expect(status.config.needsRefresh).toBe(true);
         expect(status.config.lastErrorMessage).toContain('REFRESH_POSTCONDITION_FAILED');
     });
+
+    test('antigravity refresh clears needsRefresh only when adapter credentials match the updated file', async () => {
+        const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'antigravity-refresh-success-'));
+        const credentialPath = path.join(tempDir, 'oauth.json');
+        const expiryDate = Date.now() + 60 * 60 * 1000;
+        const credentials = {
+            access_token: 'fresh-access-token',
+            refresh_token: 'refresh-token',
+            expiry_date: expiryDate
+        };
+        fs.writeFileSync(credentialPath, JSON.stringify(credentials));
+        const adapter = {
+            refreshToken: jest.fn(async () => true),
+            forceRefreshToken: jest.fn(async () => true),
+            antigravityApiService: { authClient: { credentials } }
+        };
+        const manager = new ProviderPoolManager({ 'gemini-antigravity': [{
+            uuid: 'one',
+            ANTIGRAVITY_OAUTH_CREDS_FILE_PATH: credentialPath,
+            needsRefresh: true
+        }] }, {
+            persistenceEnabled: false,
+            serviceAdapterFactory: () => adapter
+        });
+
+        const status = manager.providerStatus['gemini-antigravity'][0];
+        await expect(manager._refreshNodeToken('gemini-antigravity', status, true)).resolves.toBeUndefined();
+        expect(status.config.needsRefresh).toBe(false);
+    });
+
+    test('antigravity refresh rejects when adapter credentials do not match the updated file', async () => {
+        const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'antigravity-refresh-mismatch-'));
+        const credentialPath = path.join(tempDir, 'oauth.json');
+        const expiryDate = Date.now() + 60 * 60 * 1000;
+        fs.writeFileSync(credentialPath, JSON.stringify({
+            access_token: 'fresh-access-token',
+            refresh_token: 'refresh-token',
+            expiry_date: expiryDate
+        }));
+        const manager = new ProviderPoolManager({ 'gemini-antigravity': [{
+            uuid: 'one',
+            ANTIGRAVITY_OAUTH_CREDS_FILE_PATH: credentialPath,
+            needsRefresh: true
+        }] }, {
+            persistenceEnabled: false,
+            serviceAdapterFactory: () => ({
+                refreshToken: jest.fn(async () => true),
+                forceRefreshToken: jest.fn(async () => true),
+                antigravityApiService: {
+                    authClient: {
+                        credentials: {
+                            access_token: 'different-access-token',
+                            expiry_date: expiryDate
+                        }
+                    }
+                }
+            })
+        });
+
+        const status = manager.providerStatus['gemini-antigravity'][0];
+        await expect(manager._refreshNodeToken('gemini-antigravity', status, true))
+            .rejects.toMatchObject({ code: 'REFRESH_POSTCONDITION_FAILED' });
+        expect(status.config.needsRefresh).toBe(true);
+    });
 });

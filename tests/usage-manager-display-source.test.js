@@ -2,6 +2,17 @@ import fs from 'fs';
 import path from 'path';
 
 describe('usage manager display source regressions', () => {
+    test('provider usage groups use one full-width row and stack Gemini quota badges', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+        const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain("group.className = 'usage-provider-group is-full-width collapsed'");
+        expect(source).toContain('antigravity-quota-stack');
+        expect(source).not.toContain('usage-provider-summary-tooltip');
+        expect(css).toMatch(/\.usage-provider-groups\s*\{[^}]*grid-template-columns:\s*1fr;/s);
+        expect(css).toMatch(/\.antigravity-quota-stack\s*\{[^}]*flex-direction:\s*column;/s);
+    });
+
     test('usage details prefer backend-provided display values for token units', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
         const renderStart = source.indexOf('function renderUsageDetails(usage, accountSummary = null, instance = {}) {');

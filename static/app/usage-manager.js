@@ -600,6 +600,30 @@ function renderAntigravityQuotaHealthBadges(instance, providerType) {
     ].join('');
 }
 
+function renderAntigravityProviderQuotaStack(instances, providerType) {
+    if (providerType !== ANTIGRAVITY_PROVIDER_TYPE) return '';
+
+    const activeInstances = (Array.isArray(instances) ? instances : [])
+        .filter(instance => !instance?.isDisabled && !instance?.error?.includes('not initialized'));
+    const familyState = family => {
+        const states = activeInstances
+            .map(instance => instance.antigravityQuotaHealth?.families?.[family])
+            .filter(Boolean);
+        if (states.length === 0) return {};
+        const limited = states.find(state => state.isHealthy === false);
+        return limited || states[0];
+    };
+    const renderBadge = (label, state = {}) => {
+        const isHealthy = state?.isHealthy !== false;
+        const titleParts = [];
+        if (state?.lastErrorMessage) titleParts.push(state.lastErrorMessage);
+        if (state?.scheduledRecoveryTime) titleParts.push(`恢复时间: ${formatDate(state.scheduledRecoveryTime)}`);
+        const title = titleParts.length > 0 ? ` title="${escapeHtml(titleParts.join('；'))}"` : '';
+        return `<span class="badge ${isHealthy ? 'badge-healthy' : 'badge-unhealthy'}"${title}>${label}：${isHealthy ? '正常' : '受限'}</span>`;
+    };
+    return `<span class="antigravity-quota-stack" aria-label="Gemini 额度状态">${renderBadge('Gemini', familyState('gemini'))}${renderBadge('Claude+GPT', familyState('thirdParty'))}</span>`;
+}
+
 function getAntigravityRecoveryTimestamp(value) {
     const timestamp = Date.parse(value || '');
     return Number.isFinite(timestamp) ? timestamp : null;
@@ -716,57 +740,6 @@ export function getAntigravityModelAvailabilitySummaries(providerType, instances
     })
         .filter(summary => summary.availableCount < summary.totalCount)
         .sort((left, right) => left.model.localeCompare(right.model));
-}
-
-function getProviderUsageSummary(providerType, instances) {
-    const total = instances.length;
-    const available = instances.filter(instance => (
-        instance?.isHealthy !== false
-        && !instance?.needsRefresh
-        && !instance?.isDisabled
-        && !instance?.error?.includes('not initialized')
-    )).length;
-    const recoveryCandidates = instances
-        .filter(instance => instance?.isHealthy === false || instance?.needsRefresh)
-        .map(instance => ({
-            value: instance.scheduledRecoveryTime || null,
-            timestamp: getAntigravityRecoveryTimestamp(instance.scheduledRecoveryTime)
-        }))
-        .filter(item => item.timestamp !== null)
-        .sort((left, right) => left.timestamp - right.timestamp);
-    const models = providerType === ANTIGRAVITY_PROVIDER_TYPE
-        ? getAntigravityPoolUnavailableModels(providerType, instances)
-        : [];
-    const detailRows = models.map(model => {
-        const recovery = formatAntigravityCompactRecovery(model.scheduledRecoveryTime);
-        return `<div class="usage-provider-summary-tooltip-row"><code title="${escapeHtml(model.model)}">${escapeHtml(model.model)}</code><span>${escapeHtml(recovery)}</span></div>`;
-    });
-    if (detailRows.length === 0) {
-        instances.filter(instance => instance?.isHealthy === false || instance?.needsRefresh).forEach(instance => {
-            const name = instance.name || instance.uuid || '凭据';
-            const recovery = instance.scheduledRecoveryTime
-                ? formatAntigravityCompactRecovery(instance.scheduledRecoveryTime)
-                : '恢复时间未知';
-            detailRows.push(`<div class="usage-provider-summary-tooltip-row"><span title="${escapeHtml(name)}">${escapeHtml(name)}</span><span>${escapeHtml(recovery)}</span></div>`);
-        });
-    }
-    const earliestRecovery = recoveryCandidates[0]?.value || models.find(model => model.scheduledRecoveryTime)?.scheduledRecoveryTime || null;
-    return { total, available, earliestRecovery, detailRows };
-}
-
-function renderProviderUsageSummary(providerType, instances) {
-    // 兼容既有样式契约：模型明细从原 antigravity-pool-alert / antigravity-pool-alert-tooltip
-    // 迁移到可聚焦的 Provider 摘要 tooltip；不再渲染独立常驻冷却告警。
-    const summary = getProviderUsageSummary(providerType, instances);
-    const isDegraded = summary.available < summary.total;
-    const recovery = isDegraded && summary.earliestRecovery
-        ? ` · 最快恢复 ${formatAntigravityCompactRecovery(summary.earliestRecovery)}`
-        : '';
-    const label = `${summary.available}/${summary.total} 凭据可用${recovery}`;
-    const tooltip = summary.detailRows.length > 0
-        ? `<span class="usage-provider-summary-tooltip" role="tooltip"><strong>受限详情</strong>${summary.detailRows.join('')}</span>`
-        : '';
-    return `<span class="usage-provider-summary${isDegraded ? ' is-degraded' : ''}${summary.available === 0 ? ' is-empty' : ''}" tabindex="0" role="status" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"><i class="fas ${summary.available === 0 ? 'fa-triangle-exclamation' : isDegraded ? 'fa-clock' : 'fa-circle-check'}" aria-hidden="true"></i><span>${escapeHtml(label)}</span>${tooltip}</span>`;
 }
 
 function formatAntigravityCompactRecovery(value) {
@@ -968,10 +941,10 @@ function updateTimeInfo(data) {
 function renderUsageData(data, container) {
     if (!container) return;
     container.innerHTML = '';
-    container.classList.add('usage-provider-summary-grid');
+    container.classList.add('usage-provider-groups');
 
     if (!data?.providers || Object.keys(data.providers).length === 0) {
-        container.classList.remove('usage-provider-summary-grid');
+        container.classList.remove('usage-provider-groups');
         container.innerHTML = `<div class="usage-empty"><p>${t('usage.noData')}</p></div>`;
         return;
     }
@@ -994,7 +967,7 @@ function renderUsageData(data, container) {
  */
 function createProviderGroup(providerType, providerData) {
     const group = document.createElement('div');
-    group.className = 'usage-provider-group collapsed';
+    group.className = 'usage-provider-group is-full-width collapsed';
     group.setAttribute('data-provider', providerType);
 
     const instances = providerData.instances || [];
@@ -1005,7 +978,7 @@ function createProviderGroup(providerType, providerData) {
     const refreshTimeText = hasValidRefreshTime
         ? t('usage.group.lastUpdated', { time: refreshedDate.toLocaleString(getCurrentLanguage()) })
         : t('usage.group.neverUpdated');
-    const providerUsageSummary = renderProviderUsageSummary(providerType, instances);
+    const providerQuotaStack = renderAntigravityProviderQuotaStack(instances, providerType);
     group.innerHTML = `
         <div class="usage-group-header">
             <div class="usage-group-title">
@@ -1014,7 +987,7 @@ function createProviderGroup(providerType, providerData) {
                 <span class="provider-name">${getProviderDisplayName(providerType)}</span>
                 <span class="instance-count">${t('usage.group.instances', { count: instances.length })}</span>
                 <span class="success-count ${successCount === instances.length ? 'all-success' : ''}">${t('usage.group.success', { count: successCount, total: instances.length })}</span>
-                ${providerUsageSummary}
+                ${providerQuotaStack}
             </div>
             <div class="usage-group-actions">
                 <span class="provider-last-update" title="${escapeHtml(refreshTimeText)}">${escapeHtml(refreshTimeText)}</span>
@@ -1026,8 +999,6 @@ function createProviderGroup(providerType, providerData) {
     `;
     
     group.querySelector('.usage-group-title').onclick = () => group.classList.toggle('collapsed');
-    group.querySelector('.usage-provider-summary')?.addEventListener('click', event => event.stopPropagation());
-
     const refreshButton = group.querySelector('.btn-refresh-provider');
     const providerName = getProviderDisplayName(providerType);
     const refreshLabel = t('usage.group.refreshAria', { name: providerName });

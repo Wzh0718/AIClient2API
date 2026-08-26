@@ -1433,7 +1433,7 @@ export class ProviderPoolManager {
                 // 只有在真正执行了刷新操作时，才更新 lastRefreshTime
                 // 这可以防止 heartbeat 的 no-op 刷新误更新时间，导致后续真正的刷新被 markProviderNeedRefresh 拦截（30秒保护）
                 if (isAntigravityProviderType(providerType)) {
-                    const postcondition = this._validateAntigravityRefreshPostcondition(config);
+                    const postcondition = this._validateAntigravityRefreshPostcondition(config, serviceAdapter);
                     if (!postcondition.ok) {
                         const postconditionError = new Error(`REFRESH_POSTCONDITION_FAILED: ${postcondition.reason}`);
                         postconditionError.code = 'REFRESH_POSTCONDITION_FAILED';
@@ -1508,7 +1508,7 @@ export class ProviderPoolManager {
         }
     }
 
-    _validateAntigravityRefreshPostcondition(providerConfig) {
+    _validateAntigravityRefreshPostcondition(providerConfig, serviceAdapter = null) {
         const filePath = providerConfig?.ANTIGRAVITY_OAUTH_CREDS_FILE_PATH;
         if (!filePath) return { ok: false, reason: 'credential_path_missing' };
 
@@ -1520,6 +1520,17 @@ export class ProviderPoolManager {
             if (!credentials.access_token) return { ok: false, reason: 'access_token_missing' };
             if (!Number.isFinite(expiryTime)) return { ok: false, reason: 'expiry_date_invalid' };
             if (expiryTime <= Date.now() + safetyWindowMs) return { ok: false, reason: 'expiry_date_not_in_future_window' };
+            const adapterCredentials = serviceAdapter?.antigravityApiService?.authClient?.credentials
+                || serviceAdapter?.authClient?.credentials
+                || serviceAdapter?.credentials;
+            if (!adapterCredentials?.access_token) return { ok: false, reason: 'adapter_access_token_missing' };
+            if (String(adapterCredentials.access_token) !== String(credentials.access_token)) {
+                return { ok: false, reason: 'adapter_access_token_mismatch' };
+            }
+            const adapterExpiryTime = Number(adapterCredentials.expiry_date);
+            if (!Number.isFinite(adapterExpiryTime) || adapterExpiryTime !== expiryTime) {
+                return { ok: false, reason: 'adapter_expiry_date_mismatch' };
+            }
             return { ok: true, expiryTime };
         } catch (error) {
             return { ok: false, reason: error?.code === 'ENOENT' ? 'credential_file_missing' : 'credential_file_invalid' };

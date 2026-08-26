@@ -30,4 +30,6 @@ The script verifies the archive with `gzip -t` and deletes it on corruption, so 
 BUILD_HTTP_PROXY=http://host.docker.internal:7890 ./scripts/ops/build-image.sh   # proxy for Go sidecar downloads (Windows Docker Desktop)
 ```
 
+`BUILD_HTTP_PROXY` is also forwarded to npm in the Node build stage (`HTTP_PROXY`/`HTTPS_PROXY` plus npm's explicit proxy settings), so the same command covers both Go and npm dependency downloads. A proxy can improve reliability and sometimes throughput for large dependency downloads; a small registry ping may show little difference. Keep the default registry unless an approved mirror is available, and never place proxy credentials in the repository or build logs.
+
 Labels `yyn.base_commit`, `yyn.build_source=git-archive`, and `yyn.build_date` are stamped for container source verification. Rollout still follows the AGENTS.md remote ops protocol: record current image/health, rename the old container as a timestamped backup, start the new one, verify Docker health and `/health`.

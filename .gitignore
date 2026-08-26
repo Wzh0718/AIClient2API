@@ -29,5 +29,12 @@ src/plugins-user/
 .plans/archive/
 configs/request-audit-analysis/
 configs/retry-audit/
+configs/request-audit/
+configs/usage-events/
+configs/usage-display-cache.json
+configs/codex-weekly-estimate-snapshots.json
+.tmp-local-network-candidate-20260821/
+_research/
+docs/yyn-cpa-http-vs-ws-codex-trial.md
 outputs/
 

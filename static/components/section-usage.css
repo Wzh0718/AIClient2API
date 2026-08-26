@@ -299,98 +299,38 @@
     color: var(--success-color);
 }
 
-.usage-provider-summary-grid {
+.usage-provider-groups {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
     gap: 1rem;
     align-items: start;
 }
 
-@media (max-width: 900px) {
-    .usage-provider-summary-grid {
-        grid-template-columns: 1fr;
-    }
+.usage-provider-group.is-full-width {
+    width: 100%;
+    min-width: 0;
 }
 
-.usage-provider-summary {
-    position: relative;
+.antigravity-quota-stack {
     display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    min-width: 0;
-    max-width: min(24rem, 38vw);
-    padding: 0.25rem 0.55rem;
-    border: 1px solid var(--border-color);
-    border-radius: 9999px;
-    background: var(--bg-primary);
-    color: var(--success-color);
-    font-size: 0.75rem;
-    font-weight: 600;
-    line-height: 1.25;
-    cursor: help;
-    outline: none;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+    min-width: 7.5rem;
+    margin-left: 0.5rem;
 }
-.usage-provider-summary.is-degraded { color: var(--warning-color); }
-.usage-provider-summary.is-empty {
-    color: var(--danger-color);
-    border-color: color-mix(in srgb, var(--danger-color) 28%, var(--border-color));
-    background: color-mix(in srgb, var(--danger-bg) 55%, var(--bg-primary));
-}
-.usage-provider-summary > span:not(.usage-provider-summary-tooltip) {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.usage-provider-summary:focus-visible {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 20%, transparent);
-}
-.usage-provider-summary-tooltip {
-    position: absolute;
-    top: calc(100% + 0.55rem);
-    left: 0;
-    z-index: 20;
-    display: none;
-    width: min(25rem, calc(100vw - 3rem));
-    padding: 0.65rem;
-    border: 1px solid var(--border-color);
-    border-radius: 0.5rem;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    box-shadow: var(--shadow-lg);
-    font-size: 0.75rem;
-    font-weight: 400;
-    cursor: default;
-}
-.usage-provider-summary:hover .usage-provider-summary-tooltip,
-.usage-provider-summary:focus .usage-provider-summary-tooltip,
-.usage-provider-summary:focus-within .usage-provider-summary-tooltip {
-    display: grid;
-    gap: 0.45rem;
-}
-.usage-provider-summary-tooltip strong { font-size: 0.75rem; }
-.usage-provider-summary-tooltip-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, auto);
-    gap: 0.75rem;
-    align-items: center;
-    min-width: 0;
-    padding-top: 0.4rem;
-    border-top: 1px solid var(--border-color);
-}
-.usage-provider-summary-tooltip-row code,
-.usage-provider-summary-tooltip-row span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.usage-provider-summary-tooltip-row code { color: var(--text-primary); }
 
-@media (max-width: 1100px) {
-    .usage-provider-summary { max-width: min(20rem, 34vw); }
+.antigravity-quota-stack .badge {
+    width: 100%;
+    justify-content: flex-start;
+    background: var(--warning-bg);
+    color: var(--warning-text);
+    border-color: color-mix(in srgb, var(--warning-color) 28%, var(--border-color));
 }
-@media (max-width: 768px) {
-    .usage-provider-summary { max-width: calc(100vw - 8rem); }
-    .usage-provider-summary-tooltip { left: auto; right: 0; }
+
+/* Provider header remains a single row while the Gemini quota badges stack vertically. */
+.usage-provider-group.is-full-width .usage-group-header {
+    min-width: 0;
 }
 
 .usage-group-content {

@@ -50,7 +50,7 @@ COPY package*.json ./
 # 构建时代理（如果提供了的话）。better-sqlite3 在 Alpine 上可能需要本地编译，
 # 安装失败时不能跳过 lifecycle scripts，否则镜像会构建成功但 control worker 无法启动。
 RUN apk add --no-cache --virtual .native-build-deps python3 make g++ \
-    && npm install \
+    && npm_config_proxy="$HTTP_PROXY" npm_config_https_proxy="$HTTPS_PROXY" npm install \
     && node -e "require('better-sqlite3')(':memory:').close(); console.log('better-sqlite3 runtime ok')" \
     && node -e "import('sharp').then(() => console.log('sharp runtime ok'))" \
     && apk del .native-build-deps

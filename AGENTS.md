@@ -34,6 +34,9 @@
 - If `goproxy.cn` is also unavailable, retry through the host proxy. Do not pass `127.0.0.1:7890` as `HTTP_PROXY`/`HTTPS_PROXY`; inside the build container that address points to the container itself.
 - If the Windows host proxy is listening on local port `7890`, pass it as `http://host.docker.internal:7890`, for example:
   `docker build --build-arg HTTP_PROXY=http://host.docker.internal:7890 --build-arg HTTPS_PROXY=http://host.docker.internal:7890 -t <tag> .`
+- The Node stage forwards those build arguments to npm explicitly. For local Docker Desktop builds, use the same proxy for npm dependency downloads when direct registry access is slow or unreliable:
+  `BUILD_HTTP_PROXY=http://host.docker.internal:7890 ./scripts/ops/build-image.sh`
+- A proxy may improve reliability or large-download throughput, but do not assume it is always faster. Keep the registry unchanged unless a project-approved mirror is available; never commit proxy credentials or authenticated proxy URLs.
 - On remote Linux servers, especially overseas hosts such as `47.77.196.94`, use direct build by default and verify connectivity from the host/container before adding any proxy or alternate `GOPROXY`. Do not reuse Windows-only `127.0.0.1:7890` or `host.docker.internal:7890` settings on remote servers.
 
 ## Remote Ops Notes
