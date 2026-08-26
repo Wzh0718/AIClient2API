@@ -574,6 +574,66 @@
             background: rgba(14, 165, 233, 0.10);
             border-color: rgba(14, 165, 233, 0.28);
         }
+        .key-concurrency-summary {
+            margin-left: 6px;
+            color: var(--text-secondary);
+            background: var(--bg-tertiary);
+            border-color: var(--border-color);
+        }
+        .key-concurrency-summary.is-enforce {
+            color: var(--warning-color);
+            border-color: color-mix(in srgb, var(--warning-color) 35%, var(--border-color));
+        }
+        .pool-concurrency-section {
+            margin: 18px 0 20px;
+            padding: 16px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            background: var(--bg-secondary);
+        }
+        .pool-concurrency-heading {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+        .pool-concurrency-title {
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: 700;
+        }
+        .pool-concurrency-title i { color: var(--info-color); margin-right: 6px; }
+        .pool-concurrency-help,
+        .pool-concurrency-field-help {
+            color: var(--text-tertiary);
+            font-size: 11px;
+            line-height: 1.5;
+        }
+        .pool-concurrency-help { margin-top: 4px; }
+        .pool-concurrency-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+        .pool-concurrency-grid .form-group { margin-bottom: 0; }
+        .pool-concurrency-grid input.sort-select { width: 100%; box-sizing: border-box; }
+        .pool-concurrency-input-with-suffix { display: flex; align-items: center; gap: 8px; }
+        .pool-concurrency-input-with-suffix input { flex: 1; min-width: 0; }
+        .pool-concurrency-input-with-suffix span { color: var(--text-secondary); font-size: 13px; }
+        .pool-concurrency-mode-note {
+            margin-top: 12px;
+            padding: 8px 10px;
+            border-radius: var(--radius-md);
+            color: var(--info-color);
+            background: rgba(14, 165, 233, 0.08);
+            font-size: 12px;
+            line-height: 1.5;
+        }
+        .pool-concurrency-mode-note.is-enforce {
+            color: var(--warning-color);
+            background: rgba(245, 158, 11, 0.10);
+        }
         .btn-copy {
             background: var(--bg-secondary);
             border: 1px solid var(--border-color);
@@ -1073,6 +1133,7 @@
                 padding-top: 12px;
                 border-top: 1px solid var(--border-color);
             }
+            .pool-concurrency-grid { grid-template-columns: 1fr; }
         }
 
         @media (max-width: 480px) {
@@ -1543,6 +1604,42 @@
                 <div class="form-group" id="routingCredentialField" hidden>
                     <label for="routingFixedCredential">固定凭据</label>
                     <select id="routingFixedCredential" class="sort-select" style="width:100%"></select>
+                </div>
+                <div class="pool-concurrency-section" id="poolConcurrencySection" hidden>
+                    <div class="pool-concurrency-heading">
+                        <div>
+                            <div class="pool-concurrency-title"><i class="fas fa-gauge-high" aria-hidden="true"></i> Pool Key 限流</div>
+                            <div class="pool-concurrency-help">仅对全池加权模式生效；Shadow 只观测，Enforce 才会排队和限流。</div>
+                        </div>
+                        <span class="key-routing-summary is-pool">pool</span>
+                    </div>
+                    <div class="pool-concurrency-grid">
+                        <div class="form-group">
+                            <label for="concurrencyMode">并发模式</label>
+                            <select id="concurrencyMode" class="sort-select" style="width:100%" onchange="updateConcurrencyFields()">
+                                <option value="shadow">Shadow 观测</option>
+                                <option value="enforce">Enforce 生效</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="concurrencyLimit">Key 并发上限</label>
+                            <input id="concurrencyLimit" class="sort-select" type="number" min="0" step="1" inputmode="numeric" placeholder="0 = 不限制">
+                            <small class="pool-concurrency-field-help">0 表示不限制</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="queueLimit">排队上限</label>
+                            <input id="queueLimit" class="sort-select" type="number" min="0" step="1" inputmode="numeric" placeholder="0 = 不排队">
+                            <small class="pool-concurrency-field-help">0 表示不排队</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="queueTimeoutSeconds">最大排队等待</label>
+                            <div class="pool-concurrency-input-with-suffix">
+                                <input id="queueTimeoutSeconds" class="sort-select" type="number" min="1" step="1" inputmode="numeric">
+                                <span>秒</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="pool-concurrency-mode-note" id="concurrencyModeNote" role="status"></div>
                 </div>
                 <button id="saveRoutingButton" type="button" class="btn btn-primary btn-block" onclick="updateRouting()" aria-busy="false">
                     <i class="fas fa-save"></i> <span id="saveRoutingButtonLabel">保存路由</span>
@@ -3147,6 +3244,22 @@
             return `<span class="key-routing-summary is-auto" title="${escapeHtml(summary)}" aria-label="${escapeHtml(summary)}">${escapeHtml(compactLabel)}${lockIcon}</span>`;
         }
 
+        function renderKeyConcurrencySummary(key) {
+            if (key?.routingMode !== 'pool') return '';
+            const mode = key?.concurrencyMode === 'enforce' ? 'Enforce' : 'Shadow';
+            const limit = Number(key?.concurrencyLimit || 0);
+            const configuredQueueLimit = Number(key.queueLimit || 0);
+            const queue = configuredQueueLimit;
+            const suffix = mode === 'Enforce'
+                ? ` · ${limit > 0 ? limit : '不限'}${queue > 0 ? `/${queue}` : ''}`
+                : '';
+            const title = mode === 'Enforce'
+                ? `Pool Key 限流：Enforce；并发上限 ${limit > 0 ? limit : '不限'}；排队上限 ${queue > 0 ? queue : '不排队'}`
+                : `Pool Key 限流：Shadow 观测；并发上限 ${limit > 0 ? limit : '不限'}；排队上限 ${queue > 0 ? queue : '不排队'}`;
+            const modeLabel = mode === 'Enforce' ? 'Pool · Enforce' : 'Pool · Shadow';
+            return `<span class="key-routing-summary key-concurrency-summary${mode === 'Enforce' ? ' is-enforce' : ''}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${modeLabel}${escapeHtml(suffix)}</span>`;
+        }
+
         function renderKeys(keys) {
             const container = document.getElementById('keysList');
             if (allKeys.length === 0) {
@@ -3189,7 +3302,7 @@
 
                 return `<div class="key-card ${key.enabled ? '' : 'disabled'}">
                     <div class="key-info">
-                        <div class="key-name"><span class="key-name-text">${escapeHtml(key.name)}</span><button class="btn-copy" style="padding: 2px 6px;" onclick="openEditName('${key.id}', '${escapeHtml(key.name).replace(/'/g, "\\'")}')" title="修改名称"><i class="fas fa-edit"></i></button>${renderKeyRoutingSummary(key)}</div>
+                        <div class="key-name"><span class="key-name-text">${escapeHtml(key.name)}</span><button class="btn-copy" style="padding: 2px 6px;" onclick="openEditName('${key.id}', '${escapeHtml(key.name).replace(/'/g, "\\'")}')" title="修改名称"><i class="fas fa-edit"></i></button>${renderKeyRoutingSummary(key)}${renderKeyConcurrencySummary(key)}</div>
                         <div class="key-id">${key.maskedKey} <button class="btn-copy" onclick="copyToClipboard('${key.id}')" title="复制完整 Key"><i class="fas fa-copy"></i></button></div>
                         ${providerBadges ? `<div class="key-dist-mini">${providerBadges}</div>` : ''}
                         ${dailyUsage}
@@ -3511,6 +3624,45 @@
             const mode = document.getElementById('routingMode').value;
             document.getElementById('routingGroupField').hidden = mode !== 'auto';
             document.getElementById('routingCredentialField').hidden = mode !== 'fixed';
+            const concurrencySection = document.getElementById('poolConcurrencySection');
+            if (concurrencySection) {
+                concurrencySection.hidden = mode !== 'pool';
+                if (mode !== 'pool' && concurrencySection.contains(document.activeElement)) document.activeElement.blur();
+            }
+            updateConcurrencyFields();
+        }
+
+        function updateConcurrencyFields() {
+            const mode = document.getElementById('concurrencyMode')?.value || 'shadow';
+            const note = document.getElementById('concurrencyModeNote');
+            if (!note) return;
+            note.classList.toggle('is-enforce', mode === 'enforce');
+            note.textContent = mode === 'enforce'
+                ? '达到并发上限后进入短队列；队列满或超过最大等待时间才返回 429。'
+                : 'Shadow 只记录理论并发、排队长度和等待时间，不会拦截请求。';
+        }
+
+        function readPoolConcurrencyForm() {
+            const readInteger = (id, label, min = 0) => {
+                const value = Number(document.getElementById(id)?.value);
+                if (!Number.isInteger(value) || value < min) {
+                    showToast(`${label}必须是${min === 0 ? '非负' : '正'}整数`, 'error');
+                    return null;
+                }
+                return value;
+            };
+            const concurrencyLimit = readInteger('concurrencyLimit', '并发上限');
+            if (concurrencyLimit === null) return null;
+            const queueLimit = readInteger('queueLimit', '排队上限');
+            if (queueLimit === null) return null;
+            const queueTimeoutSeconds = readInteger('queueTimeoutSeconds', '最大排队等待', 1);
+            if (queueTimeoutSeconds === null) return null;
+            return {
+                concurrencyLimit,
+                queueLimit,
+                queueTimeoutMs: queueTimeoutSeconds * 1000,
+                concurrencyMode: document.getElementById('concurrencyMode')?.value === 'enforce' ? 'enforce' : 'shadow'
+            };
         }
 
         async function openEditRouting(keyId) {
@@ -3520,6 +3672,10 @@
             const currentFixedCredentialRef = currentKey?.fixedCredential?.credentialRef || '';
             document.getElementById('editRoutingKeyId').value = keyId;
             document.getElementById('routingMode').value = currentMode === 'fixed' || currentMode === 'auto' ? currentMode : 'pool';
+            document.getElementById('concurrencyMode').value = currentKey?.concurrencyMode === 'enforce' ? 'enforce' : 'shadow';
+            document.getElementById('concurrencyLimit').value = Number(currentKey?.concurrencyLimit || 0);
+            document.getElementById('queueLimit').value = Number(currentKey?.queueLimit || 0);
+            document.getElementById('queueTimeoutSeconds').value = Math.max(1, Math.round(Number(currentKey?.queueTimeoutMs || 300000) / 1000));
             try {
                 const result = await apiRequest(`${API_BASE}/credential-groups`);
                 if (!result?.success) {
@@ -3563,6 +3719,8 @@
                 if (!credentialRef) { showToast('请选择固定凭据', 'error'); return; }
                 body.fixedCredential = { providerType: 'openai-codex-oauth', credentialRef };
             }
+            const concurrency = routingMode === 'pool' ? readPoolConcurrencyForm() : null;
+            if (routingMode === 'pool' && !concurrency) return;
             routingSaveInFlight = true;
             setRoutingSaveState(true);
             try {
@@ -3571,8 +3729,20 @@
                     body: JSON.stringify(body)
                 });
                 if (result && result.success) {
+                    let finalResult = result;
+                    if (concurrency) {
+                        finalResult = await apiRequest(`${API_BASE}/keys/${encodeURIComponent(keyId)}/concurrency`, {
+                            method: 'PUT',
+                            body: JSON.stringify(concurrency)
+                        });
+                        if (!finalResult?.success) {
+                            showToast(finalResult?.error?.message || '路由已更新，但并发配置保存失败', 'warning');
+                            await loadData();
+                            return;
+                        }
+                    }
                     closeModal('editRoutingModal');
-                    handleManagementMutationResult(result, '凭据路由已更新');
+                    handleManagementMutationResult(finalResult, concurrency ? '凭据路由与并发配置已更新' : '凭据路由已更新');
                 } else {
                     showToast(result?.error?.message || '操作失败', 'error');
                 }

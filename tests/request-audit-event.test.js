@@ -261,7 +261,10 @@ describe('request audit event', () => {
       spilloverReason: 'PRIMARY_GROUP_UNAVAILABLE',
       assignmentMissing: false,
       affinitySource: 'session_id',
-      hotShardApplied: true
+      hotShardApplied: true,
+      keyQueueWaitMs: 0,
+      keyQueueOutcome: null,
+      keyCapacityExhausted: false
     });
     expect(event.account.providerUuidHash).toMatch(/^sha256:[a-f0-9]{16}$/);
     const serialized = JSON.stringify(event);

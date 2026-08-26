@@ -23,6 +23,7 @@ import {
 } from '../utils/codex-plan.js';
 import { normalizeCodexRateLimitWindows } from '../utils/codex-rate-limit.js';
 import requestContext from '../utils/context.js';
+import { SmoothWeightedRoundRobin } from './smooth-weighted-round-robin.js';
 import { performance } from 'node:perf_hooks';
 import { createProviderStateEvent, applyProviderStateEvent } from '../runtime/provider-state-event.js';
 import { matchesModelFamily } from './openai/codex-model-routing.js';
@@ -591,6 +592,7 @@ export class ProviderPoolManager {
         this._isSelecting = {}; // 同步标志位锁
         this._codexStickyHotStats = new Map();
         this._providerSelectionLoadStats = new Map();
+        this._poolKeySchedulers = new Map();
         this._geminiElasticQueue = {
             waiting: 0,
             queuedBytes: 0,
@@ -2291,6 +2293,12 @@ export class ProviderPoolManager {
     releaseSlot(providerType, uuid) {
         if (!providerType || !uuid) return;
 
+        const keyLease = requestContext.get('potluckKeyConcurrencyLease');
+        if (keyLease) {
+            requestContext.set('potluckKeyConcurrencyLease', null);
+            Promise.resolve(keyLease.release()).catch(error => this._log('warn', `[Potluck Key Concurrency] release failed: ${error.message}`));
+        }
+
         if (this.coordination) {
             const leases = requestContext.get('providerLeases');
             const key = `${providerType}:${uuid}`;
@@ -2548,6 +2556,20 @@ export class ProviderPoolManager {
                 providerType,
                 requestedModel
             );
+        } else if (!selected && options.routingMode === 'pool' && options.poolKeyId) {
+            const schedulerKey = `${options.poolKeyId}:${providerType}:${requestedModel || ''}`;
+            let scheduler = this._poolKeySchedulers.get(schedulerKey);
+            if (!scheduler) {
+                scheduler = new SmoothWeightedRoundRobin();
+                this._poolKeySchedulers.set(schedulerKey, scheduler);
+            }
+            for (const provider of availableAndHealthyProviders) {
+                scheduler.setWeight(provider.uuid || provider.config?.uuid, getProviderWeight(provider.config));
+            }
+            scheduler.clearMissing(availableAndHealthyProviders.map(provider => provider.uuid || provider.config?.uuid));
+            const selectedUuid = scheduler.select(availableAndHealthyProviders.map(provider => provider.uuid || provider.config?.uuid));
+            selected = availableAndHealthyProviders.find(provider => (provider.uuid || provider.config?.uuid) === selectedUuid) || null;
+            this._log('debug', `Selected provider for pool key ${options.poolKeyId} by smooth weighted round robin: ${this._getDisplayName(selected?.config || {})}`);
         } else if (!selected && options.stickyProviderKey && isCodexProviderType(providerType)) {
             selected = await this._selectCodexHotShardProvider(
                 availableAndHealthyProviders,

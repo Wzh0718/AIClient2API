@@ -14,6 +14,7 @@ import {
     toggleKey,
     updateKeyName,
     updateKeyRouting,
+    updateKeyConcurrency,
     regenerateKey,
     getStats,
     getAccountUsageSummary,
@@ -1323,6 +1324,21 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 sendManagementMutationResponse(res, {
                     result: keyData,
                     message: 'Key 路由更新成功',
+                    data: keyData
+                });
+                return true;
+            }
+
+            if (method === 'PUT' && subPath === '/concurrency') {
+                const body = await getRequestBody(req, { maxBytes: 1024 * 1024 });
+                const keyData = await updateKeyConcurrency(keyId, body || {});
+                if (!keyData) {
+                    sendJson(res, 404, { success: false, error: { message: '未找到 Key' } });
+                    return true;
+                }
+                sendManagementMutationResponse(res, {
+                    result: keyData,
+                    message: 'Key 并发配置更新成功',
                     data: keyData
                 });
                 return true;

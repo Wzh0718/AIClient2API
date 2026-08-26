@@ -32,8 +32,8 @@ function createCodexPoolManager() {
 function createWeightedCodexPoolManager() {
     return new ProviderPoolManager({
         'openai-codex-oauth': [
-            { uuid: 'codex-low', customName: 'Codex Low', providerWeight: 1, lastKnownCodexPlan: 'pro', supportedModels: ['gpt-5.5'] },
-            { uuid: 'codex-high', customName: 'Codex High', providerWeight: 3, lastKnownCodexPlan: 'pro', supportedModels: ['gpt-5.5'] }
+            { uuid: 'codex-low', customName: 'Codex Low', providerWeight: 1, quotaAvailable: true, lastKnownCodexPlan: 'pro', supportedModels: ['gpt-5.5'] },
+            { uuid: 'codex-high', customName: 'Codex High', providerWeight: 3, quotaAvailable: true, lastKnownCodexPlan: 'pro', supportedModels: ['gpt-5.5'] }
         ]
     }, {
         logLevel: 'error',
@@ -173,6 +173,23 @@ describe('provider pool sticky affinity', () => {
         clearTimeout(manager.saveTimer);
         expect(retrySelection.uuid).not.toBe(first.uuid);
         expect(retrySelection.isHealthy).toBe(true);
+    });
+
+    test('pool-key routing uses smooth weighted scheduling before sticky hot-shard affinity', async () => {
+        const manager = createWeightedCodexPoolManager();
+        const selected = [];
+        for (let i = 0; i < 6; i++) {
+            const result = await manager.selectProvider('openai-codex-oauth', 'gpt-5.5', {
+                routingMode: 'pool',
+                poolKeyId: 'batch-key',
+                stickyProviderKey: 'legacy-affinity',
+                skipUsageCount: true
+            });
+            selected.push(result.uuid);
+        }
+        clearTimeout(manager.saveTimer);
+        expect(selected.filter(uuid => uuid === 'codex-high')).toHaveLength(4);
+        expect(selected.filter(uuid => uuid === 'codex-low')).toHaveLength(2);
     });
 
     test('honors an explicit preferred provider for a sticky session', async () => {

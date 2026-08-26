@@ -202,6 +202,9 @@ export function buildRequestAuditEvent(context = {}) {
             assignmentMissing: context._codexRouting?.assignmentMissing === true,
             affinitySource: context._codexRouting?.affinitySource || null,
             hotShardApplied: context._codexRouting?.hotShardApplied === true,
+            keyQueueWaitMs: toNumber(context._codexRouting?.keyQueueWaitMs),
+            keyQueueOutcome: context._codexRouting?.keyQueueOutcome || null,
+            keyCapacityExhausted: context._codexRouting?.keyCapacityExhausted === true,
             ...(context._temporaryKeyModelRouteResult ? {
                 temporaryModelRoute: {
                     id: context._temporaryKeyModelRouteResult.id || null,

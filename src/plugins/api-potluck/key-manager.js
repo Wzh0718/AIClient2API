@@ -134,6 +134,10 @@ function keyConfigSnapshot(keyData) {
         name: typeof keyData.name === 'string' ? keyData.name : '',
         enabled: keyData.enabled !== false,
         dailyLimit: Math.max(0, toNumber(keyData.dailyLimit)),
+        concurrencyLimit: Math.max(0, toNumber(keyData.concurrencyLimit)),
+        queueLimit: Math.max(0, toNumber(keyData.queueLimit)),
+        queueTimeoutMs: Math.max(1, toNumber(keyData.queueTimeoutMs) || 300000),
+        concurrencyMode: keyData.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
         routingMode: keyData.routingMode || 'pool',
         primaryGroupId: keyData.routingMode === 'auto' ? (keyData.primaryGroupId || null) : null,
         fixedCredential: keyData.routingMode === 'fixed' && keyData.fixedCredential ? { ...keyData.fixedCredential } : null,
@@ -190,6 +194,10 @@ function normalizeKeyConfigRecord(record) {
             name: record.name,
             enabled: record.enabled,
             dailyLimit,
+            concurrencyLimit: Math.max(0, toNumber(record.concurrencyLimit)),
+            queueLimit: Math.max(0, toNumber(record.queueLimit)),
+            queueTimeoutMs: Math.max(1, toNumber(record.queueTimeoutMs) || 300000),
+            concurrencyMode: record.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
             ...normalizeKeyRouting(record, { strict: true })
         };
     } catch {
@@ -240,6 +248,10 @@ export function applyKeyStoreSyncEvent(event = {}) {
                 name: record.name,
                 enabled: record.enabled,
                 dailyLimit: record.dailyLimit,
+                concurrencyLimit: record.concurrencyLimit,
+                queueLimit: record.queueLimit,
+                queueTimeoutMs: record.queueTimeoutMs,
+                concurrencyMode: record.concurrencyMode,
                 routingMode: record.routingMode,
                 primaryGroupId: record.primaryGroupId,
                 fixedCredential: record.fixedCredential,
@@ -250,6 +262,10 @@ export function applyKeyStoreSyncEvent(event = {}) {
                 name: record.name,
                 createdAt: new Date().toISOString(),
                 dailyLimit: record.dailyLimit,
+                concurrencyLimit: record.concurrencyLimit,
+                queueLimit: record.queueLimit,
+                queueTimeoutMs: record.queueTimeoutMs,
+                concurrencyMode: record.concurrencyMode,
                 todayUsage: 0,
                 totalUsage: 0,
                 lastResetDate: getTodayDateString(),
@@ -515,6 +531,10 @@ function normalizeKeyData(keyData = {}) {
     const normalized = {
         ...keyData,
         ...routing,
+        concurrencyLimit: Math.max(0, toNumber(keyData.concurrencyLimit)),
+        queueLimit: Math.max(0, toNumber(keyData.queueLimit)),
+        queueTimeoutMs: Math.max(1, toNumber(keyData.queueTimeoutMs) || 300000),
+        concurrencyMode: keyData.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
         todayUsage: toNumber(keyData.todayUsage),
         totalUsage: toNumber(keyData.totalUsage),
         todayPromptTokens: toNumber(keyData.todayPromptTokens),
@@ -1883,6 +1903,10 @@ export async function createKey(name = '', dailyLimit = null) {
         lastResetDate: today,
         lastUsedAt: null,
         enabled: true,
+        concurrencyLimit: 0,
+        queueLimit: 0,
+        queueTimeoutMs: 300000,
+        concurrencyMode: 'shadow',
         routingMode: 'pool',
         primaryGroupId: null,
         fixedCredential: null,
@@ -2201,6 +2225,31 @@ export async function applyKeyRoutingAssignments(assignments) {
     const targetVersion = markDirty();
     const result = await buildManagementMutationResult(targetVersion, summary);
     publishPersistedKeyConfig(result, 'key-routing-assignments-updated', targetVersion);
+    return result;
+}
+
+export async function updateKeyConcurrency(keyId, options = {}) {
+    ensureLoaded();
+    const keyData = keyStore.keys[keyId];
+    if (!keyData) return null;
+    const concurrencyLimit = Number(options.concurrencyLimit);
+    const queueLimit = Number(options.queueLimit);
+    const queueTimeoutMs = Number(options.queueTimeoutMs);
+    if (!Number.isInteger(concurrencyLimit) || concurrencyLimit < 0 ||
+        !Number.isInteger(queueLimit) || queueLimit < 0 ||
+        !Number.isInteger(queueTimeoutMs) || queueTimeoutMs < 1 ||
+        !['shadow', 'enforce'].includes(options.concurrencyMode || 'shadow')) {
+        throw createInvalidKeyRoutingError('并发配置无效');
+    }
+    Object.assign(keyData, {
+        concurrencyLimit,
+        queueLimit,
+        queueTimeoutMs,
+        concurrencyMode: options.concurrencyMode || 'shadow'
+    });
+    const targetVersion = markDirty();
+    const result = await buildManagementMutationResult(targetVersion, keyData);
+    publishPersistedKeyConfig(result, 'key-concurrency-updated', targetVersion);
     return result;
 }
 
@@ -2797,6 +2846,10 @@ export async function validateKey(apiKey) {
         lastResetDate: updated.lastResetDate,
         enabled: updated.enabled,
         routingMode: updated.routingMode,
+        concurrencyLimit: updated.concurrencyLimit || 0,
+        queueLimit: updated.queueLimit || 0,
+        queueTimeoutMs: updated.queueTimeoutMs || 300000,
+        concurrencyMode: updated.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
         primaryGroupId: updated.primaryGroupId,
         fixedCredential: updated.fixedCredential ? { ...updated.fixedCredential } : null,
         manualLock: updated.manualLock === true,

@@ -27,12 +27,18 @@ import { getCodexRoutingConsistencyStatus } from './codex-routing-integrity.js';
 import { resolveCodexEntryModel } from '../providers/openai/codex-model-routing.js';
 import { performance } from 'node:perf_hooks';
 import { runtimeMetrics } from '../runtime/runtime-metrics.js';
+import requestContext from '../utils/context.js';
+import { PotluckKeyConcurrencyLimiter } from '../plugins/api-potluck/key-concurrency-limiter.js';
 
 // 存储 ProviderPoolManager 实例
 let providerPoolManager = null;
+const potluckKeyConcurrencyLimiter = new PotluckKeyConcurrencyLimiter({
+    onEvent: event => logger.info(`[Potluck Key Concurrency] ${event.event} key=${event.keyId} active=${event.active ?? 0} waiting=${event.waiting ?? 0}`)
+});
 
 function isCodexModelFallbackEligibleError(error) {
     if (!error) return false;
+    if (error.code === 'POTLUCK_KEY_CONCURRENCY_LIMIT') return false;
     if (error.status === 401 || error.status === 403 || error.status >= 500 && error.status !== 503) return false;
     return error.status === 429
         || error.code === 429
@@ -149,7 +155,10 @@ const CODEX_ROUTING_DIAGNOSTIC_FIELDS = new Set([
     'spilloverReason',
     'affinitySource',
     'hotShardApplied',
-    'assignmentMissing'
+    'assignmentMissing',
+    'keyQueueWaitMs',
+    'keyQueueOutcome',
+    'keyCapacityExhausted'
 ]);
 
 function updateCodexRoutingDiagnostics(config, patch = {}) {
@@ -197,6 +206,9 @@ function initializeSelectionDiagnostics(selectionDiagnostics = {}) {
         temporaryCooldownSkipped: 0,
         nextTemporaryRecoveryTime: null,
         concurrencyLimitSkipped: 0,
+        keyQueueWaitMs: 0,
+        keyQueueOutcome: null,
+        keyCapacityExhausted: false,
         eligibleCandidateCount: 0,
         capacityExhausted: false,
         filterReasons: {},
@@ -459,13 +471,53 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
             ? `sha256:${crypto.createHash('sha256').update(String(config.potluckKeyData.id)).digest('hex').slice(0, 16)}`
             : 'none';
         logger.info(`[Codex Routing] pool selection key=${keyHash} mode=pool revision=${keyRouting.routingConfigRevision || 0}`);
-        const poolOptions = withStickyProviderAffinity(config, providerType, {
+        const poolKeyId = config.potluckKeyData?.id || null;
+        if (useAcquire && poolKeyId && !requestContext.get('potluckKeyConcurrencyLease')) {
+            const keyData = config.potluckKeyData || {};
+            const keyQueueStartedAt = Date.now();
+            try {
+                const lease = await potluckKeyConcurrencyLimiter.acquire(poolKeyId, {
+                    maxConcurrency: keyData.concurrencyLimit,
+                    queueLimit: keyData.queueLimit,
+                    queueTimeoutMs: keyData.queueTimeoutMs,
+                    mode: keyData.concurrencyMode,
+                    coordination: providerPoolManager?.coordination || null
+                });
+                requestContext.set('potluckKeyConcurrencyLease', lease);
+                requestContext.set('potluckKeyConcurrencyKeyId', poolKeyId);
+                selectionDiagnostics.keyQueueOutcome = lease.shadow ? 'shadow' : 'admitted';
+                selectionDiagnostics.keyCapacityExhausted = lease.capacityExhausted === true;
+                selectionDiagnostics.keyQueueWaitMs = Math.max(0, Date.now() - keyQueueStartedAt);
+            } catch (error) {
+                const reason = error?.details?.reason || 'key_capacity_exhausted';
+                selectionDiagnostics.keyQueueOutcome = reason;
+                selectionDiagnostics.keyQueueWaitMs = Math.max(0, Date.now() - keyQueueStartedAt);
+                selectionDiagnostics.keyCapacityExhausted = true;
+                updateCodexRoutingDiagnostics(config, {
+                    routingMode: 'pool',
+                    keyQueueWaitMs: selectionDiagnostics.keyQueueWaitMs,
+                    keyQueueOutcome: reason,
+                    keyCapacityExhausted: true
+                });
+                throw error;
+            }
+        }
+        const poolOptions = {
             ...options,
             selectionDiagnostics,
             requestedModel,
-            preferredProviderUuid: null
-        });
-        const selectedResult = await selectFromPool(poolOptions);
+            preferredProviderUuid: null,
+            routingMode: 'pool',
+            poolKeyId
+        };
+        let selectedResult;
+        try {
+            selectedResult = await selectFromPool(poolOptions);
+        } catch (error) {
+            await releasePotluckKeyConcurrencyLease();
+            throw error;
+        }
+        if (!selectedResult) await releasePotluckKeyConcurrencyLease();
         const selectedUuid = selectedResult?.config?.uuid || null;
         updateCodexRoutingDiagnostics(config, {
             routingMode: 'pool',
@@ -579,6 +631,19 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
         hotShardApplied: selectionDiagnostics.hotShardApplied === true
     });
     return { handled: true, selectedResult: selected.selectedResult, availabilityError: null };
+}
+
+async function releasePotluckKeyConcurrencyLease() {
+    const lease = requestContext.get('potluckKeyConcurrencyLease');
+    if (!lease) return false;
+    requestContext.set('potluckKeyConcurrencyLease', null);
+    requestContext.set('potluckKeyConcurrencyKeyId', null);
+    try {
+        return await lease.release();
+    } catch (error) {
+        logger.warn(`[Potluck Key Concurrency] release failed: ${error.message}`);
+        return false;
+    }
 }
 
 export function createProviderSelectionError(providerType, model, selectionDiagnostics = {}, options = {}) {
@@ -1633,6 +1698,9 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
     const service = getServiceAdapter(serviceConfig);
     if (config._codexRouting) {
         config._codexRouting.hotShardApplied = selectionDiagnostics.hotShardApplied === true;
+        config._codexRouting.keyQueueWaitMs = Number(selectionDiagnostics.keyQueueWaitMs || 0);
+        config._codexRouting.keyQueueOutcome = selectionDiagnostics.keyQueueOutcome || null;
+        config._codexRouting.keyCapacityExhausted = selectionDiagnostics.keyCapacityExhausted === true;
     }
 
     const fallbackMetadata = isFallback && actualModel !== actualModelName

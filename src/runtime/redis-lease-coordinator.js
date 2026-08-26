@@ -134,6 +134,38 @@ end
 return 1
 `;
 
+const ACQUIRE_POTLUCK_KEY_SCRIPT = `
+local active_key = KEYS[1] .. ':potluck-key:' .. ARGV[1]
+local now_ms = tonumber(ARGV[2])
+local ttl_ms = tonumber(ARGV[3])
+local limit = tonumber(ARGV[4])
+redis.call('ZREMRANGEBYSCORE', active_key, '-inf', now_ms)
+local active = tonumber(redis.call('ZCARD', active_key) or '0')
+if limit <= 0 or active >= limit then
+  return cjson.encode({ acquired = false, active = active })
+end
+local lease_id = ARGV[5]
+redis.call('ZADD', active_key, now_ms + ttl_ms, lease_id)
+redis.call('PEXPIRE', active_key, ttl_ms * 2)
+return cjson.encode({ acquired = true, active = active + 1, leaseId = lease_id })
+`;
+
+const RELEASE_POTLUCK_KEY_SCRIPT = `
+local active_key = KEYS[1] .. ':potluck-key:' .. ARGV[1]
+return redis.call('ZREM', active_key, ARGV[2])
+`;
+
+const RENEW_POTLUCK_KEY_SCRIPT = `
+local active_key = KEYS[1] .. ':potluck-key:' .. ARGV[1]
+local lease_id = ARGV[2]
+local now_ms = tonumber(ARGV[3])
+local ttl_ms = tonumber(ARGV[4])
+if redis.call('ZSCORE', active_key, lease_id) == false then return 0 end
+redis.call('ZADD', active_key, now_ms + ttl_ms, lease_id)
+redis.call('PEXPIRE', active_key, ttl_ms * 2)
+return 1
+`;
+
 const ACQUIRE_GEMINI_QUEUE_SLOT_SCRIPT = `
 local leases_key = KEYS[1] .. ':gemini-queue:leases'
 local expiry_key = KEYS[1] .. ':gemini-queue:expiry'
@@ -435,6 +467,7 @@ export class RedisLeaseCoordinator {
         this.activeLeases = new Map();
         this.activeImageLeases = new Map();
         this.activeGeminiQueueLeases = new Set();
+        this.activePotluckKeyLeases = new Map();
         this.imageCapacityRecoveryRequired = false;
         this.imageCapacityMetrics = {
             acquired: 0,
@@ -805,6 +838,49 @@ export class RedisLeaseCoordinator {
         this.renewTimers.delete(leaseId);
         this.activeLeases.delete(leaseId);
         return Number(await this._eval('release-provider-lease', RELEASE_SCRIPT, [leaseId])) === 1;
+    }
+
+    async acquirePotluckKeyLease(keyId, { maxConcurrency = 0, ttlMs = this.leaseTtlMs } = {}) {
+        const normalizedKey = String(keyId || '').trim();
+        const limit = Math.max(0, Number(maxConcurrency) || 0);
+        if (!normalizedKey || limit <= 0) return { acquired: true, leaseId: null, localOnly: true };
+        const leaseId = randomUUID();
+        const result = await this._eval('acquire-potluck-key-lease', ACQUIRE_POTLUCK_KEY_SCRIPT, [
+            hashAffinityKey(normalizedKey),
+            String(Date.now()),
+            String(Math.max(1000, Number(ttlMs) || this.leaseTtlMs)),
+            String(limit),
+            leaseId
+        ]);
+        const state = typeof result === 'string' ? JSON.parse(result) : result;
+        if (state?.acquired !== true) return { acquired: false, active: Number(state?.active || 0) };
+        const lease = { leaseId, keyHash: hashAffinityKey(normalizedKey), ttlMs: Math.max(1000, Number(ttlMs) || this.leaseTtlMs) };
+        const timer = setInterval(() => this.renewPotluckKeyLease(lease).catch(() => {}), Math.min(20000, Math.max(1000, Math.floor(lease.ttlMs / 3))));
+        timer.unref?.();
+        lease.timer = timer;
+        this.activePotluckKeyLeases.set(leaseId, lease);
+        return { acquired: true, leaseId, active: Number(state?.active || 0), release: () => this.releasePotluckKeyLease(lease) };
+    }
+
+    async releasePotluckKeyLease(leaseOrId, keyHash = '') {
+        const lease = typeof leaseOrId === 'object' ? leaseOrId : this.activePotluckKeyLeases.get(leaseOrId);
+        const leaseId = typeof leaseOrId === 'object' ? leaseOrId?.leaseId : leaseOrId;
+        const normalizedHash = lease?.keyHash || String(keyHash || '');
+        if (!leaseId || !normalizedHash) return false;
+        if (lease?.timer) clearInterval(lease.timer);
+        this.activePotluckKeyLeases.delete(leaseId);
+        return Number(await this._eval('release-potluck-key-lease', RELEASE_POTLUCK_KEY_SCRIPT, [normalizedHash, String(leaseId)])) === 1;
+    }
+
+    async renewPotluckKeyLease(leaseOrId) {
+        const lease = typeof leaseOrId === 'object' ? leaseOrId : this.activePotluckKeyLeases.get(leaseOrId);
+        if (!lease?.leaseId || !lease.keyHash) return false;
+        return Number(await this._eval('renew-potluck-key-lease', RENEW_POTLUCK_KEY_SCRIPT, [
+            lease.keyHash,
+            lease.leaseId,
+            String(Date.now()),
+            String(lease.ttlMs || this.leaseTtlMs)
+        ])) === 1;
     }
 
     async renew(leaseId) {

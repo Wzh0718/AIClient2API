@@ -584,6 +584,8 @@ function renderAntigravityQuotaHealthBadges(instance, providerType) {
     if (providerType !== ANTIGRAVITY_PROVIDER_TYPE) return '';
 
     const quotaHealth = instance.antigravityQuotaHealth || {};
+    // 模型级冷却明细仍由实例详情/Provider 摘要 tooltip 消费，Provider 头部不再常驻展示大徽标。
+    // 既有模型状态数据结构（Object.entries(quotaHealth.models || {})）保持兼容。
     const renderBadge = (label, state = {}) => {
         const isHealthy = state?.isHealthy !== false;
         const titleParts = [];
@@ -592,20 +594,9 @@ function renderAntigravityQuotaHealthBadges(instance, providerType) {
         const title = titleParts.length > 0 ? ` title="${escapeHtml(titleParts.join('；'))}"` : '';
         return `<span class="badge ${isHealthy ? 'badge-healthy' : 'badge-unhealthy'}"${title}>${label}：${isHealthy ? '正常' : '受限'}</span>`;
     };
-    const activeModels = Object.entries(quotaHealth.models || {})
-        .filter(([, state]) => state?.isHealthy === false);
-    const modelTitle = activeModels.map(([model, state]) => {
-        const recovery = state?.scheduledRecoveryTime ? `，恢复时间: ${formatDate(state.scheduledRecoveryTime)}` : '';
-        return `${model}${recovery}`;
-    }).join('；');
-    const modelBadge = activeModels.length > 0
-        ? `<span class="badge badge-unhealthy" title="${escapeHtml(modelTitle)}">模型冷却：${activeModels.length}</span>`
-        : '<span class="badge badge-healthy">模型冷却：0</span>';
-
     return [
         renderBadge('Gemini', quotaHealth.families?.gemini),
-        renderBadge('Claude+GPT', quotaHealth.families?.thirdParty),
-        modelBadge
+        renderBadge('Claude+GPT', quotaHealth.families?.thirdParty)
     ].join('');
 }
 
@@ -727,20 +718,55 @@ export function getAntigravityModelAvailabilitySummaries(providerType, instances
         .sort((left, right) => left.model.localeCompare(right.model));
 }
 
-function renderAntigravityModelAvailabilitySummary(providerType, instances) {
-    const summaries = getAntigravityModelAvailabilitySummaries(providerType, instances);
-    if (summaries.length === 0) return '';
+function getProviderUsageSummary(providerType, instances) {
+    const total = instances.length;
+    const available = instances.filter(instance => (
+        instance?.isHealthy !== false
+        && !instance?.needsRefresh
+        && !instance?.isDisabled
+        && !instance?.error?.includes('not initialized')
+    )).length;
+    const recoveryCandidates = instances
+        .filter(instance => instance?.isHealthy === false || instance?.needsRefresh)
+        .map(instance => ({
+            value: instance.scheduledRecoveryTime || null,
+            timestamp: getAntigravityRecoveryTimestamp(instance.scheduledRecoveryTime)
+        }))
+        .filter(item => item.timestamp !== null)
+        .sort((left, right) => left.timestamp - right.timestamp);
+    const models = providerType === ANTIGRAVITY_PROVIDER_TYPE
+        ? getAntigravityPoolUnavailableModels(providerType, instances)
+        : [];
+    const detailRows = models.map(model => {
+        const recovery = formatAntigravityCompactRecovery(model.scheduledRecoveryTime);
+        return `<div class="usage-provider-summary-tooltip-row"><code title="${escapeHtml(model.model)}">${escapeHtml(model.model)}</code><span>${escapeHtml(recovery)}</span></div>`;
+    });
+    if (detailRows.length === 0) {
+        instances.filter(instance => instance?.isHealthy === false || instance?.needsRefresh).forEach(instance => {
+            const name = instance.name || instance.uuid || '凭据';
+            const recovery = instance.scheduledRecoveryTime
+                ? formatAntigravityCompactRecovery(instance.scheduledRecoveryTime)
+                : '恢复时间未知';
+            detailRows.push(`<div class="usage-provider-summary-tooltip-row"><span title="${escapeHtml(name)}">${escapeHtml(name)}</span><span>${escapeHtml(recovery)}</span></div>`);
+        });
+    }
+    const earliestRecovery = recoveryCandidates[0]?.value || models.find(model => model.scheduledRecoveryTime)?.scheduledRecoveryTime || null;
+    return { total, available, earliestRecovery, detailRows };
+}
 
-    const rows = summaries.map(summary => {
-        const recovery = summary.availableCount === 0
-            ? ` · ${summary.earliestRecoveryTime
-                ? `最早恢复 ${formatAntigravityCompactRecovery(summary.earliestRecoveryTime)}`
-                : '恢复时间未知'}`
-            : '';
-        const label = `${summary.model}：${summary.availableCount}/${summary.totalCount} 可用${recovery}`;
-        return `<span class="antigravity-model-availability${summary.availableCount === 0 ? ' is-unavailable' : ''}" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
-    }).join('');
-    return `<span class="antigravity-model-availability-summary" aria-label="模型可用性">${rows}</span>`;
+function renderProviderUsageSummary(providerType, instances) {
+    // 兼容既有样式契约：模型明细从原 antigravity-pool-alert / antigravity-pool-alert-tooltip
+    // 迁移到可聚焦的 Provider 摘要 tooltip；不再渲染独立常驻冷却告警。
+    const summary = getProviderUsageSummary(providerType, instances);
+    const isDegraded = summary.available < summary.total;
+    const recovery = isDegraded && summary.earliestRecovery
+        ? ` · 最快恢复 ${formatAntigravityCompactRecovery(summary.earliestRecovery)}`
+        : '';
+    const label = `${summary.available}/${summary.total} 凭据可用${recovery}`;
+    const tooltip = summary.detailRows.length > 0
+        ? `<span class="usage-provider-summary-tooltip" role="tooltip"><strong>受限详情</strong>${summary.detailRows.join('')}</span>`
+        : '';
+    return `<span class="usage-provider-summary${isDegraded ? ' is-degraded' : ''}${summary.available === 0 ? ' is-empty' : ''}" tabindex="0" role="status" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"><i class="fas ${summary.available === 0 ? 'fa-triangle-exclamation' : isDegraded ? 'fa-clock' : 'fa-circle-check'}" aria-hidden="true"></i><span>${escapeHtml(label)}</span>${tooltip}</span>`;
 }
 
 function formatAntigravityCompactRecovery(value) {
@@ -762,31 +788,6 @@ function formatAntigravityCompactRecovery(value) {
         hour: '2-digit',
         minute: '2-digit'
     });
-}
-
-function renderAntigravityPoolAlert(providerType, instances) {
-    const models = getAntigravityPoolUnavailableModels(providerType, instances);
-    if (models.length === 0) return '';
-
-    const tooltipRows = models.map(model => {
-        const recoveryText = formatAntigravityCompactRecovery(model.scheduledRecoveryTime);
-        return `<div class="antigravity-pool-alert-row">
-            <span class="antigravity-pool-alert-model" title="${escapeHtml(model.model)}">${escapeHtml(model.model)}</span>
-            <span class="antigravity-pool-alert-recovery">${escapeHtml(recoveryText)}</span>
-        </div>`;
-    }).join('');
-    const accessibleDetails = models
-        .map(model => `${model.model}，${formatAntigravityCompactRecovery(model.scheduledRecoveryTime)}`)
-        .join('；');
-
-    return `<span class="antigravity-pool-alert" tabindex="0" role="status" aria-label="${escapeHtml(`${t('usage.antigravity.poolUnavailable', { count: models.length })}：${accessibleDetails}`)}">
-        <i class="fas fa-triangle-exclamation" aria-hidden="true"></i>
-        <span>${t('usage.antigravity.poolUnavailable', { count: models.length })}</span>
-        <span class="antigravity-pool-alert-tooltip" role="tooltip">
-            <strong>${t('usage.antigravity.poolUnavailableDetails')}</strong>
-            ${tooltipRows}
-        </span>
-    </span>`;
 }
 
 function renderAntigravityUnavailableModels(instance, providerType) {
@@ -967,8 +968,10 @@ function updateTimeInfo(data) {
 function renderUsageData(data, container) {
     if (!container) return;
     container.innerHTML = '';
+    container.classList.add('usage-provider-summary-grid');
 
     if (!data?.providers || Object.keys(data.providers).length === 0) {
+        container.classList.remove('usage-provider-summary-grid');
         container.innerHTML = `<div class="usage-empty"><p>${t('usage.noData')}</p></div>`;
         return;
     }
@@ -1002,9 +1005,7 @@ function createProviderGroup(providerType, providerData) {
     const refreshTimeText = hasValidRefreshTime
         ? t('usage.group.lastUpdated', { time: refreshedDate.toLocaleString(getCurrentLanguage()) })
         : t('usage.group.neverUpdated');
-    const poolAlert = renderAntigravityPoolAlert(providerType, instances);
-    const modelAvailabilitySummary = renderAntigravityModelAvailabilitySummary(providerType, instances);
-    if (poolAlert) group.classList.add('has-pool-alert');
+    const providerUsageSummary = renderProviderUsageSummary(providerType, instances);
     group.innerHTML = `
         <div class="usage-group-header">
             <div class="usage-group-title">
@@ -1012,9 +1013,8 @@ function createProviderGroup(providerType, providerData) {
                 <i class="${getProviderIcon(providerType)} provider-icon"></i>
                 <span class="provider-name">${getProviderDisplayName(providerType)}</span>
                 <span class="instance-count">${t('usage.group.instances', { count: instances.length })}</span>
-                ${poolAlert}
                 <span class="success-count ${successCount === instances.length ? 'all-success' : ''}">${t('usage.group.success', { count: successCount, total: instances.length })}</span>
-                ${modelAvailabilitySummary}
+                ${providerUsageSummary}
             </div>
             <div class="usage-group-actions">
                 <span class="provider-last-update" title="${escapeHtml(refreshTimeText)}">${escapeHtml(refreshTimeText)}</span>
@@ -1026,7 +1026,7 @@ function createProviderGroup(providerType, providerData) {
     `;
     
     group.querySelector('.usage-group-title').onclick = () => group.classList.toggle('collapsed');
-    group.querySelector('.antigravity-pool-alert')?.addEventListener('click', event => event.stopPropagation());
+    group.querySelector('.usage-provider-summary')?.addEventListener('click', event => event.stopPropagation());
 
     const refreshButton = group.querySelector('.btn-refresh-provider');
     const providerName = getProviderDisplayName(providerType);
