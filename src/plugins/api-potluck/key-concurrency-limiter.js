@@ -1,5 +1,8 @@
 import crypto from 'node:crypto';
 
+const DISTRIBUTED_QUEUE_POLL_INITIAL_MS = 100;
+const DISTRIBUTED_QUEUE_POLL_MAX_MS = 500;
+
 export function createKeyConcurrencyError(keyId, reason, extra = {}) {
     const error = new Error(reason === 'key_queue_timeout'
         ? 'Potluck key concurrency queue timeout'
@@ -144,6 +147,7 @@ export class PotluckKeyConcurrencyLimiter {
             signal?.addEventListener?.('abort', waiter.onAbort, { once: true });
             if (signal?.aborted) waiter.onAbort();
             const startedAt = this.now();
+            let pollDelayMs = DISTRIBUTED_QUEUE_POLL_INITIAL_MS;
             const poll = async () => {
                 if (waiter.settled) return;
                 if (this.now() - startedAt >= queueTimeoutMs) {
@@ -162,7 +166,9 @@ export class PotluckKeyConcurrencyLimiter {
                     return;
                 }
                 if (waiter.settled) return;
-                waiter.poller = setTimeout(poll, 50);
+                const nextDelayMs = pollDelayMs;
+                pollDelayMs = Math.min(DISTRIBUTED_QUEUE_POLL_MAX_MS, pollDelayMs * 2);
+                waiter.poller = setTimeout(poll, nextDelayMs);
             };
             waiter.timer = setTimeout(() => poll(), queueTimeoutMs);
             poll();

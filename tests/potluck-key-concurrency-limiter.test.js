@@ -99,6 +99,48 @@ describe('PotluckKeyConcurrencyLimiter', () => {
         await expect(pending).rejects.toMatchObject({ details: { reason: 'key_queue_cancelled' } });
         expect(reservations.size).toBe(0);
     });
+
+    test('backs off distributed queue polling instead of hammering Redis every 50ms', async () => {
+        jest.useFakeTimers();
+        let attempts = 0;
+        const coordination = {
+            async acquirePotluckKeyLease() {
+                attempts += 1;
+                if (attempts < 4) return { acquired: false, active: 30 };
+                return { acquired: true, release: async () => true };
+            },
+            async reservePotluckKeyQueue() {
+                return { reserved: true, reservationId: 'backoff-test' };
+            },
+            async releasePotluckKeyQueueReservation() {
+                return true;
+            }
+        };
+
+        try {
+            const pending = new PotluckKeyConcurrencyLimiter().acquire('batch', {
+                maxConcurrency: 30,
+                queueLimit: 100,
+                queueTimeoutMs: 5_000,
+                coordination
+            });
+            await jest.advanceTimersByTimeAsync(0);
+            expect(attempts).toBe(2);
+
+            await jest.advanceTimersByTimeAsync(99);
+            expect(attempts).toBe(2);
+            await jest.advanceTimersByTimeAsync(1);
+            expect(attempts).toBe(3);
+
+            await jest.advanceTimersByTimeAsync(199);
+            expect(attempts).toBe(3);
+            await jest.advanceTimersByTimeAsync(1);
+            expect(attempts).toBe(4);
+            await (await pending).release();
+        } finally {
+            jest.useRealTimers();
+        }
+    });
 });
 
 test('createKeyConcurrencyError returns a stable 429 contract', () => {
