@@ -1052,7 +1052,7 @@
       select.appendChild(manual);
 
       for (const key of keys) {
-        const keyHash = key.audit?.keyHash;
+        const keyHash = key.keyRef || key.audit?.keyHash;
         if (!keyHash) continue;
         const option = document.createElement('option');
         option.value = keyHash;
@@ -1077,7 +1077,7 @@
       select.appendChild(disabled);
 
       for (const key of keys) {
-        const keyHash = key.audit?.keyHash;
+        const keyHash = key.keyRef || key.audit?.keyHash;
         if (!keyHash) continue;
         const option = document.createElement('option');
         option.value = keyHash;

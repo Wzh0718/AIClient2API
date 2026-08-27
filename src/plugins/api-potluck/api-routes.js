@@ -87,7 +87,8 @@ function getStatsCacheKey(costOptions = {}) {
     return [
         costOptions.conversionModel || '',
         costOptions.compactHistory ? 'compact-history' : 'full-history',
-        costOptions.compactAccounts ? 'compact-accounts' : 'full-accounts'
+        costOptions.compactAccounts ? 'compact-accounts' : 'full-accounts',
+        costOptions.includeKeySummaries ? 'with-key-summaries' : 'without-key-summaries'
     ].join(':');
 }
 
@@ -213,23 +214,6 @@ function compactKeyForList(key) {
     for (const field of LIST_KEY_FIELDS) result[field] = key[field];
     result.usageHistory = compactUsageHistoryForList(key.usageHistory || {});
     return result;
-}
-
-function compactKeyForListLegacy(key) {
-    const fixedCredential = key?.fixedCredential?.uuid
-        ? {
-            providerType: key.fixedCredential.providerType || 'openai-codex-oauth',
-            credentialRef: getCredentialRef(
-                key.fixedCredential.providerType || 'openai-codex-oauth',
-                key.fixedCredential.uuid
-            )
-        }
-        : null;
-    return {
-        ...key,
-        fixedCredential,
-        usageHistory: compactUsageHistoryForList(key.usageHistory || {})
-    };
 }
 
 function formatDailyLimitMessage(dailyLimit) {
@@ -1226,9 +1210,8 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
         // GET /api/potluck/keys - 获取所有 Key 列表
         if (method === 'GET' && path === '/api/potluck/keys') {
             const costOptions = getRequestCostOptions(req);
-            const keys = await listKeys({ ...costOptions, summaryOnly: true, compactCosts: true });
-            const stats = await getCachedStats({ ...costOptions, compactHistory: true, compactAccounts: true });
-            sendJson(res, 200, { success: true, data: { keys: keys.map(compactKeyForListLegacy), stats } });
+            const overview = await getCachedOverview(costOptions);
+            sendJson(res, 200, { success: true, data: overview });
             return true;
         }
 

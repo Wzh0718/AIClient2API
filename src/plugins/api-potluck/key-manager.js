@@ -1534,17 +1534,40 @@ function ensureLoaded() {
             const content = readFileSync(KEYS_STORE_FILE, 'utf8');
             const parsedStore = JSON.parse(content);
             keyStore = normalizeStore(parsedStore);
+            let usageStoreUnavailable = false;
+            const safeLoadUsageHistory = (apiKey) => {
+                try {
+                    return loadUsageHistory(apiKey);
+                } catch (error) {
+                    if (!usageStoreUnavailable) {
+                        usageStoreUnavailable = true;
+                        logger.warn('[API Potluck] Usage history store unavailable; using embedded key history:', error.message);
+                    }
+                    return {};
+                }
+            };
+            const safeLoadUsageTotals = (apiKey) => {
+                try {
+                    return loadUsageTotals(apiKey);
+                } catch (error) {
+                    if (!usageStoreUnavailable) {
+                        usageStoreUnavailable = true;
+                        logger.warn('[API Potluck] Usage totals store unavailable; using embedded key totals:', error.message);
+                    }
+                    return {};
+                }
+            };
             const legacyHistories = Object.entries(keyStore.keys || {})
                 .filter(([apiKey, keyData]) => (
                     Object.keys(keyData.usageHistory || {}).length > 0
-                    && Object.keys(loadUsageHistory(apiKey)).length === 0
+                    && Object.keys(safeLoadUsageHistory(apiKey)).length === 0
                 ))
                 .map(([apiKey, keyData]) => ({
                     apiKey,
                     usageHistory: keyData.usageHistory,
                     totalModels: keyData.totalModels || {}
                 }));
-            if (legacyHistories.length > 0) {
+            if (legacyHistories.length > 0 && !usageStoreUnavailable) {
                 const sourceSha256 = crypto.createHash('sha256').update(content).digest('hex');
                 const backupPath = `${KEYS_STORE_FILE}.pre-usage-split-${sourceSha256.slice(0, 12)}.bak`;
                 if (!existsSync(backupPath)) {
@@ -1558,7 +1581,7 @@ function ensureLoaded() {
                 legacyUsageMigrationPending = true;
             }
             for (const [apiKey, keyData] of Object.entries(keyStore.keys || {})) {
-                const storedHistory = loadUsageHistory(apiKey);
+                const storedHistory = safeLoadUsageHistory(apiKey);
                 if (Object.keys(storedHistory).length > 0) {
                     const normalizedHistory = Object.fromEntries(
                         Object.entries(storedHistory).map(([date, day]) => [date, normalizeUsageHistoryDay(day)])
@@ -1569,10 +1592,12 @@ function ensureLoaded() {
                         markDirty();
                     }
                 }
-                const storedTotals = loadUsageTotals(apiKey);
-                keyData.totalModels = Object.keys(storedTotals).length > 0
-                    ? storedTotals
-                    : collectModelsFromUsageHistory(keyData.usageHistory || {});
+                const storedTotals = safeLoadUsageTotals(apiKey);
+                if (Object.keys(storedTotals).length > 0) {
+                    keyData.totalModels = storedTotals;
+                } else if (Object.keys(keyData.totalModels || {}).length === 0) {
+                    keyData.totalModels = collectModelsFromUsageHistory(keyData.usageHistory || {});
+                }
             }
         } else {
             keyStore = { keys: {} };

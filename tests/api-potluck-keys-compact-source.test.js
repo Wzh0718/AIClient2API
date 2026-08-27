@@ -10,8 +10,9 @@ describe('api potluck keys list compact source', () => {
         expect(source).toContain('summary: day?.summary || {}');
         expect(source).toContain('const STATS_CACHE_TTL_MS = 30 * 1000');
         expect(source).toContain('function getCachedStats(costOptions = {})');
+        expect(source).toContain("costOptions.includeKeySummaries ? 'with-key-summaries' : 'without-key-summaries'");
         expect(source).toContain('if (entry?.promise) return entry.promise');
-        expect(source).toContain('const keys = await listKeys({ ...costOptions, summaryOnly: true, compactCosts: true });');
+        expect(source).toContain('const overview = await getCachedOverview(costOptions);');
         expect(source).toContain('includeKeySummaries: true');
         expect(source).toContain('getKey(apiKey, { compactUserHistory: true, compactCosts: true })');
         expect(source).toContain('getCachedStats(statsOptions)');

@@ -432,7 +432,8 @@ describe('API Potluck key credential routing', () => {
 
         expect(response.statusCode).toBe(200);
         expect(response.body.data.keys).toContainEqual(expect.objectContaining({
-            id: created.id,
+            keyRef: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
+            id: expect.stringMatching(/^sha256:[a-f0-9]{16}$/),
             routingMode: 'fixed',
             fixedCredential: {
                 providerType: 'openai-codex-oauth',
