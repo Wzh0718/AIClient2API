@@ -52,9 +52,9 @@ ARG HTTPS_PROXY
 # 安装必要的系统工具（tar 用于更新功能，git 用于版本检查，procps 用于系统监控）
 RUN missing=""; \
     sed -i "s#dl-cdn.alpinelinux.org#$ALPINE_MIRROR#g" /etc/apk/repositories; \
-    for package in tar git procps; do \
-      command -v "$package" >/dev/null 2>&1 || missing="$missing $package"; \
-    done; \
+    command -v tar >/dev/null 2>&1 || missing="$missing tar"; \
+    command -v git >/dev/null 2>&1 || missing="$missing git"; \
+    command -v ps >/dev/null 2>&1 || missing="$missing procps"; \
     if [ -n "$missing" ]; then apk add --no-cache $missing; fi
 
 # 设置工作目录
