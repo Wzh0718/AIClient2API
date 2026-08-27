@@ -1048,8 +1048,8 @@ function createProviderGroup(providerType, providerData) {
                 <i class="${getProviderIcon(providerType)} provider-icon"></i>
                 <span class="provider-name">${getProviderDisplayName(providerType)}</span>
                 <span class="instance-count">${t('usage.group.instances', { count: instances.length })}</span>
-                <span class="success-count ${successCount === instances.length ? 'all-success' : ''}">${t('usage.group.success', { count: successCount, total: instances.length })}</span>
                 ${providerQuotaStack}
+                <span class="success-count ${successCount === instances.length ? 'all-success' : ''}">${t('usage.group.success', { count: successCount, total: instances.length })}</span>
             </div>
             <div class="usage-group-actions">
                 <span class="provider-last-update" title="${escapeHtml(refreshTimeText)}">${escapeHtml(refreshTimeText)}</span>

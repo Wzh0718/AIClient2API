@@ -17,6 +17,17 @@ describe('usage manager display source regressions', () => {
         expect(css).toContain('.antigravity-model-availability-row');
     });
 
+    test('provider header shows Gemini model availability before the success count', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+        const providerHeader = source.slice(
+            source.indexOf('<div class="usage-group-title">'),
+            source.indexOf('<div class="usage-group-actions">')
+        );
+
+        expect(providerHeader.indexOf('${providerQuotaStack}')).toBeGreaterThanOrEqual(0);
+        expect(providerHeader.indexOf('${providerQuotaStack}')).toBeLessThan(providerHeader.indexOf('<span class="success-count'));
+    });
+
     test('usage details prefer backend-provided display values for token units', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
         const renderStart = source.indexOf('function renderUsageDetails(usage, accountSummary = null, instance = {}) {');
