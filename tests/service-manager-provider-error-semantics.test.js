@@ -10,8 +10,14 @@ jest.mock('../src/providers/adapter.js', () => ({
 jest.mock('../src/ui-modules/event-broadcast.js', () => ({ broadcastEvent: jest.fn() }));
 
 import { createProviderSelectionError } from '../src/services/service-manager.js';
+import fs from 'fs';
 
 describe('provider selection error semantics', () => {
+    test('keeps Gemini Key concurrency scoped to pool routing', () => {
+        const source = fs.readFileSync('src/services/service-manager.js', 'utf8');
+        expect(source).toContain("config?.potluckKeyData?.routingMode !== 'pool'");
+    });
+
     test('maps temporary model cooldown to 429 with Retry-After metadata', () => {
         const error = createProviderSelectionError('gemini-antigravity', 'gemini-2.5-flash-lite', {
             totalCandidateCount: 3,

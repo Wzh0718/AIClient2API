@@ -649,6 +649,7 @@ async function releasePotluckKeyConcurrencyLease() {
 async function acquirePotluckKeyConcurrencyLeaseIfNeeded(config, providerType, options, selectionDiagnostics) {
     if (options.acquireSlot !== true || !config?.potluckKeyData?.id) return false;
     if (!isGeminiProviderType(providerType)) return false;
+    if (config?.potluckKeyData?.routingMode !== 'pool') return false;
     if (requestContext.get('potluckKeyConcurrencyLease')) return true;
     const keyData = config.potluckKeyData;
     const startedAt = Date.now();
