@@ -1050,6 +1050,50 @@ export class AntigravityApiService {
         }
 
         this.authClient = new OAuth2Client(oauth2Options);
+        this._installOAuthTokenPersistenceHook();
+    }
+
+    _installOAuthTokenPersistenceHook() {
+        if (typeof this.authClient?.on !== 'function' || this._oauthTokenHookInstalled) return;
+        this._oauthTokenHookInstalled = true;
+        this.authClient.on('tokens', tokens => {
+            if (!tokens || typeof tokens !== 'object') return;
+            const accessToken = tokens.access_token || this.authClient.credentials?.access_token;
+            const expiryDate = Number(tokens.expiry_date ?? this.authClient.credentials?.expiry_date);
+            if (!accessToken || !Number.isFinite(expiryDate)) return;
+
+            const credentialPath = this.oauthCredsFilePath || path.join(os.homedir(), CREDENTIALS_DIR, CREDENTIALS_FILE);
+            const credentials = {
+                ...(this.authClient.credentials || {}),
+                ...tokens,
+                access_token: accessToken,
+                expiry_date: expiryDate
+            };
+            this._persistOAuthTokenUpdate(credentialPath, credentials).catch(error => {
+                logger.warn(`[Antigravity Auth] Failed to persist OAuth token update: ${error.message}`);
+            });
+        });
+    }
+
+    async _persistOAuthTokenUpdate(filePath, credentials) {
+        let current = null;
+        try {
+            current = JSON.parse(await fs.readFile(filePath, 'utf8'));
+        } catch (error) {
+            if (error?.code !== 'ENOENT') throw error;
+        }
+
+        const incomingExpiry = Number(credentials.expiry_date);
+        const currentExpiry = Number(current?.expiry_date);
+        if (Number.isFinite(currentExpiry) && currentExpiry >= incomingExpiry) return false;
+
+        const merged = {
+            ...(current || {}),
+            ...credentials,
+            refresh_token: credentials.refresh_token || current?.refresh_token
+        };
+        await this._saveCredentialsToFile(filePath, merged);
+        return true;
     }
 
     _applySidecar(requestOptions) {
