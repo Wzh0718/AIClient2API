@@ -13,14 +13,6 @@ const USAGE_REFRESH_POLL_INTERVAL_MS = 1500;
 const USAGE_REFRESH_WAIT_TIMEOUT_MS = 150000;
 const ANTIGRAVITY_PROVIDER_TYPE = 'gemini-antigravity';
 const ANTIGRAVITY_VISIBLE_MODEL_LIMIT = 3;
-const ANTIGRAVITY_KNOWN_GEMINI_MODELS = [
-    'gemini-3-flash', 'gemini-3.5-flash-low', 'gemini-3.5-flash-high',
-    'gemini-3.6-flash', 'gemini-3.6-flash-low', 'gemini-3.6-flash-high',
-    'gemini-3.7-flash', 'gemini-3.7-flash-low', 'gemini-3.7-flash-high',
-    'gemini-3.1-pro-low', 'gemini-3.1-pro-high', 'gemini-3.1-flash-lite', 'gemini-3.1-flash-image',
-    'gemini-3-flash-agent', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
-    'gemini-2.5-flash-thinking'
-];
 
 function sleepForUsageRefresh(delayMs) {
     return new Promise(resolve => setTimeout(resolve, delayMs));
@@ -689,9 +681,12 @@ export function getAntigravityModelAvailabilitySummaries(providerType, instances
     const activeInstances = instances.filter(instance => !instance?.error?.includes('not initialized'));
     if (activeInstances.length === 0) return [];
 
-    const models = new Set(ANTIGRAVITY_KNOWN_GEMINI_MODELS);
+    // Only summarize models that have an explicit per-credential state. Static
+    // model catalogs must not create availability rows before a real request
+    // has probed that model.
+    const models = new Set();
     activeInstances.forEach(instance => Object.keys(instance.antigravityQuotaHealth?.models || {})
-        .filter(model => model.startsWith('gemini-'))
+        .filter(model => model.toLowerCase().startsWith('gemini-'))
         .forEach(model => models.add(model)));
 
     return [...models].map(model => {
@@ -707,12 +702,12 @@ export function getAntigravityModelAvailabilitySummaries(providerType, instances
                 || instance.isHealthy === false
                 || Boolean(instance.error);
             const modelState = instance.antigravityQuotaHealth?.models?.[model];
-            if (credentialUnavailable) {
-                credentialUnavailableCount++;
-                return;
-            }
             if (!modelState) {
                 unprobedCount++;
+                return;
+            }
+            if (credentialUnavailable) {
+                credentialUnavailableCount++;
                 return;
             }
             if (modelState.isHealthy === true) {

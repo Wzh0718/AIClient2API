@@ -646,6 +646,35 @@ async function releasePotluckKeyConcurrencyLease() {
     }
 }
 
+async function acquirePotluckKeyConcurrencyLeaseIfNeeded(config, providerType, options, selectionDiagnostics) {
+    if (options.acquireSlot !== true || !config?.potluckKeyData?.id) return false;
+    if (!isGeminiProviderType(providerType)) return false;
+    if (requestContext.get('potluckKeyConcurrencyLease')) return true;
+    const keyData = config.potluckKeyData;
+    const startedAt = Date.now();
+    try {
+        const lease = await potluckKeyConcurrencyLimiter.acquire(keyData.id, {
+            maxConcurrency: keyData.concurrencyLimit,
+            queueLimit: keyData.queueLimit,
+            queueTimeoutMs: keyData.queueTimeoutMs,
+            mode: keyData.concurrencyMode,
+            coordination: providerPoolManager?.coordination || null
+        });
+        requestContext.set('potluckKeyConcurrencyLease', lease);
+        requestContext.set('potluckKeyConcurrencyKeyId', keyData.id);
+        selectionDiagnostics.keyQueueOutcome = lease.shadow ? 'shadow' : 'admitted';
+        selectionDiagnostics.keyCapacityExhausted = lease.capacityExhausted === true;
+        selectionDiagnostics.keyQueueWaitMs = Math.max(0, Date.now() - startedAt);
+        return true;
+    } catch (error) {
+        const reason = error?.details?.reason || 'key_capacity_exhausted';
+        selectionDiagnostics.keyQueueOutcome = reason;
+        selectionDiagnostics.keyQueueWaitMs = Math.max(0, Date.now() - startedAt);
+        selectionDiagnostics.keyCapacityExhausted = true;
+        throw error;
+    }
+}
+
 export function createProviderSelectionError(providerType, model, selectionDiagnostics = {}, options = {}) {
     const suffix = `${providerType}${model ? ` supporting model: ${model}` : ''}`;
     const reasons = selectionDiagnostics.filterReasons || {};
@@ -1524,6 +1553,12 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         let selectedResult;
         let availabilityError = null;
         let groupSelection;
+        const genericKeyLease = await acquirePotluckKeyConcurrencyLeaseIfNeeded(
+            config,
+            config.MODEL_PROVIDER,
+            routingOptions,
+            selectionDiagnostics
+        );
         try {
             groupSelection = await selectCodexCredentialGroupProvider(
                 config,
@@ -1541,6 +1576,7 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                     modelFallbackReason: error.status === 429 ? 'PROVIDER_SELECTION_429' : 'MODEL_UNAVAILABLE'
                 });
             }
+            if (genericKeyLease) await releasePotluckKeyConcurrencyLease();
             throw error;
         }
 
@@ -1595,7 +1631,12 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                 ])]
             });
 
-            selectedResult = await selectFromPool(selectionOptions);
+            try {
+                selectedResult = await selectFromPool(selectionOptions);
+            } catch (error) {
+                if (genericKeyLease) await releasePotluckKeyConcurrencyLease();
+                throw error;
+            }
 
             // 过载 UUID 只是软排除；如果没有其他可用节点，撤销该排除并允许继续使用唯一/原凭证。
             if (!selectedResult && pendingExcludedUuid) {
@@ -1606,7 +1647,12 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                     preferredProviderUuid: null,
                     excludeProviderUuids: originalExcludedUuids
                 });
-                selectedResult = await selectFromPool(fallbackSelectionOptions);
+                try {
+                    selectedResult = await selectFromPool(fallbackSelectionOptions);
+                } catch (error) {
+                    if (genericKeyLease) await releasePotluckKeyConcurrencyLease();
+                    throw error;
+                }
             }
 
             // 请求内瞬态错误重试会先排除已尝试的凭证以优先覆盖其他账号。
@@ -1620,7 +1666,12 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                     preferredProviderUuid: null,
                     excludeProviderUuids: []
                 });
-                selectedResult = await selectFromPool(retrySelectionOptions);
+                try {
+                    selectedResult = await selectFromPool(retrySelectionOptions);
+                } catch (error) {
+                    if (genericKeyLease) await releasePotluckKeyConcurrencyLease();
+                    throw error;
+                }
             }
 
             if (selectedResult && failoverKey && pendingExcludedUuid) {
@@ -1634,6 +1685,8 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                 }
             }
         }
+
+        if (genericKeyLease && !selectedResult) await releasePotluckKeyConcurrencyLease();
         
         if (selectedResult) {
             const {

@@ -139,7 +139,7 @@ describe('Antigravity cooldown UI behavior', () => {
         ]);
     });
 
-    test('includes known Gemini image model and keeps missing model states as unprobed', async () => {
+    test('only summarizes explicitly reported Gemini models and keeps missing model states as unprobed', async () => {
         const usageManager = await import('../static/app/usage-manager.js');
         const instances = [
             { isHealthy: true, antigravityQuotaHealth: { models: {
@@ -155,18 +155,27 @@ describe('Antigravity cooldown UI behavior', () => {
             model: 'gemini-3.1-flash-image',
             availableCount: 1,
             quotaExhaustedCount: 1,
-            credentialUnavailableCount: 1,
-            unprobedCount: 1,
+            credentialUnavailableCount: 0,
+            unprobedCount: 2,
             earliestRecoveryTime: '2026-08-25T12:00:00.000Z'
         });
         expect(usageManager.getAntigravityModelAvailabilitySummaries('gemini-antigravity', instances)).toContainEqual({
             model: 'gemini-3.1-flash-lite',
             availableCount: 0,
             quotaExhaustedCount: 1,
-            credentialUnavailableCount: 1,
-            unprobedCount: 2,
+            credentialUnavailableCount: 0,
+            unprobedCount: 3,
             earliestRecoveryTime: '2026-08-25T13:00:00.000Z'
         });
+    });
+
+    test('does not create rows from static models or overall credential errors', async () => {
+        const usageManager = await import('../static/app/usage-manager.js');
+        const instances = [
+            { isHealthy: false, needsRefresh: true, error: 'refresh failed', antigravityQuotaHealth: { models: {} } },
+            { isHealthy: true, antigravityQuotaHealth: { models: {} } }
+        ];
+        expect(usageManager.getAntigravityModelAvailabilitySummaries('gemini-antigravity', instances)).toEqual([]);
     });
 
     test('does not expose healthy-only models and classifies needsRefresh as credential unavailable', async () => {

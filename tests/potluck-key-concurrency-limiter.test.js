@@ -39,6 +39,66 @@ describe('PotluckKeyConcurrencyLimiter', () => {
         expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: 'key_capacity_exhausted', keyId: 'batch' }));
         await first.release();
     });
+
+    test('uses coordination reservations to enforce queueLimit across workers', async () => {
+        let active = 0;
+        const reservations = new Set();
+        const coordination = {
+            async acquirePotluckKeyLease() {
+                if (active >= 1) return { acquired: false, active };
+                active += 1;
+                const leaseId = `lease-${active}`;
+                return { acquired: true, leaseId, release: async () => { active = Math.max(0, active - 1); } };
+            },
+            async reservePotluckKeyQueue(_keyId, { queueLimit }) {
+                if (reservations.size >= queueLimit) return { reserved: false, waiting: reservations.size };
+                const reservationId = `reservation-${reservations.size + 1}`;
+                reservations.add(reservationId);
+                return { reserved: true, reservationId };
+            },
+            async releasePotluckKeyQueueReservation(reservation) {
+                reservations.delete(reservation.reservationId);
+                return true;
+            }
+        };
+        const firstWorker = new PotluckKeyConcurrencyLimiter();
+        const secondWorker = new PotluckKeyConcurrencyLimiter();
+        const first = await firstWorker.acquire('shared', { maxConcurrency: 1, queueLimit: 1, coordination });
+        const waiting = secondWorker.acquire('shared', { maxConcurrency: 1, queueLimit: 1, queueTimeoutMs: 1000, coordination });
+        await expect(firstWorker.acquire('shared', { maxConcurrency: 1, queueLimit: 1, coordination }))
+            .rejects.toMatchObject({ details: { reason: 'key_capacity_exhausted' } });
+        await first.release();
+        await (await waiting).release();
+        expect(reservations.size).toBe(0);
+    });
+
+    test('releases a distributed reservation when a waiter is cancelled', async () => {
+        const reservations = new Set();
+        const coordination = {
+            async acquirePotluckKeyLease() { return { acquired: false, active: 1 }; },
+            async reservePotluckKeyQueue() {
+                const reservationId = 'cancelled';
+                reservations.add(reservationId);
+                return { reserved: true, reservationId };
+            },
+            async releasePotluckKeyQueueReservation(reservation) {
+                reservations.delete(reservation.reservationId);
+                return true;
+            }
+        };
+        const controller = new AbortController();
+        const pending = new PotluckKeyConcurrencyLimiter().acquire('shared', {
+            maxConcurrency: 1,
+            queueLimit: 1,
+            queueTimeoutMs: 1000,
+            coordination,
+            signal: controller.signal
+        });
+        await Promise.resolve();
+        controller.abort();
+        await expect(pending).rejects.toMatchObject({ details: { reason: 'key_queue_cancelled' } });
+        expect(reservations.size).toBe(0);
+    });
 });
 
 test('createKeyConcurrencyError returns a stable 429 contract', () => {

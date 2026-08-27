@@ -34,10 +34,12 @@ export class PotluckKeyConcurrencyLimiter {
         const queueLimit = Math.max(0, Number(options.queueLimit) || 0);
         const queueTimeoutMs = Math.max(1, Number(options.queueTimeoutMs) || 300_000);
         const mode = options.mode === 'shadow' ? 'shadow' : 'enforce';
+        const signal = options.signal;
+        if (signal?.aborted) throw createKeyConcurrencyError(id, 'key_queue_cancelled');
         if (maxConcurrency <= 0) return this._lease(id, false);
 
         if (mode === 'enforce' && typeof options.coordination?.acquirePotluckKeyLease === 'function') {
-            return this._acquireDistributed(id, { maxConcurrency, queueLimit, queueTimeoutMs, coordination: options.coordination });
+            return this._acquireDistributed(id, { maxConcurrency, queueLimit, queueTimeoutMs, signal, coordination: options.coordination });
         }
 
         const state = this._state(id);
@@ -55,13 +57,25 @@ export class PotluckKeyConcurrencyLimiter {
 
         state.waiting++;
         return new Promise((resolve, reject) => {
-            const waiter = { settled: false, timer: null, resolve, reject };
+            const waiter = { settled: false, timer: null, resolve, reject, signal, onAbort: null };
+            waiter.onAbort = () => {
+                if (waiter.settled) return;
+                waiter.settled = true;
+                state.waiting = Math.max(0, state.waiting - 1);
+                const index = state.queue.indexOf(waiter);
+                if (index >= 0) state.queue.splice(index, 1);
+                clearTimeout(waiter.timer);
+                this._emit('key_429', id, { reason: 'key_queue_cancelled', waiting: state.waiting });
+                reject(createKeyConcurrencyError(id, 'key_queue_cancelled'));
+            };
+            signal?.addEventListener?.('abort', waiter.onAbort, { once: true });
             waiter.timer = setTimeout(() => {
                 if (waiter.settled) return;
                 waiter.settled = true;
                 state.waiting--;
                 const index = state.queue.indexOf(waiter);
                 if (index >= 0) state.queue.splice(index, 1);
+                signal?.removeEventListener?.('abort', waiter.onAbort);
                 this._emit('key_429', id, { reason: 'key_queue_timeout', waiting: state.waiting });
                 reject(createKeyConcurrencyError(id, 'key_queue_timeout', { queueTimeoutMs }));
             }, queueTimeoutMs);
@@ -69,12 +83,16 @@ export class PotluckKeyConcurrencyLimiter {
         });
     }
 
-    async _acquireDistributed(keyId, { maxConcurrency, queueLimit, queueTimeoutMs, coordination }) {
+    async _acquireDistributed(keyId, { maxConcurrency, queueLimit, queueTimeoutMs, signal, coordination }) {
         const state = this._state(keyId);
-        const attempt = async () => coordination.acquirePotluckKeyLease(keyId, {
-            maxConcurrency,
-            ttlMs: Math.max(queueTimeoutMs, 120_000)
-        });
+        let reservation = null;
+        const attempt = async () => {
+            const leaseOptions = { maxConcurrency, ttlMs: Math.max(queueTimeoutMs, 120_000) };
+            if (reservation && typeof coordination.acquirePotluckKeyLeaseFromQueue === 'function') {
+                return coordination.acquirePotluckKeyLeaseFromQueue(keyId, reservation, leaseOptions);
+            }
+            return coordination.acquirePotluckKeyLease(keyId, leaseOptions);
+        };
         const immediate = await attempt();
         if (immediate?.acquired) return { keyId, shadow: false, release: immediate.release };
 
@@ -88,17 +106,43 @@ export class PotluckKeyConcurrencyLimiter {
             throw createKeyConcurrencyError(keyId, 'key_capacity_exhausted', { active: immediate?.active || 0, maxConcurrency, waiting: state.waiting });
         }
 
+        if (typeof coordination.reservePotluckKeyQueue === 'function') {
+            reservation = await coordination.reservePotluckKeyQueue(keyId, {
+                queueLimit,
+                ttlMs: Math.max(queueTimeoutMs, 120_000)
+            });
+            if (reservation?.reserved !== true) {
+                this._emit('key_429', keyId, {
+                    reason: 'key_capacity_exhausted',
+                    active: immediate?.active || 0,
+                    waiting: reservation?.waiting || 0
+                });
+                throw createKeyConcurrencyError(keyId, 'key_capacity_exhausted', {
+                    active: immediate?.active || 0,
+                    maxConcurrency,
+                    waiting: reservation?.waiting || 0
+                });
+            }
+        }
+
         state.waiting++;
         return new Promise((resolve, reject) => {
-            const waiter = { settled: false, timer: null, poller: null, resolve, reject };
+            const waiter = { settled: false, timer: null, poller: null, resolve, reject, signal, onAbort: null };
             const finish = (error, lease) => {
                 if (waiter.settled) return;
                 waiter.settled = true;
                 state.waiting = Math.max(0, state.waiting - 1);
                 clearTimeout(waiter.timer);
                 clearTimeout(waiter.poller);
+                signal?.removeEventListener?.('abort', waiter.onAbort);
+                if (reservation && typeof coordination.releasePotluckKeyQueueReservation === 'function') {
+                    coordination.releasePotluckKeyQueueReservation(reservation).catch(() => {});
+                }
                 if (error) reject(error); else resolve({ keyId, shadow: false, release: lease.release });
             };
+            waiter.onAbort = () => finish(createKeyConcurrencyError(keyId, 'key_queue_cancelled'));
+            signal?.addEventListener?.('abort', waiter.onAbort, { once: true });
+            if (signal?.aborted) waiter.onAbort();
             const startedAt = this.now();
             const poll = async () => {
                 if (waiter.settled) return;
@@ -117,6 +161,7 @@ export class PotluckKeyConcurrencyLimiter {
                     finish(error);
                     return;
                 }
+                if (waiter.settled) return;
                 waiter.poller = setTimeout(poll, 50);
             };
             waiter.timer = setTimeout(() => poll(), queueTimeoutMs);
@@ -138,6 +183,7 @@ export class PotluckKeyConcurrencyLimiter {
                 if (waiter && !waiter.settled) {
                     waiter.settled = true;
                     clearTimeout(waiter.timer);
+                    waiter.signal?.removeEventListener?.('abort', waiter.onAbort);
                     state.waiting = Math.max(0, state.waiting - 1);
                     state.active++;
                     waiter.resolve(this._lease(keyId, true));

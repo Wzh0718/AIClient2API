@@ -166,6 +166,50 @@ redis.call('PEXPIRE', active_key, ttl_ms * 2)
 return 1
 `;
 
+const RESERVE_POTLUCK_KEY_QUEUE_SCRIPT = `
+local waiting_key = KEYS[1] .. ':potluck-key-waiting:' .. ARGV[1]
+local now_ms = tonumber(ARGV[2])
+local ttl_ms = tonumber(ARGV[3])
+local limit = tonumber(ARGV[4])
+local reservation_id = ARGV[5]
+redis.call('ZREMRANGEBYSCORE', waiting_key, '-inf', now_ms)
+local waiting = tonumber(redis.call('ZCARD', waiting_key) or '0')
+if limit <= 0 or waiting >= limit then
+  return cjson.encode({ reserved = false, waiting = waiting })
+end
+redis.call('ZADD', waiting_key, now_ms + ttl_ms, reservation_id)
+redis.call('PEXPIRE', waiting_key, ttl_ms * 2)
+return cjson.encode({ reserved = true, waiting = waiting + 1, reservationId = reservation_id })
+`;
+
+const RELEASE_POTLUCK_KEY_QUEUE_SCRIPT = `
+local waiting_key = KEYS[1] .. ':potluck-key-waiting:' .. ARGV[1]
+return redis.call('ZREM', waiting_key, ARGV[2])
+`;
+
+const PROMOTE_POTLUCK_KEY_QUEUE_SCRIPT = `
+local active_key = KEYS[1] .. ':potluck-key:' .. ARGV[1]
+local waiting_key = KEYS[1] .. ':potluck-key-waiting:' .. ARGV[1]
+local now_ms = tonumber(ARGV[2])
+local ttl_ms = tonumber(ARGV[3])
+local limit = tonumber(ARGV[4])
+local lease_id = ARGV[5]
+local reservation_id = ARGV[6]
+redis.call('ZREMRANGEBYSCORE', active_key, '-inf', now_ms)
+redis.call('ZREMRANGEBYSCORE', waiting_key, '-inf', now_ms)
+if redis.call('ZSCORE', waiting_key, reservation_id) == false then
+  return cjson.encode({ acquired = false, reason = 'reservation_missing' })
+end
+local active = tonumber(redis.call('ZCARD', active_key) or '0')
+if limit > 0 and active >= limit then
+  return cjson.encode({ acquired = false, active = active })
+end
+redis.call('ZREM', waiting_key, reservation_id)
+redis.call('ZADD', active_key, now_ms + ttl_ms, lease_id)
+redis.call('PEXPIRE', active_key, ttl_ms * 2)
+return cjson.encode({ acquired = true, active = active + 1, leaseId = lease_id })
+`;
+
 const ACQUIRE_GEMINI_QUEUE_SLOT_SCRIPT = `
 local leases_key = KEYS[1] .. ':gemini-queue:leases'
 local expiry_key = KEYS[1] .. ':gemini-queue:expiry'
@@ -881,6 +925,54 @@ export class RedisLeaseCoordinator {
             String(Date.now()),
             String(lease.ttlMs || this.leaseTtlMs)
         ])) === 1;
+    }
+
+    async reservePotluckKeyQueue(keyId, { queueLimit = 0, ttlMs = this.leaseTtlMs } = {}) {
+        const normalizedKey = String(keyId || '').trim();
+        const limit = Math.max(0, Number(queueLimit) || 0);
+        if (!normalizedKey || limit <= 0) return { reserved: true, reservationId: null, localOnly: true };
+        const reservationId = randomUUID();
+        const effectiveTtl = Math.max(1000, Number(ttlMs) || this.leaseTtlMs);
+        const result = await this._eval('reserve-potluck-key-queue', RESERVE_POTLUCK_KEY_QUEUE_SCRIPT, [
+            hashAffinityKey(normalizedKey), String(Date.now()), String(effectiveTtl), String(limit), reservationId
+        ]);
+        const state = typeof result === 'string' ? JSON.parse(result) : result;
+        return {
+            reserved: state?.reserved === true,
+            waiting: Number(state?.waiting || 0),
+            reservationId: state?.reserved === true ? reservationId : null,
+            keyHash: hashAffinityKey(normalizedKey)
+        };
+    }
+
+    async releasePotluckKeyQueueReservation(reservationOrId, keyHash = '') {
+        const reservation = typeof reservationOrId === 'object' ? reservationOrId : null;
+        const reservationId = reservation?.reservationId || reservationOrId;
+        const normalizedHash = reservation?.keyHash || String(keyHash || '');
+        if (!reservationId || !normalizedHash) return false;
+        return Number(await this._eval('release-potluck-key-queue', RELEASE_POTLUCK_KEY_QUEUE_SCRIPT, [
+            normalizedHash, String(reservationId)
+        ])) === 1;
+    }
+
+    async acquirePotluckKeyLeaseFromQueue(keyId, reservation, { maxConcurrency = 0, ttlMs = this.leaseTtlMs } = {}) {
+        const normalizedKey = String(keyId || '').trim();
+        const reservationId = reservation?.reservationId;
+        const limit = Math.max(0, Number(maxConcurrency) || 0);
+        if (!normalizedKey || !reservationId || limit <= 0) return { acquired: false, active: 0 };
+        const leaseId = randomUUID();
+        const effectiveTtl = Math.max(1000, Number(ttlMs) || this.leaseTtlMs);
+        const result = await this._eval('promote-potluck-key-queue', PROMOTE_POTLUCK_KEY_QUEUE_SCRIPT, [
+            hashAffinityKey(normalizedKey), String(Date.now()), String(effectiveTtl), String(limit), leaseId, String(reservationId)
+        ]);
+        const state = typeof result === 'string' ? JSON.parse(result) : result;
+        if (state?.acquired !== true) return { acquired: false, active: Number(state?.active || 0), reason: state?.reason };
+        const lease = { leaseId, keyHash: hashAffinityKey(normalizedKey), ttlMs: effectiveTtl };
+        const timer = setInterval(() => this.renewPotluckKeyLease(lease).catch(() => {}), Math.min(20000, Math.max(1000, Math.floor(effectiveTtl / 3))));
+        timer.unref?.();
+        lease.timer = timer;
+        this.activePotluckKeyLeases.set(leaseId, lease);
+        return { acquired: true, leaseId, active: Number(state?.active || 0), release: () => this.releasePotluckKeyLease(lease) };
     }
 
     async renew(leaseId) {

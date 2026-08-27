@@ -25,7 +25,7 @@ describe('Antigravity quota UI source', () => {
 
         expect(source).toContain('function renderAntigravityQuotaHealthBadges(instance, providerType)');
         expect(source).toContain('getAntigravityModelAvailabilitySummaries(providerType, instances)');
-        expect(source).toContain('gemini-3.1-flash-image');
+        expect(source).not.toContain('ANTIGRAVITY_KNOWN_GEMINI_MODELS');
         expect(source).toContain('quotaExhaustedCount');
         expect(source).toContain('credentialUnavailableCount');
         expect(source).toContain('unprobedCount');
