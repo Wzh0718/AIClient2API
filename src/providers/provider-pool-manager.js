@@ -559,6 +559,10 @@ export function shouldTryCodex53QuotaModelFallback(providerType, requestedModel,
     return bucket === CODEX_QUOTA_BUCKET.CODEX_53 && isCodex53QuotaExhaustionError(error);
 }
 
+export function isCodex53SparkModel(requestedModel) {
+    return String(requestedModel || '').trim() === 'gpt-5.3-codex-spark';
+}
+
 /**
  * Manages a pool of API service providers, handling their health and selection.
  */
@@ -3321,7 +3325,8 @@ export class ProviderPoolManager {
                     };
                 }
             } catch (err) {
-                if (shouldTryCodex53QuotaModelFallback(currentType, requestedModel, err, this.globalConfig)) {
+                if (shouldTryCodex53QuotaModelFallback(currentType, requestedModel, err, this.globalConfig)
+                    || (currentType === providerType && isCodex53SparkModel(requestedModel))) {
                     codex53QuotaFallbackReason = err.message;
                     break;
                 }
@@ -3336,6 +3341,10 @@ export class ProviderPoolManager {
                     continue;
                 }
                 throw err; // 其他错误抛出
+            }
+            if (currentType === providerType && isCodex53SparkModel(requestedModel)) {
+                codex53QuotaFallbackReason = `No selectable provider for ${requestedModel}`;
+                break;
             }
         }
 
@@ -3533,7 +3542,8 @@ export class ProviderPoolManager {
             try {
                 selectedConfig = await this.selectProvider(currentType, requestedModel, options);
             } catch (error) {
-                if (shouldTryCodex53QuotaModelFallback(currentType, requestedModel, error, this.globalConfig)) {
+                if (shouldTryCodex53QuotaModelFallback(currentType, requestedModel, error, this.globalConfig)
+                    || (currentType === providerType && isCodex53SparkModel(requestedModel))) {
                     codex53QuotaFallbackReason = error.message;
                     break;
                 }
@@ -3553,6 +3563,10 @@ export class ProviderPoolManager {
                     actualProviderType: currentType,
                     isFallback: currentType !== providerType
                 };
+            }
+            if (currentType === providerType && isCodex53SparkModel(requestedModel)) {
+                codex53QuotaFallbackReason = `No selectable provider for ${requestedModel}`;
+                break;
             }
         }
 

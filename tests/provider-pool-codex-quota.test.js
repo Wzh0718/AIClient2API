@@ -587,6 +587,31 @@ describe('provider pool Codex token quota', () => {
         expect(selected).toBeNull();
     });
 
+    test('falls back to GPT-5.4 Mini when Codex 5.3 Spark has no selectable provider', async () => {
+        writeCodexUsageCache([
+            { uuid: 'aaa-codex-over', success: true, usage: { summary: { plan: 'Pro' }, items: [] } },
+            { uuid: 'zzz-codex-ok', success: true, usage: { summary: { plan: 'Plus' }, items: [] } }
+        ]);
+        const manager = createQuotaPoolManager({
+            over: {
+                supportedModels: ['gpt-5.4-mini'],
+                notSupportedModels: ['gpt-5.3-codex-spark']
+            },
+            ok: {
+                supportedModels: ['gpt-5.4-mini'],
+                notSupportedModels: ['gpt-5.3-codex-spark']
+            }
+        });
+
+        const selected = await manager.selectProviderWithFallback('openai-codex-oauth', 'gpt-5.3-codex-spark');
+
+        expect(selected).toMatchObject({
+            actualProviderType: 'openai-codex-oauth',
+            isFallback: true,
+            actualModel: 'gpt-5.4-mini'
+        });
+    });
+
     test('does not apply the Luna mapping to unrelated models', async () => {
         writeCodexUsageCache([
             { uuid: 'aaa-codex-over', success: true, usage: { summary: { plan: 'Pro' }, items: [] } },

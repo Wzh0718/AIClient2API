@@ -426,6 +426,32 @@ describe('Service Manager Codex credential-group routing', () => {
         expect(result.modelFallbackTo).toBe('gpt-5.4-mini');
     });
 
+    test('falls back to GPT-5.4 Mini for any unavailable Codex 5.3 Spark selection error', async () => {
+        writeGroupConfig({
+            groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
+            keyAssignments: [{ keyId: 'key-1', routingMode: 'auto', primaryGroupId: 'group-a' }]
+        });
+        const config = createConfig({ providers: [provider('codex-a')] });
+        const manager = await initialize(config);
+        jest.spyOn(manager, 'selectProviderWithFallback').mockImplementation(async (_providerType, model) => {
+            if (model === 'gpt-5.3-codex-spark') {
+                const error = new Error('Codex provider temporarily unavailable');
+                error.status = 503;
+                throw error;
+            }
+            return { config: provider('codex-a'), actualProviderType: providerType, isFallback: false };
+        });
+
+        const result = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark');
+
+        expect(result).toMatchObject({
+            actualModel: 'gpt-5.4-mini',
+            isFallback: true,
+            modelFallbackFrom: 'gpt-5.3-codex-spark',
+            modelFallbackTo: 'gpt-5.4-mini'
+        });
+    });
+
     test('auto spillover stays on the selected group for the same session while a new session retries primary', async () => {
         writeGroupConfig({
             groups: [

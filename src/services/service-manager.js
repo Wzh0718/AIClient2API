@@ -4,7 +4,8 @@ import {
     ProviderPoolManager,
     getCodexModelFallbackTarget,
     getCodex53QuotaFallbackModel,
-    shouldTryCodex53QuotaModelFallback
+    shouldTryCodex53QuotaModelFallback,
+    isCodex53SparkModel
 } from '../providers/provider-pool-manager.js';
 import deepmerge from 'deepmerge';
 import crypto from 'crypto';
@@ -357,6 +358,10 @@ function createFixedCredentialUnavailableError(cause = null, route = {}, configR
     };
     if (cause) error.cause = cause;
     return error;
+}
+
+function shouldFallbackUnavailableCodex53(config, requestedModel) {
+    return isCodexProviderType(config?.MODEL_PROVIDER) && isCodex53SparkModel(requestedModel);
 }
 
 function createFixedRouteMismatchError(route = {}, configRevision = null) {
@@ -1617,7 +1622,8 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         } catch (error) {
             if (
                 options.modelFallbackAttempted !== true
-                && shouldTryCodex53QuotaModelFallback(effectiveProvider, actualModelName, error, config)
+                && (shouldTryCodex53QuotaModelFallback(effectiveProvider, actualModelName, error, config)
+                    || shouldFallbackUnavailableCodex53(config, actualModelName))
             ) {
                 return getCodex53QuotaFallbackService(config, actualModelName, options);
             }
@@ -1639,7 +1645,8 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
             if (
                 !selectedResult
                 && options.modelFallbackAttempted !== true
-                && shouldTryCodex53QuotaModelFallback(effectiveProvider, actualModelName, availabilityError, config)
+                && (shouldTryCodex53QuotaModelFallback(effectiveProvider, actualModelName, availabilityError, config)
+                    || shouldFallbackUnavailableCodex53(config, actualModelName))
             ) {
                 return getCodex53QuotaFallbackService(config, actualModelName, options);
             }
