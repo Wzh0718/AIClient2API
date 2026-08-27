@@ -212,8 +212,9 @@ function isAntigravityTransientCapacityError(error, providerType) {
         .join(' ')
         .toLowerCase();
 
-    return errorText.includes('no capacity available for model')
-        && errorText.includes('on the server');
+    return errorText.includes('model_capacity_exhausted')
+        || errorText.includes('model capacity exhausted')
+        || errorText.includes('no capacity available for model');
 }
 
 function normalizeAntigravityCapacityExhaustion(error, providerType, requestedModel) {
@@ -798,6 +799,11 @@ export function applyProviderRateLimitCooldown({
     requestedModel,
     loggerPrefix = '[Provider Pool]'
 }) {
+    // Antigravity may report model-wide capacity exhaustion as HTTP 503. Normalize
+    // this one explicit upstream condition before the generic 429 handling below;
+    // unrelated 503 errors must retain their normal server-error semantics.
+    normalizeAntigravityCapacityExhaustion(error, providerType, requestedModel);
+
     if (
         providerType === MODEL_PROVIDER.ANTIGRAVITY &&
         Number(getErrorStatusCode(error)) === 429 &&

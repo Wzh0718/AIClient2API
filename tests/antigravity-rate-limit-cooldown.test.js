@@ -70,6 +70,21 @@ function createCapacityError() {
     return error;
 }
 
+function createCapacityCodeError() {
+    const error = new Error('Upstream capacity exhausted');
+    error.response = {
+        status: 503,
+        data: {
+            error: {
+                code: 503,
+                status: 'MODEL_CAPACITY_EXHAUSTED',
+                message: 'No capacity available for model gemini-3.1-flash-lite on the server'
+            }
+        }
+    };
+    return error;
+}
+
 describe('Antigravity model quota cooldown', () => {
     test('switches accounts for transient image capacity without marking the account unhealthy', async () => {
         jest.spyOn(Math, 'random').mockReturnValue(0);
@@ -122,7 +137,13 @@ describe('Antigravity model quota cooldown', () => {
         expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
         expect(providerPoolManager.markProviderUnhealthyImmediately).not.toHaveBeenCalled();
         expect(providerPoolManager.markProviderUnhealthyWithRecoveryTime).not.toHaveBeenCalled();
-        expect(providerPoolManager.markAntigravityModelQuotaUnhealthy).not.toHaveBeenCalled();
+        expect(providerPoolManager.markAntigravityModelQuotaUnhealthy).toHaveBeenCalledWith(
+            'gemini-antigravity',
+            { uuid: 'provider-ultra-1' },
+            'gemini-3.1-flash-image',
+            '429 Too Many Requests - model cooldown',
+            expect.any(Date)
+        );
         expect(res.body).toContain('antigravity-capacity-retry-success');
     });
 
@@ -191,6 +212,32 @@ describe('Antigravity model quota cooldown', () => {
             'gemini-3.1-flash-image',
             '429 Too Many Requests - model cooldown',
             new Date(now + 120000)
+        );
+    });
+
+    test('treats explicit model capacity exhaustion as a model cooldown while preserving 429 semantics', () => {
+        jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-08-10T08:00:00Z'));
+        const providerPoolManager = { markAntigravityModelQuotaUnhealthy: jest.fn() };
+        const error = createCapacityCodeError();
+
+        const applied = applyProviderRateLimitCooldown({
+            error,
+            config: { RATE_LIMIT_COOLDOWN_MS: 30000 },
+            providerPoolManager,
+            providerType: 'gemini-antigravity',
+            providerUuid: 'provider-pro-1',
+            requestedModel: 'gemini-3.1-flash-lite'
+        });
+
+        expect(applied).toBe(true);
+        expect(error.status).toBe(429);
+        expect(error.isAntigravityModelCapacity).toBe(true);
+        expect(providerPoolManager.markAntigravityModelQuotaUnhealthy).toHaveBeenCalledWith(
+            'gemini-antigravity',
+            { uuid: 'provider-pro-1' },
+            'gemini-3.1-flash-lite',
+            '429 Too Many Requests - model cooldown',
+            expect.any(Date)
         );
     });
 
