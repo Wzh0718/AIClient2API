@@ -169,6 +169,27 @@ function sendManagementMutationResponse(res, {
     });
 }
 
+function compactKeyManagementMutationData(keyData = {}) {
+    return {
+        id: keyData.id || null,
+        name: keyData.name || '',
+        enabled: keyData.enabled !== false,
+        dailyLimit: Number(keyData.dailyLimit || 0),
+        lastResetDate: keyData.lastResetDate || null,
+        routingMode: keyData.routingMode || 'pool',
+        primaryGroupId: keyData.primaryGroupId || null,
+        fixedCredential: keyData.fixedCredential ? { ...keyData.fixedCredential } : null,
+        manualLock: keyData.manualLock === true,
+        concurrencyLimit: Number(keyData.concurrencyLimit || 0),
+        queueLimit: Number(keyData.queueLimit || 0),
+        queueTimeoutMs: Number(keyData.queueTimeoutMs || 300000),
+        concurrencyMode: keyData.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
+        configSyncEpoch: keyData.configSyncEpoch || null,
+        configSyncRevision: keyData.configSyncRevision || null,
+        routingConfigRevision: keyData.routingConfigRevision || null
+    };
+}
+
 function createCredentialGroupApiError(code, message) {
     const error = new Error(message);
     error.code = code;
@@ -1090,11 +1111,10 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
         if (method === 'POST' && path === '/api/potluck/stats/reset-tokens') {
             const result = await resetAllTokenStats();
             clearStatsCache();
-            const stats = enrichPotluckStatsAccountEmails(await getStats(getRequestCostOptions(req)));
             sendManagementMutationResponse(res, {
                 result,
                 message: `已重置 ${result.updated}/${result.total} 个 Key 的 Token 统计`,
-                data: stats
+                data: result
             });
             return true;
         }
@@ -1138,7 +1158,7 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
             sendManagementMutationResponse(res, {
                 result: keyData,
                 message: 'API Key 创建成功',
-                data: keyData,
+                data: compactKeyManagementMutationData(keyData),
                 successStatusCode: 201
             });
             return true;
@@ -1220,7 +1240,7 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 sendManagementMutationResponse(res, {
                     result: keyData,
                     message: '每日限额更新成功',
-                    data: keyData
+                    data: compactKeyManagementMutationData(keyData)
                 });
                 return true;
             }
@@ -1235,7 +1255,7 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 sendManagementMutationResponse(res, {
                     result: keyData,
                     message: '使用量重置成功',
-                    data: keyData
+                    data: compactKeyManagementMutationData(keyData)
                 });
                 return true;
             }
@@ -1250,7 +1270,7 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 sendManagementMutationResponse(res, {
                     result: keyData,
                     message: 'Token 统计重置成功',
-                    data: keyData
+                    data: compactKeyManagementMutationData(keyData)
                 });
                 return true;
             }
@@ -1265,7 +1285,7 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 sendManagementMutationResponse(res, {
                     result: keyData,
                     message: `Key 已成功${keyData.enabled ? '启用' : '禁用'}`,
-                    data: keyData
+                    data: compactKeyManagementMutationData(keyData)
                 });
                 return true;
             }
@@ -1291,7 +1311,7 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 sendManagementMutationResponse(res, {
                     result: keyData,
                     message: '名称更新成功',
-                    data: keyData
+                    data: compactKeyManagementMutationData(keyData)
                 });
                 return true;
             }
@@ -1328,7 +1348,7 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 sendManagementMutationResponse(res, {
                     result: keyData,
                     message: 'Key 路由更新成功',
-                    data: keyData
+                    data: compactKeyManagementMutationData(keyData)
                 });
                 return true;
             }
@@ -1343,7 +1363,7 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 sendManagementMutationResponse(res, {
                     result: keyData,
                     message: 'Key 并发配置更新成功',
-                    data: keyData
+                    data: compactKeyManagementMutationData(keyData)
                 });
                 return true;
             }
@@ -1361,7 +1381,7 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                     data: {
                         oldKey: result.oldKey,
                         newKey: result.newKey,
-                        keyData: result.keyData
+                        keyData: compactKeyManagementMutationData(result.keyData)
                     }
                 });
                 return true;

@@ -111,6 +111,7 @@ describe('api potluck administration persistence responses', () => {
         const res = await callUpdateName({
             id: 'key-1',
             name: 'Updated Name',
+            usageHistory: { '2026-08-27': { models: { 'gpt-5': { totalTokens: 999999 } } } },
             persistencePending: false
         });
 
@@ -125,5 +126,6 @@ describe('api potluck administration persistence responses', () => {
             }
         });
         expect(res.body.data).not.toHaveProperty('persistencePending');
+        expect(res.body.data).not.toHaveProperty('usageHistory');
     });
 });
