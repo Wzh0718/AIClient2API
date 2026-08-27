@@ -9,6 +9,7 @@ let currentProviderConfigs = null;
 let usagePageDataPromise = null;
 let accountUsageSummaryByKey = new Map();
 let accountUsageSummaryMeta = null;
+let antigravityRecoveryRefreshTimer = null;
 const USAGE_REFRESH_POLL_INTERVAL_MS = 1500;
 const USAGE_REFRESH_WAIT_TIMEOUT_MS = 150000;
 const ANTIGRAVITY_PROVIDER_TYPE = 'gemini-antigravity';
@@ -621,8 +622,12 @@ function sortAntigravityUnavailableModels(models) {
 export function getAntigravityUnavailableModels(instance, providerType) {
     if (providerType !== ANTIGRAVITY_PROVIDER_TYPE) return [];
 
+    const now = Date.now();
     const models = Object.entries(instance.antigravityQuotaHealth?.models || {})
-        .filter(([, state]) => state?.isHealthy === false)
+        .filter(([, state]) => state?.isHealthy === false && (
+            !state?.scheduledRecoveryTime
+            || Date.parse(state.scheduledRecoveryTime) > now
+        ))
         .map(([model, state]) => ({
             model,
             scheduledRecoveryTime: state.scheduledRecoveryTime || null,
@@ -645,17 +650,18 @@ export function getAntigravityPoolUnavailableModels(providerType, instances) {
     ));
     if (eligibleInstances.length === 0) return [];
 
+    const now = Date.now();
     const candidateModels = new Set();
     eligibleInstances.forEach(instance => {
         Object.entries(instance.antigravityQuotaHealth?.models || {}).forEach(([model, state]) => {
-            if (state?.isHealthy === false) candidateModels.add(model);
+            if (state?.isHealthy === false && (!state?.scheduledRecoveryTime || Date.parse(state.scheduledRecoveryTime) > now)) candidateModels.add(model);
         });
     });
 
     const unavailableModels = [];
     candidateModels.forEach(model => {
         const states = eligibleInstances.map(instance => instance.antigravityQuotaHealth?.models?.[model]);
-        if (!states.every(state => state?.isHealthy === false)) return;
+        if (!states.every(state => state?.isHealthy === false && (!state?.scheduledRecoveryTime || Date.parse(state.scheduledRecoveryTime) > now))) return;
 
         const earliestRecovery = states
             .map(state => ({
@@ -678,6 +684,7 @@ export function getAntigravityModelAvailabilitySummaries(providerType, instances
         return [];
     }
 
+    const now = Date.now();
     const activeInstances = instances.filter(instance => !instance?.error?.includes('not initialized'));
     if (activeInstances.length === 0) return [];
 
@@ -710,7 +717,7 @@ export function getAntigravityModelAvailabilitySummaries(providerType, instances
                 credentialUnavailableCount++;
                 return;
             }
-            if (modelState.isHealthy === true) {
+            if (modelState.isHealthy === true || (modelState.scheduledRecoveryTime && Date.parse(modelState.scheduledRecoveryTime) <= now)) {
                 availableCount++;
                 return;
             }
@@ -842,6 +849,36 @@ function renderAntigravityUnavailableModels(instance, providerType) {
     return section;
 }
 
+export function scheduleAntigravityRecoveryRefresh(data, now = Date.now(), schedule = setTimeout) {
+    if (antigravityRecoveryRefreshTimer) {
+        clearTimeout(antigravityRecoveryRefreshTimer);
+        antigravityRecoveryRefreshTimer = null;
+    }
+
+    const recoveryTimes = [];
+    for (const provider of Object.values(data?.providers || {})) {
+        for (const instance of provider?.instances || []) {
+            for (const state of Object.values(instance?.antigravityQuotaHealth?.models || {})) {
+                const scheduledRecoveryTime = Date.parse(state?.scheduledRecoveryTime || '');
+                if (state?.isHealthy === false && Number.isFinite(scheduledRecoveryTime) && scheduledRecoveryTime > now) {
+                    recoveryTimes.push(scheduledRecoveryTime);
+                }
+            }
+        }
+    }
+    if (recoveryTimes.length === 0) return null;
+
+    const delay = Math.max(0, Math.min(...recoveryTimes) - now + 50);
+    antigravityRecoveryRefreshTimer = schedule(() => {
+        antigravityRecoveryRefreshTimer = null;
+        refreshProviderUsage(ANTIGRAVITY_PROVIDER_TYPE).catch(error => {
+            console.debug('Antigravity recovery refresh failed:', error?.message || error);
+        });
+    }, delay);
+    if (antigravityRecoveryRefreshTimer?.unref) antigravityRecoveryRefreshTimer.unref();
+    return delay;
+}
+
 function renderUsageRefreshWarning(instance) {
     const message = instance.lastRefreshError || instance.error;
     if (!message) return null;
@@ -966,6 +1003,7 @@ function renderUsageData(data, container) {
     if (!container) return;
     container.innerHTML = '';
     container.classList.add('usage-provider-groups');
+    scheduleAntigravityRecoveryRefresh(data);
 
     if (!data?.providers || Object.keys(data.providers).length === 0) {
         container.classList.remove('usage-provider-groups');

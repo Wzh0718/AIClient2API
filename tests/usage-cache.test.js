@@ -106,6 +106,41 @@ describe('usage cache TTL', () => {
         });
     });
 
+    test('removes expired Antigravity model cooldowns when reading display cache', async () => {
+        writeCache({
+            timestamp: '2026-06-16T12:00:00.000Z',
+            providers: {
+                'gemini-antigravity': {
+                    providerType: 'gemini-antigravity',
+                    instances: [{
+                        uuid: 'gemini-a',
+                        antigravityQuotaHealth: {
+                            models: {
+                                'gemini-expired': {
+                                    isHealthy: false,
+                                    scheduledRecoveryTime: '2026-06-16T11:59:00.000Z',
+                                    source: 'upstream_429'
+                                },
+                                'gemini-active': {
+                                    isHealthy: false,
+                                    scheduledRecoveryTime: '2026-06-16T12:01:00.000Z',
+                                    source: 'upstream_429'
+                                }
+                            }
+                        }
+                    }]
+                }
+            }
+        });
+
+        const { readUsageDisplayCache } = await loadUsageCacheModule();
+        const cache = await readUsageDisplayCache({ maxAgeMs: null, now: new Date('2026-06-16T12:00:00.000Z') });
+        const models = cache.providers['gemini-antigravity'].instances[0].antigravityQuotaHealth.models;
+
+        expect(models).not.toHaveProperty('gemini-expired');
+        expect(models).toHaveProperty('gemini-active');
+    });
+
     test('write keeps last successful instance usage when a refresh returns an error', async () => {
         writeCache({
             timestamp: '2026-06-16T11:50:00.000Z',

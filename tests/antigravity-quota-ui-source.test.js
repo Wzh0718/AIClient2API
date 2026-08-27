@@ -50,6 +50,8 @@ describe('Antigravity quota UI source', () => {
         expect(i18n).toContain("'usage.antigravity.moreModels': '另 {count} 个'");
         expect(source).not.toContain('availability.availabilityPercent');
         expect(source).toContain('scheduledRecoveryTime');
+        expect(source).toContain('Date.parse(state.scheduledRecoveryTime) > now');
+        expect(source).toContain('scheduleAntigravityRecoveryRefresh');
         expect(source).not.toContain('antigravityModelStatus');
         expect(source).not.toContain('btn-check-model-status');
         expect(source).not.toContain('checkAntigravityModelStatus');

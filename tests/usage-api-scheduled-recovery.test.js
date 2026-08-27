@@ -103,6 +103,43 @@ describe('usage api scheduled recovery handling', () => {
         );
     });
 
+    test('removes expired Antigravity model cooldowns from refreshed usage responses', async () => {
+        const provider = {
+            uuid: 'expired-antigravity-quota',
+            customName: 'Expired Antigravity quota',
+            isHealthy: true,
+            antigravityQuotaHealth: {
+                families: {},
+                models: {
+                    'gemini-expired': {
+                        isHealthy: false,
+                        scheduledRecoveryTime: '2026-08-27T00:00:00.000Z',
+                        source: 'upstream_429'
+                    },
+                    'gemini-future': {
+                        isHealthy: false,
+                        scheduledRecoveryTime: '2099-01-02T00:00:00.000Z',
+                        source: 'upstream_429'
+                    }
+                }
+            }
+        };
+        getServiceAdapter.mockReturnValue({});
+        usageService.getFormattedUsage.mockResolvedValue({
+            summary: { plan: 'Google AI Pro' },
+            items: []
+        });
+
+        const usage = await getAllProvidersUsage({}, {
+            providerPools: { 'gemini-antigravity': [provider] },
+            syncAntigravityQuotaHealth: jest.fn()
+        });
+
+        const models = usage.providers['gemini-antigravity'].instances[0].antigravityQuotaHealth.models;
+        expect(models).not.toHaveProperty('gemini-expired');
+        expect(models).toHaveProperty('gemini-future');
+    });
+
     test('skips disabled providers without surfacing refresh errors', async () => {
         const usage = await getAllProvidersUsage({}, {
             providerPools: {

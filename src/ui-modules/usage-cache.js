@@ -13,7 +13,39 @@ export const DEFAULT_USAGE_CACHE_TTL_MS = 60 * 60 * 1000;
 
 let inMemoryDisplayCache = null;
 
-export function buildUsageDisplaySnapshot(usageData = {}) {
+export function normalizeAntigravityQuotaHealth(quotaHealth, now = Date.now()) {
+    if (!quotaHealth || typeof quotaHealth !== 'object') return quotaHealth;
+    if (!quotaHealth.models || typeof quotaHealth.models !== 'object') return quotaHealth;
+
+    const models = Object.fromEntries(Object.entries(quotaHealth.models).filter(([, state]) => {
+        if (state?.isHealthy !== false || !state?.scheduledRecoveryTime) return true;
+        const recoveryMs = Date.parse(state.scheduledRecoveryTime);
+        return !Number.isFinite(recoveryMs) || recoveryMs > now;
+    }));
+
+    return { ...quotaHealth, models };
+}
+
+function normalizeUsageAntigravityCooldowns(usageData, now = Date.now()) {
+    const provider = usageData?.providers?.['gemini-antigravity'];
+    if (!provider || !Array.isArray(provider.instances)) return usageData;
+    return {
+        ...usageData,
+        providers: {
+            ...usageData.providers,
+            'gemini-antigravity': {
+                ...provider,
+                instances: provider.instances.map(instance => ({
+                    ...instance,
+                    antigravityQuotaHealth: normalizeAntigravityQuotaHealth(instance.antigravityQuotaHealth, now)
+                }))
+            }
+        }
+    };
+}
+
+export function buildUsageDisplaySnapshot(usageData = {}, now = Date.now()) {
+    usageData = normalizeUsageAntigravityCooldowns(usageData, now);
     const providers = {};
     for (const [providerType, providerData] of Object.entries(usageData.providers || {})) {
         providers[providerType] = {
@@ -32,12 +64,12 @@ export function buildUsageDisplaySnapshot(usageData = {}) {
     return { ...usageData, providers };
 }
 
-function createDisplayCacheEnvelope(usageData) {
+function createDisplayCacheEnvelope(usageData, now = Date.now()) {
     return {
         schemaVersion: USAGE_DISPLAY_CACHE_SCHEMA_VERSION,
         sourceTimestamp: usageData?.timestamp || null,
         generatedAt: new Date().toISOString(),
-        data: buildUsageDisplaySnapshot(usageData)
+        data: buildUsageDisplaySnapshot(usageData, now)
     };
 }
 
@@ -158,10 +190,10 @@ function isUsageCacheFresh(cache, { maxAgeMs = DEFAULT_USAGE_CACHE_TTL_MS, now =
 
 function readDisplayEnvelopeData(envelope, options = {}) {
     if (!envelope?.data || envelope.schemaVersion !== USAGE_DISPLAY_CACHE_SCHEMA_VERSION) return null;
-    const timestampedData = {
+    const timestampedData = normalizeUsageAntigravityCooldowns({
         ...envelope.data,
         timestamp: envelope.data.timestamp || envelope.sourceTimestamp
-    };
+    }, options.now ?? Date.now());
     if (!isUsageCacheFresh(timestampedData, options)) {
         if (!options.allowStale) return null;
         return { ...timestampedData, stale: true };
@@ -180,7 +212,7 @@ export async function readUsageCache(options = {}) {
     try {
         if (existsSync(USAGE_CACHE_FILE)) {
             const content = await fs.readFile(USAGE_CACHE_FILE, 'utf8');
-            const cache = JSON.parse(content);
+            const cache = normalizeUsageAntigravityCooldowns(JSON.parse(content), options.now ?? Date.now());
             if (!isUsageCacheFresh(cache, options)) {
                 if (options.allowStale) {
                     logger.info('[Usage Cache] Returning stale usage data as last-known fallback');
@@ -219,7 +251,7 @@ export async function readUsageDisplayCache(options = {}) {
         // 升级兼容：只有 raw cache 时迁移一次，不访问上游额度接口。
         const rawCache = await readUsageCache(options);
         if (!rawCache) return null;
-        const envelope = createDisplayCacheEnvelope(rawCache);
+        const envelope = createDisplayCacheEnvelope(rawCache, options.now ?? Date.now());
         await atomicWriteFile(USAGE_DISPLAY_CACHE_FILE, JSON.stringify(envelope), { encoding: 'utf8', mode: 0o600 });
         inMemoryDisplayCache = envelope;
         return readDisplayEnvelopeData(envelope, options);
@@ -235,7 +267,9 @@ export async function readUsageDisplayCache(options = {}) {
  */
 export async function writeUsageCacheUnlocked(usageData) {
     try {
-        const safeUsageData = await mergeUsageDataWithExistingLastSuccessfulUsage(usageData);
+        const safeUsageData = normalizeUsageAntigravityCooldowns(
+            await mergeUsageDataWithExistingLastSuccessfulUsage(usageData)
+        );
         await fs.mkdir(path.dirname(USAGE_CACHE_FILE), { recursive: true });
         await atomicWriteFile(USAGE_CACHE_FILE, JSON.stringify(safeUsageData, null, 2), { encoding: 'utf8', mode: 0o600 });
         logger.info('[Usage Cache] Usage data cached to', USAGE_CACHE_FILE);

@@ -6,6 +6,7 @@ import { readUsageCache, readUsageDisplayCache, writeUsageCache, writeUsageCache
 import { PROVIDER_MAPPINGS } from '../utils/provider-utils.js';
 import { MODEL_PROVIDER, getRequestBody } from '../utils/common.js';
 import { withFileLock } from '../utils/file-lock.js';
+import { normalizeAntigravityQuotaHealth } from './usage-cache.js';
 import path from 'path';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import {
@@ -385,7 +386,7 @@ function deriveCodexQuotaHealthFromUsage(currentHealth, usage, now = Date.now())
     return quotaHealth;
 }
 
-function deriveAntigravityQuotaHealthFromUsage(currentHealth) {
+function deriveAntigravityQuotaHealthFromUsage(currentHealth, now = Date.now()) {
     const quotaHealth = currentHealth && typeof currentHealth === 'object'
         ? {
             families: { ...(currentHealth.families || {}) },
@@ -399,7 +400,7 @@ function deriveAntigravityQuotaHealthFromUsage(currentHealth) {
         }
     }
 
-    return quotaHealth;
+    return normalizeAntigravityQuotaHealth(quotaHealth, now);
 }
 
 function getCachedInstancesByUuid(providerCache = {}) {
@@ -474,7 +475,9 @@ function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderDa
             codexAccountId: instance.codexAccountId || cachedInstance.codexAccountId || null,
             codexEmail: instance.codexEmail || cachedInstance.codexEmail || null,
             codexQuotaHealth: instance.codexQuotaHealth || cachedInstance.codexQuotaHealth || null,
-            antigravityQuotaHealth: instance.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null,
+            antigravityQuotaHealth: normalizeAntigravityQuotaHealth(
+                instance.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null
+            ),
             configFilePath: instance.configFilePath || cachedInstance.configFilePath || null,
             isHealthy: instance.isHealthy,
             isDisabled: instance.isDisabled,
@@ -541,7 +544,9 @@ function getCachedInstanceUsageFallback(providerType, uuid, instanceResult, cach
         codexAccountId: instanceResult.codexAccountId || cachedInstance.codexAccountId || null,
         codexEmail: instanceResult.codexEmail || cachedInstance.codexEmail || null,
         codexQuotaHealth: instanceResult.codexQuotaHealth || cachedInstance.codexQuotaHealth || null,
-        antigravityQuotaHealth: instanceResult.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null,
+        antigravityQuotaHealth: normalizeAntigravityQuotaHealth(
+            instanceResult.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null
+        ),
         configFilePath: instanceResult.configFilePath || cachedInstance.configFilePath || null,
         isHealthy: instanceResult.isHealthy,
         isDisabled: instanceResult.isDisabled,
