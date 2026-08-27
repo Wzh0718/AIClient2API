@@ -2369,16 +2369,6 @@
                 document.getElementById('maxTps').textContent = (stats.maxTps || 0).toFixed(2);
         }
 
-        async function loadFullStatsInBackground() {
-            const statsResult = await apiRequest(`${API_BASE}/stats?${getCostQuery()}`);
-            if (!statsResult?.success) {
-                showToast('统计明细加载失败，已显示摘要数据', 'error');
-                return null;
-            }
-            renderStatsSummary(statsResult.data);
-            return statsResult.data;
-        }
-
         async function loadData() {
             try {
                 loadReconciliationStatus();
@@ -2392,12 +2382,6 @@
                 renderStatsSummary(compactStats);
                 allKeys = keys;
                 applyFilterAndSort();
-                void loadFullStatsInBackground().then(stats => {
-                    if (!stats) return;
-                    // 完整统计到达后再绘制历史图表，避免阻塞首屏 Key 列表。
-                    renderUsageHistory(stats.usageHistory, currentUsageRange);
-                    renderCalendar(stats.usageHistory || {});
-                }).catch(() => {});
                 // 先等 ledger 区间统计就绪再渲染分布，避免 live 兜底与 ledger 两套数据闪烁
                 await refreshLedgerRangeStats(currentUsageRange, { force: true });
                 return true;
@@ -3320,7 +3304,7 @@
                 return `<div class="key-card ${key.enabled ? '' : 'disabled'}">
                     <div class="key-info">
                         <div class="key-name"><span class="key-name-text">${escapeHtml(key.name)}</span><button class="btn-copy" style="padding: 2px 6px;" onclick="openEditName('${key.id}', '${escapeHtml(key.name).replace(/'/g, "\\'")}')" title="修改名称"><i class="fas fa-edit"></i></button>${renderKeyRoutingSummary(key)}${renderKeyConcurrencySummary(key)}</div>
-                        <div class="key-id">${key.maskedKey} <button class="btn-copy" onclick="copyToClipboard('${key.id}')" title="复制完整 Key"><i class="fas fa-copy"></i></button></div>
+                        <div class="key-id">${key.maskedKey} <button class="btn-copy" onclick="copyKeyFromDetail('${key.id}')" title="按需获取并复制完整 Key"><i class="fas fa-copy"></i></button></div>
                         ${providerBadges ? `<div class="key-dist-mini">${providerBadges}</div>` : ''}
                         ${dailyUsage}
                     </div>
@@ -3647,6 +3631,17 @@
                 if (mode !== 'pool' && concurrencySection.contains(document.activeElement)) document.activeElement.blur();
             }
             updateConcurrencyFields();
+        }
+
+        async function copyKeyFromDetail(keyId) {
+            try {
+                const result = await apiRequest(`${API_BASE}/keys/${encodeURIComponent(keyId)}/detail`);
+                const secret = result?.success ? result.data?.secret : null;
+                if (!secret) { showToast('完整 Key 获取失败', 'error'); return; }
+                copyToClipboard(secret);
+            } catch (error) {
+                showToast(error?.message || '完整 Key 获取失败', 'error');
+            }
         }
 
         function updateConcurrencyFields() {

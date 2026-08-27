@@ -2530,12 +2530,14 @@ export async function getStats(options = {}) {
     ensureLoaded();
     const { conversionModel } = getCostOptions(options);
     const compactHistory = Boolean(options.compactHistory);
+    const includeKeySummaries = Boolean(options.includeKeySummaries);
     const keys = Object.values(keyStore.keys);
     let enabledKeys = 0, todayTotalUsage = 0, totalUsage = 0;
     let todayPromptTokens = 0, todayCompletionTokens = 0, todayReasoningTokens = 0, todayTotalTokens = 0, todayCachedTokens = 0;
     let totalPromptTokens = 0, totalCompletionTokens = 0, totalReasoningTokens = 0, totalTokens = 0, totalCachedTokens = 0;
     const aggregatedHistory = {};
     const aggregateModels = {};
+    const keySummaries = includeKeySummaries ? [] : null;
     const today = getTodayDateString();
 
     for (const key of keys) {
@@ -2616,6 +2618,44 @@ export async function getStats(options = {}) {
                 }
             });
         }
+
+        if (includeKeySummaries) {
+            const rates = rateManager.getStats(`key:${key.id}`);
+            const summaryHistory = Object.fromEntries(Object.entries(key.usageHistory || {}).map(([date, day]) => [date, { summary: day?.summary || {} }]));
+            keySummaries.push({
+                id: key.id,
+                name: key.name || '',
+                enabled: key.enabled !== false,
+                dailyLimit: Number(key.dailyLimit || 0),
+                todayUsage: hasCurrentDailyCounters ? toNumber(key.todayUsage) : 0,
+                todayPromptTokens: hasCurrentDailyCounters ? toNumber(key.todayPromptTokens) : 0,
+                todayCompletionTokens: hasCurrentDailyCounters ? toNumber(key.todayCompletionTokens) : 0,
+                todayReasoningTokens: hasCurrentDailyCounters ? toNumber(key.todayReasoningTokens) : 0,
+                todayTotalTokens: hasCurrentDailyCounters ? toNumber(key.todayTotalTokens) : 0,
+                todayCachedTokens: hasCurrentDailyCounters ? toNumber(key.todayCachedTokens) : 0,
+                totalUsage: toNumber(key.totalUsage),
+                totalPromptTokens: toNumber(key.totalPromptTokens),
+                totalCompletionTokens: toNumber(key.totalCompletionTokens),
+                totalReasoningTokens: toNumber(key.totalReasoningTokens),
+                totalTokens: toNumber(key.totalTokens),
+                totalCachedTokens: toNumber(key.totalCachedTokens),
+                lastResetDate: key.lastResetDate || null,
+                lastUsedAt: key.lastUsedAt || null,
+                qps: rates.qps, tps: rates.tps, rpm: rates.rpm,
+                maxQps: Math.max(toNumber(key.maxQps), rates.maxQps),
+                maxTps: Math.max(toNumber(key.maxTps), rates.maxTps),
+                maxRpm: Math.max(toNumber(key.maxRpm), rates.maxRpm),
+                routingMode: key.routingMode || 'pool',
+                primaryGroupId: key.primaryGroupId || null,
+                manualLock: key.manualLock === true,
+                concurrencyLimit: toNumber(key.concurrencyLimit),
+                queueLimit: toNumber(key.queueLimit),
+                queueTimeoutMs: toNumber(key.queueTimeoutMs || 300000),
+                concurrencyMode: key.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
+                fixedCredential: key.fixedCredential ? { ...key.fixedCredential } : null,
+                usageHistory: summaryHistory
+            });
+        }
     }
 
     const globalRates = rateManager.getGlobalStats();
@@ -2631,7 +2671,7 @@ export async function getStats(options = {}) {
         totalTokens,
         cachedTokens: totalCachedTokens
     };
-    return {
+    const result = {
         totalKeys: keys.length,
         enabledKeys,
         disabledKeys: keys.length - enabledKeys,
@@ -2661,6 +2701,8 @@ export async function getStats(options = {}) {
         },
         usageHistory: aggregatedHistory
     };
+    if (includeKeySummaries) result.keySummaries = keySummaries;
+    return result;
 }
 
 /**

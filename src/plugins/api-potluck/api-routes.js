@@ -25,7 +25,8 @@ import {
     getLedgerKeyIdentities,
     resetAllTokenStats,
     getCredentialRoutingKeyCatalog,
-    applyKeyRoutingAssignments
+    applyKeyRoutingAssignments,
+    resolveKeyIdByHash
 } from './key-manager.js';
 import { getRequestBody } from '../../utils/common.js';
 import { extractCodexCredentialIdentity } from '../../utils/codex-utils.js';
@@ -95,6 +96,48 @@ function clearStatsCache() {
     overviewCache.clear();
 }
 
+const LIST_KEY_FIELDS = [
+    'name', 'enabled', 'dailyLimit', 'todayUsage', 'todayPromptTokens', 'todayCompletionTokens',
+    'todayReasoningTokens', 'todayTotalTokens', 'todayCachedTokens', 'totalUsage', 'totalPromptTokens',
+    'totalCompletionTokens', 'totalReasoningTokens', 'totalTokens', 'totalCachedTokens', 'lastResetDate',
+    'lastUsedAt', 'qps', 'tps', 'rpm', 'maxQps', 'maxTps', 'maxRpm', 'routingMode', 'primaryGroupId',
+    'manualLock', 'concurrencyLimit', 'queueLimit', 'queueTimeoutMs', 'concurrencyMode', 'maskedKey'
+];
+
+function getRequestDetailOptions(req) {
+    try {
+        const detail = new URL(req.url || '', 'http://localhost').searchParams.get('detail');
+        return ['summary', 'history', 'full'].includes(detail) ? detail : 'full';
+    } catch {
+        return 'full';
+    }
+}
+
+function resolveManagementKeyId(keyId) {
+    return (typeof resolveKeyIdByHash === 'function' ? resolveKeyIdByHash(keyId) : null) || keyId;
+}
+
+function shapeStatsByDetail(stats, detail) {
+    // Supported public levels: detail=summary, detail=history, detail=full.
+    if (detail === 'full') return stats;
+    const shaped = { ...stats };
+    if (detail === 'summary') {
+        shaped.usageHistory = Object.fromEntries(
+            Object.entries(stats.usageHistory || {}).map(([date, day]) => [date, { summary: day?.summary || {} }])
+        );
+    } else if (detail === 'history') {
+        shaped.usageHistory = Object.fromEntries(
+            Object.entries(stats.usageHistory || {}).map(([date, day]) => [date, {
+                summary: day?.summary || {},
+                providers: day?.providers || {},
+                models: day?.models || {},
+                providerModels: day?.providerModels || {}
+            }])
+        );
+    }
+    return shaped;
+}
+
 function getCachedStats(costOptions = {}) {
     const cacheKey = getStatsCacheKey(costOptions);
     const now = Date.now();
@@ -122,11 +165,18 @@ function getCachedOverview(costOptions = {}) {
     if (entry?.value && now - entry.createdAt < STATS_CACHE_TTL_MS) return entry.value;
     if (entry?.promise) return entry.promise;
 
-    const promise = Promise.all([
-        listKeys({ ...costOptions, summaryOnly: true, compactCosts: true }),
-        getCachedStats({ ...costOptions, compactHistory: true, compactAccounts: true })
-    ]).then(([keys, stats]) => {
-        const overview = { keys: keys.map(compactKeyForList), stats };
+    const promise = getCachedStats({
+        ...costOptions,
+        compactHistory: true,
+        compactAccounts: true,
+        includeKeySummaries: true
+    }).then(stats => {
+        const keys = (stats.keySummaries || []).map(key => ({
+            ...key,
+            maskedKey: `${String(key.id || '').substring(0, 12)}...${String(key.id || '').slice(-4)}`
+        }));
+        const { keySummaries, ...summaryStats } = stats;
+        const overview = { keys: keys.map(compactKeyForList), stats: summaryStats };
         overviewCache.set(cacheKey, { value: overview, createdAt: Date.now() });
         return overview;
     }).catch(error => {
@@ -150,6 +200,22 @@ function compactUsageHistoryForList(usageHistory = {}) {
 }
 
 function compactKeyForList(key) {
+    const fixedCredential = key?.fixedCredential?.uuid
+        ? {
+            providerType: key.fixedCredential.providerType || 'openai-codex-oauth',
+            credentialRef: getCredentialRef(
+                key.fixedCredential.providerType || 'openai-codex-oauth',
+                key.fixedCredential.uuid
+            )
+        }
+        : null;
+    const result = { keyRef: hashSecret(key.id), id: hashSecret(key.id), fixedCredential };
+    for (const field of LIST_KEY_FIELDS) result[field] = key[field];
+    result.usageHistory = compactUsageHistoryForList(key.usageHistory || {});
+    return result;
+}
+
+function compactKeyForListLegacy(key) {
     const fixedCredential = key?.fixedCredential?.uuid
         ? {
             providerType: key.fixedCredential.providerType || 'openai-codex-oauth',
@@ -1091,9 +1157,16 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
             return true;
         }
 
-        // GET /api/potluck/stats - 获取统计信息
+        // GET /api/potluck/stats?detail=summary|history|full - 获取分层统计信息
         if (method === 'GET' && path === '/api/potluck/stats') {
-            const stats = enrichPotluckStatsAccountEmails(await getCachedStats(getRequestCostOptions(req)));
+            const detail = getRequestDetailOptions(req);
+            const costOptions = getRequestCostOptions(req);
+            const statsOptions = detail === 'summary'
+                ? { ...costOptions, compactHistory: true, compactAccounts: true }
+                : detail === 'history'
+                    ? { ...costOptions, compactAccounts: true }
+                    : costOptions;
+            const stats = enrichPotluckStatsAccountEmails(shapeStatsByDetail(await getCachedStats(statsOptions), detail));
             sendJson(res, 200, { success: true, data: stats });
             return true;
         }
@@ -1155,10 +1228,7 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
             const costOptions = getRequestCostOptions(req);
             const keys = await listKeys({ ...costOptions, summaryOnly: true, compactCosts: true });
             const stats = await getCachedStats({ ...costOptions, compactHistory: true, compactAccounts: true });
-            sendJson(res, 200, { 
-                success: true, 
-                data: { keys: keys.map(compactKeyForList), stats }
-            });
+            sendJson(res, 200, { success: true, data: { keys: keys.map(compactKeyForListLegacy), stats } });
             return true;
         }
 
@@ -1198,8 +1268,25 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
         // 处理带 keyId 的路由
         const keyIdMatch = path.match(/^\/api\/potluck\/keys\/([^\/]+)(\/.*)?$/);
         if (keyIdMatch) {
-            const keyId = decodeURIComponent(keyIdMatch[1]);
+            const keyId = resolveManagementKeyId(decodeURIComponent(keyIdMatch[1]));
             const subPath = keyIdMatch[2] || '';
+
+            if (method === 'GET' && subPath === '/detail') {
+                const keyData = await getKey(keyId, getRequestCostOptions(req));
+                if (!keyData) {
+                    sendJson(res, 404, { success: false, error: { message: '未找到 Key' } });
+                    return true;
+                }
+                sendJson(res, 200, {
+                    success: true,
+                    data: {
+                        id: hashSecret(keyId),
+                        maskedKey: keyData.maskedKey || `${keyId.substring(0, 12)}...${keyId.substring(keyId.length - 4)}`,
+                        secret: keyId
+                    }
+                });
+                return true;
+            }
 
             if (method === 'GET' && subPath === '/range-stats') {
                 const existingKey = await getKey(keyId, { summaryOnly: true, compactCosts: true });
