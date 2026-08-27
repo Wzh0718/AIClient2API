@@ -21,4 +21,20 @@ describe('api potluck keys list compact source', () => {
         expect(source).toContain('delete compact.usageHistory[date].accounts');
         expect(source).toContain('delete compact.usageHistory[date].hours');
     });
+
+    test('exposes a cached overview route for the management page', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'src/plugins/api-potluck/api-routes.js'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain("path === '/api/potluck/overview'");
+        expect(source).toContain('function getCachedOverview(costOptions = {})');
+        expect(source).toContain('overviewCache');
+    });
+
+    test('renders compact keys stats before awaiting full stats', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/potluck.html'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain('const compactStats = keysResult.data.stats;');
+        expect(source).toContain('renderStatsSummary(compactStats);');
+        expect(source).toContain('loadFullStatsInBackground');
+    });
 });

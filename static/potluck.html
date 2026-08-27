@@ -2349,17 +2349,8 @@
             }
         }
 
-        async function loadData() {
-            try {
-                loadReconciliationStatus();
-                const keysResult = await apiRequest(`${API_BASE}/keys?${getCostQuery()}`);
-                if (!keysResult || !keysResult.success) { showToast('加载失败', 'error'); return false; }
-                const statsResult = await apiRequest(`${API_BASE}/stats?${getCostQuery()}`);
-                const { keys } = keysResult.data;
-                const stats = statsResult?.success ? statsResult.data : keysResult.data.stats;
-                if (!statsResult?.success) {
-                    showToast('统计明细加载失败，已显示摘要数据', 'error');
-                }
+        function renderStatsSummary(stats) {
+                if (!stats) return;
                 currentStats = stats;
                 populateConversionModels(stats.pricing);
                 document.getElementById('totalKeys').textContent = stats.totalKeys;
@@ -2376,13 +2367,39 @@
                 document.getElementById('maxRpm').textContent = (stats.maxRpm || 0).toFixed(2);
                 document.getElementById('currentTps').textContent = (stats.tps || 0).toFixed(2);
                 document.getElementById('maxTps').textContent = (stats.maxTps || 0).toFixed(2);
-                // 先等 ledger 区间统计就绪再渲染分布，避免 live 兜底与 ledger 两套数据闪烁
-                await refreshLedgerRangeStats(currentUsageRange, { force: true });
-                renderUsageHistory(stats.usageHistory, currentUsageRange);
-                renderCalendar(stats.usageHistory || {});
-                
+        }
+
+        async function loadFullStatsInBackground() {
+            const statsResult = await apiRequest(`${API_BASE}/stats?${getCostQuery()}`);
+            if (!statsResult?.success) {
+                showToast('统计明细加载失败，已显示摘要数据', 'error');
+                return null;
+            }
+            renderStatsSummary(statsResult.data);
+            return statsResult.data;
+        }
+
+        async function loadData() {
+            try {
+                loadReconciliationStatus();
+                const overviewResult = await apiRequest(`${API_BASE}/overview?${getCostQuery()}`);
+                const keysResult = overviewResult?.success
+                    ? { success: true, data: overviewResult.data }
+                    : await apiRequest(`${API_BASE}/keys?${getCostQuery()}`);
+                if (!keysResult || !keysResult.success) { showToast('加载失败', 'error'); return false; }
+                const { keys } = keysResult.data;
+                const compactStats = keysResult.data.stats;
+                renderStatsSummary(compactStats);
                 allKeys = keys;
                 applyFilterAndSort();
+                void loadFullStatsInBackground().then(stats => {
+                    if (!stats) return;
+                    // 完整统计到达后再绘制历史图表，避免阻塞首屏 Key 列表。
+                    renderUsageHistory(stats.usageHistory, currentUsageRange);
+                    renderCalendar(stats.usageHistory || {});
+                }).catch(() => {});
+                // 先等 ledger 区间统计就绪再渲染分布，避免 live 兜底与 ledger 两套数据闪烁
+                await refreshLedgerRangeStats(currentUsageRange, { force: true });
                 return true;
             } catch (error) {
                 showToast('加载失败', 'error');

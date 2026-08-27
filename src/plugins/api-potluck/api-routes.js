@@ -48,6 +48,7 @@ import path from 'path';
 
 const STATS_CACHE_TTL_MS = 30 * 1000;
 const statsCache = new Map();
+const overviewCache = new Map();
 const CREDENTIAL_GROUP_PREVIEW_TTL_MS = 5 * 60 * 1000;
 const credentialGroupPreviews = new Map();
 
@@ -91,6 +92,7 @@ function getStatsCacheKey(costOptions = {}) {
 
 function clearStatsCache() {
     statsCache.clear();
+    overviewCache.clear();
 }
 
 function getCachedStats(costOptions = {}) {
@@ -110,6 +112,28 @@ function getCachedStats(costOptions = {}) {
             throw error;
         });
     statsCache.set(cacheKey, { promise, createdAt: now });
+    return promise;
+}
+
+function getCachedOverview(costOptions = {}) {
+    const cacheKey = getStatsCacheKey({ ...costOptions, compactHistory: true, compactAccounts: true });
+    const now = Date.now();
+    const entry = overviewCache.get(cacheKey);
+    if (entry?.value && now - entry.createdAt < STATS_CACHE_TTL_MS) return entry.value;
+    if (entry?.promise) return entry.promise;
+
+    const promise = Promise.all([
+        listKeys({ ...costOptions, summaryOnly: true, compactCosts: true }),
+        getCachedStats({ ...costOptions, compactHistory: true, compactAccounts: true })
+    ]).then(([keys, stats]) => {
+        const overview = { keys: keys.map(compactKeyForList), stats };
+        overviewCache.set(cacheKey, { value: overview, createdAt: Date.now() });
+        return overview;
+    }).catch(error => {
+        overviewCache.delete(cacheKey);
+        throw error;
+    });
+    overviewCache.set(cacheKey, { promise, createdAt: now });
     return promise;
 }
 
@@ -1071,6 +1095,13 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
         if (method === 'GET' && path === '/api/potluck/stats') {
             const stats = enrichPotluckStatsAccountEmails(await getCachedStats(getRequestCostOptions(req)));
             sendJson(res, 200, { success: true, data: stats });
+            return true;
+        }
+
+        // GET /api/potluck/overview - 管理页首屏摘要与 Key 列表的合并读取
+        if (method === 'GET' && path === '/api/potluck/overview') {
+            const overview = await getCachedOverview(getRequestCostOptions(req));
+            sendJson(res, 200, { success: true, data: overview });
             return true;
         }
 
