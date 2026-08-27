@@ -64,6 +64,12 @@ export function getAntigravityElasticFallbackModels(requestedModel, configuredFa
     return allowedFallbacks.filter(model => configured.length === 0 || configured.includes(model));
 }
 
+function getConfiguredGeminiFallbackModels(globalConfig = {}) {
+    const configured = globalConfig?.geminiModelFallbacks
+        || globalConfig?.antigravityElasticRouting?.fallbackModels;
+    return Array.isArray(configured) ? configured : ANTIGRAVITY_ELASTIC_DEFAULTS.fallbackModels;
+}
+
 function positiveInteger(value, fallback, { allowZero = false } = {}) {
     const parsed = Number(value);
     if (!Number.isInteger(parsed) || parsed < (allowZero ? 0 : 1)) return fallback;
@@ -510,13 +516,20 @@ function getCodexTokenQuotaStatus(providerType, providerStatus, usageCache = nul
     return { limited: true, exceeded: false, reason: warnings.join('; ') || null };
 }
 
-function isCodex53QuotaExhaustionError(error) {
+export function isCodex53QuotaExhaustionError(error) {
     if (!error || (error.status !== 429 && error.code !== 429)) return false;
-    const filterReasons = error.filterReasons || {};
-    return Object.keys(filterReasons).some(reason => reason === 'codex53_quota_exceeded' || reason === 'cooldown');
+    let current = error;
+    while (current) {
+        const filterReasons = current.filterReasons || {};
+        if (Object.keys(filterReasons).some(reason => reason === 'codex53_quota_exceeded' || reason === 'cooldown')) {
+            return true;
+        }
+        current = current.cause;
+    }
+    return false;
 }
 
-function getCodex53QuotaFallbackModel(globalConfig = {}) {
+export function getCodex53QuotaFallbackModel(globalConfig = {}) {
     return globalConfig?.codex53QuotaFallbackModel ||
         globalConfig?.CODEX_53_QUOTA_FALLBACK_MODEL ||
         DEFAULT_CODEX_53_QUOTA_FALLBACK_MODEL;
@@ -535,7 +548,7 @@ export function getCodexModelFallbackTarget(requestedModel, globalConfig = {}) {
     return String(target);
 }
 
-function shouldTryCodex53QuotaModelFallback(providerType, requestedModel, error, globalConfig = {}) {
+export function shouldTryCodex53QuotaModelFallback(providerType, requestedModel, error, globalConfig = {}) {
     if (!isCodexProviderType(providerType)) return false;
     const bucket = resolveCodexQuotaBucket(
         requestedModel,
@@ -2948,6 +2961,38 @@ export class ProviderPoolManager {
             && Object.prototype.hasOwnProperty.call(ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS, normalizeAntigravityQuotaModel(requestedModel));
     }
 
+    async _selectGeminiWithModelFallback(providerType, requestedModel, options, select) {
+        const models = [
+            requestedModel,
+            ...getAntigravityElasticFallbackModels(
+                requestedModel,
+                getConfiguredGeminiFallbackModels(this.globalConfig)
+            )
+        ];
+        let lastError = null;
+        for (let index = 0; index < models.length; index += 1) {
+            const model = models[index];
+            try {
+                const selectedConfig = await select(model);
+                if (!selectedConfig) continue;
+                const isFallback = index > 0;
+                return {
+                    config: selectedConfig,
+                    actualProviderType: providerType,
+                    actualModel: model,
+                    isFallback,
+                    modelFallbackReason: isFallback ? 'SOURCE_MODEL_UNAVAILABLE' : null,
+                    fallbackAttemptCount: index
+                };
+            } catch (error) {
+                lastError = error;
+                if (error?.status !== 429 && error?.code !== 429) throw error;
+            }
+        }
+        if (lastError) throw lastError;
+        return null;
+    }
+
     getGeminiElasticQueueSnapshot() {
         return {
             waiting: this._geminiElasticQueue.waiting,
@@ -3204,13 +3249,15 @@ export class ProviderPoolManager {
             return this._acquireAntigravityElasticSlot(providerType, requestedModel, options);
         }
 
-        // Gemini routing is strictly same-provider. Do not consult global provider
-        // chains or model mappings for Gemini requests.
+        // Gemini stays on the same provider type, but model fallback is still
+        // allowed when the requested model has no selectable credential.
         if (isGeminiProviderType(providerType)) {
-            const selectedConfig = await this.acquireSlot(providerType, requestedModel, options);
-            return selectedConfig
-                ? { config: selectedConfig, actualProviderType: providerType, actualModel: requestedModel, isFallback: false }
-                : null;
+            return this._selectGeminiWithModelFallback(
+                providerType,
+                requestedModel,
+                options,
+                model => this.acquireSlot(providerType, model, options)
+            );
         }
 
         if (options.disableProviderFallback === true) {
@@ -3404,13 +3451,15 @@ export class ProviderPoolManager {
             return this._acquireAntigravityElasticSlot(providerType, requestedModel, options);
         }
 
-        // Gemini requests may only use the requested Gemini model/provider. Any
-        // allowed Antigravity model fallback is handled above.
+        // Gemini stays on the same provider type, but model fallback is still
+        // allowed when the requested model has no selectable credential.
         if (isGeminiProviderType(providerType)) {
-            const selectedConfig = await this.selectProvider(providerType, requestedModel, options);
-            return selectedConfig
-                ? { config: selectedConfig, actualProviderType: providerType, actualModel: requestedModel, isFallback: false }
-                : null;
+            return this._selectGeminiWithModelFallback(
+                providerType,
+                requestedModel,
+                options,
+                model => this.selectProvider(providerType, model, options)
+            );
         }
 
         if (options.disableProviderFallback === true) {

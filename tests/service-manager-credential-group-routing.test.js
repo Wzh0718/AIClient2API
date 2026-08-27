@@ -149,6 +149,50 @@ describe('Service Manager Codex credential-group routing', () => {
         });
     });
 
+    test('fixed Codex routing may switch credentials when the fallback model is unavailable on the fixed credential', async () => {
+        writeGroupConfig({
+            groups: [
+                { id: 'group-a', credentialUuids: ['codex-a'] },
+                { id: 'group-b', credentialUuids: ['codex-b'] }
+            ],
+            keyAssignments: [{
+                keyId: 'key-1',
+                routingMode: 'fixed',
+                fixedCredential: { providerType, uuid: 'codex-a' }
+            }]
+        });
+        const config = createConfig({
+            providers: [provider('codex-a'), provider('codex-b')],
+            keyData: {
+                routingMode: 'fixed',
+                fixedCredential: { providerType, uuid: 'codex-a' },
+                manualLock: true
+            },
+            extra: { CODEX_53_QUOTA_FALLBACK_MODEL: 'gpt-5.4-mini' }
+        });
+        const manager = await initialize(config);
+        jest.spyOn(manager, 'selectProviderWithFallback').mockImplementation(async (_providerType, model) => {
+            if (model === 'gpt-5.3-codex-spark') {
+                const error = new Error('fixed credential Codex 5.3 quota exhausted');
+                error.status = 429;
+                error.code = 429;
+                error.filterReasons = { codex53_quota_exceeded: 1 };
+                throw error;
+            }
+            return { config: provider('codex-b'), actualProviderType: providerType, isFallback: false };
+        });
+
+        const result = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark');
+
+        expect(result).toMatchObject({
+            uuid: 'codex-b',
+            actualModel: 'gpt-5.4-mini',
+            isFallback: true,
+            modelFallbackFrom: 'gpt-5.3-codex-spark',
+            modelFallbackTo: 'gpt-5.4-mini'
+        });
+    });
+
     test('uses the credential-group assignment as the routing source when key data is stale', async () => {
         writeGroupConfig({
             groups: [
@@ -348,6 +392,38 @@ describe('Service Manager Codex credential-group routing', () => {
             spillover: true,
             spilloverReason: 'PRIMARY_GROUP_UNAVAILABLE'
         });
+    });
+
+    test('auto routing falls back to GPT-5.4 Mini when every group is exhausted for Codex 5.3', async () => {
+        writeGroupConfig({
+            groups: [
+                { id: 'group-a', credentialUuids: ['codex-a'] },
+                { id: 'group-b', credentialUuids: ['codex-b'] }
+            ],
+            keyAssignments: [{ keyId: 'key-1', routingMode: 'auto', primaryGroupId: 'group-a' }]
+        });
+        const config = createConfig({
+            providers: [provider('codex-a'), provider('codex-b')],
+            extra: { CODEX_53_QUOTA_FALLBACK_MODEL: 'gpt-5.4-mini' }
+        });
+        const manager = await initialize(config);
+        jest.spyOn(manager, 'selectProviderWithFallback').mockImplementation(async (_providerType, model) => {
+            if (model === 'gpt-5.3-codex-spark') {
+                const error = new Error('All Codex providers exceeded configured usage quotas');
+                error.status = 429;
+                error.code = 429;
+                error.filterReasons = { codex53_quota_exceeded: 2 };
+                throw error;
+            }
+            return { config: provider('codex-a'), actualProviderType: providerType, isFallback: false };
+        });
+
+        const result = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark');
+
+        expect(result.actualModel).toBe('gpt-5.4-mini');
+        expect(result.isFallback).toBe(true);
+        expect(result.modelFallbackFrom).toBe('gpt-5.3-codex-spark');
+        expect(result.modelFallbackTo).toBe('gpt-5.4-mini');
     });
 
     test('auto spillover stays on the selected group for the same session while a new session retries primary', async () => {

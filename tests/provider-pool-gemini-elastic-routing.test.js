@@ -3,7 +3,7 @@ import { ProviderPoolManager, getAntigravityElasticFallbackModels } from '../src
 
 jest.mock('../src/providers/adapter.js', () => ({
     getServiceAdapter: jest.fn(),
-    getRegisteredProviders: jest.fn(() => ['gemini-antigravity']),
+    getRegisteredProviders: jest.fn(() => ['gemini-antigravity', 'gemini-cli-oauth']),
     invalidateServiceAdapter: jest.fn()
 }));
 
@@ -129,6 +129,46 @@ describe('Antigravity elastic queue and model fallback', () => {
 
         expect(result.actualModel).toBe(firstFallback);
         expect([sourceModel, firstFallback, secondFallback]).toContain(result.actualModel);
+    });
+
+    test('applies the same model fallback chain to Gemini CLI OAuth', async () => {
+        const manager = new ProviderPoolManager({
+            'gemini-cli-oauth': [
+                {
+                    uuid: 'cli-source',
+                    customName: 'CLI source',
+                    isHealthy: false,
+                    scheduledRecoveryTime: new Date(Date.now() + 60_000).toISOString(),
+                    supportedModels: [sourceModel]
+                },
+                {
+                    uuid: 'cli-fallback',
+                    customName: 'CLI fallback',
+                    isHealthy: true,
+                    supportedModels: [firstFallback],
+                    notSupportedModels: [sourceModel]
+                }
+            ]
+        }, {
+            persistenceEnabled: false,
+            globalConfig: {
+                antigravityElasticRouting: {
+                    enabled: true,
+                    fallbackModels: [firstFallback, secondFallback]
+                }
+            }
+        });
+
+        const result = await manager.selectProviderWithFallback('gemini-cli-oauth', sourceModel, {
+            disableProviderFallback: true
+        });
+
+        expect(result).toMatchObject({
+            actualProviderType: 'gemini-cli-oauth',
+            actualModel: firstFallback,
+            isFallback: true,
+            config: { uuid: 'cli-fallback' }
+        });
     });
 
     test('keeps the configured fallback order fixed even when configuration is reversed', async () => {

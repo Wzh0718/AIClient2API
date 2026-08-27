@@ -1,6 +1,11 @@
 import { getServiceAdapter, invalidateServiceAdapter, serviceInstances } from '../providers/adapter.js';
 import logger from '../utils/logger.js';
-import { ProviderPoolManager, getCodexModelFallbackTarget } from '../providers/provider-pool-manager.js';
+import {
+    ProviderPoolManager,
+    getCodexModelFallbackTarget,
+    getCodex53QuotaFallbackModel,
+    shouldTryCodex53QuotaModelFallback
+} from '../providers/provider-pool-manager.js';
 import deepmerge from 'deepmerge';
 import crypto from 'crypto';
 import * as fs from 'fs';
@@ -271,6 +276,36 @@ function getProviderCredentialCatalog(providerType) {
         .filter(Boolean);
 }
 
+async function getCodex53QuotaFallbackService(config, requestedModel, options = {}) {
+    const fallbackModel = getCodex53QuotaFallbackModel(config);
+    const fallbackResult = await getApiServiceWithFallback(config, fallbackModel, {
+        ...options,
+        forceCodexModelFallback: false,
+        modelFallbackAttempted: true,
+        allowCodexFixedFallbackToOtherCredentials: true,
+        excludeProviderUuids: []
+    });
+    const actualModel = fallbackResult.actualModel || fallbackModel;
+    const result = {
+        ...fallbackResult,
+        isFallback: true,
+        actualModel,
+        modelFallbackFrom: requestedModel,
+        modelFallbackTo: actualModel,
+        modelFallbackReason: 'CODEX53_QUOTA_EXHAUSTED'
+    };
+    finalizeCodexRouteResult(config, {
+        selectedProviderUuid: result.uuid,
+        actualProviderType: result.actualProviderType,
+        serviceConfig: result.serviceConfig,
+        actualModel,
+        modelFallbackFrom: requestedModel,
+        modelFallbackTo: actualModel,
+        modelFallbackReason: result.modelFallbackReason
+    });
+    return result;
+}
+
 function getProviderStatusByUuid(providerType, uuid) {
     return (providerPoolManager?.providerStatus?.[providerType] || [])
         .find(provider => String(provider?.uuid || provider?.config?.uuid || '') === String(uuid));
@@ -405,6 +440,17 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
         });
 
     if (keyRouting.routingMode === 'fixed') {
+        if (options.allowCodexFixedFallbackToOtherCredentials === true) {
+            const fallbackOptions = {
+                ...options,
+                selectionDiagnostics,
+                preferredProviderUuid: null,
+                disableProviderFallback: true
+            };
+            delete fallbackOptions.allowedProviderUuids;
+            const selectedResult = await selectFromPool(fallbackOptions);
+            return { handled: true, selectedResult, availabilityError: null };
+        }
         const fixedUuid = keyRouting.fixedCredential?.uuid || null;
         if (fixedUuid) providerPoolManager.reconcileProviderForRouting?.(providerType, fixedUuid);
         const route = routeKeyToCredentialCandidates({
@@ -1569,6 +1615,12 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                 selectionDiagnostics
             );
         } catch (error) {
+            if (
+                options.modelFallbackAttempted !== true
+                && shouldTryCodex53QuotaModelFallback(effectiveProvider, actualModelName, error, config)
+            ) {
+                return getCodex53QuotaFallbackService(config, actualModelName, options);
+            }
             if (codexFallbackTarget && options.modelFallbackAttempted !== true && isCodexModelFallbackEligibleError(error)) {
                 return getApiServiceWithFallback(config, actualModelName, {
                     ...options,
@@ -1584,6 +1636,13 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         if (groupSelection.handled) {
             selectedResult = groupSelection.selectedResult;
             availabilityError = groupSelection.availabilityError;
+            if (
+                !selectedResult
+                && options.modelFallbackAttempted !== true
+                && shouldTryCodex53QuotaModelFallback(effectiveProvider, actualModelName, availabilityError, config)
+            ) {
+                return getCodex53QuotaFallbackService(config, actualModelName, options);
+            }
             if (!selectedResult && codexFallbackTarget && options.modelFallbackAttempted !== true) {
                 return getApiServiceWithFallback(config, actualModelName, {
                     ...options,
