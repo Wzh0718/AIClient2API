@@ -6,7 +6,7 @@ describe('api potluck keys list compact source', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'src/plugins/api-potluck/api-routes.js'), 'utf8').replace(/\r\n/g, '\n');
 
         expect(source).toContain('function compactKeyForList(key)');
-        expect(source).toContain('function compactUsageHistoryForList(usageHistory = {})');
+        expect(source).toContain('function compactUsageHistoryForList(usageHistory = {}, maxDays = 7)');
         expect(source).toContain('summary: day?.summary || {}');
         expect(source).toContain('const STATS_CACHE_TTL_MS = 30 * 1000');
         expect(source).toContain('function getCachedStats(costOptions = {})');
@@ -87,5 +87,11 @@ describe('api potluck keys list compact source', () => {
         expect(html).toContain('const rangeSummary = summarizeUsageHistoryForRange(key.usageHistory || {}, range).summary;');
         expect(html).toContain('return buildRangeMetricsFromSummary(rangeSummary);');
         expect(html).toContain('const candidateLiveDates = ledgerData ? (ledgerData.missingDates || []) : Object.keys(key.usageHistory || {});');
+    });
+
+    test('limits overview key history to the default seven-day summary window', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'src/plugins/api-potluck/api-routes.js'), 'utf8').replace(/\r\n/g, '\n');
+        expect(source).toContain('compactUsageHistoryForList(key.usageHistory || {}, 7)');
+        expect(source).toContain('function compactUsageHistoryForList(usageHistory = {}, maxDays = 7)');
     });
 });

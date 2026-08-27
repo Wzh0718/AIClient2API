@@ -191,9 +191,12 @@ function getCachedOverview(costOptions = {}) {
     return promise;
 }
 
-function compactUsageHistoryForList(usageHistory = {}) {
+function compactUsageHistoryForList(usageHistory = {}, maxDays = 7) {
     const compact = { usageHistory: {} };
-    for (const [date, day] of Object.entries(usageHistory || {})) {
+    const entries = Object.entries(usageHistory || {})
+        .sort(([left], [right]) => left.localeCompare(right))
+        .slice(-Math.max(0, Number(maxDays) || 0));
+    for (const [date, day] of entries) {
         compact.usageHistory[date] = { summary: day?.summary || {} };
         delete compact.usageHistory[date].providers;
         delete compact.usageHistory[date].models;
@@ -215,7 +218,7 @@ function compactKeyForList(key) {
         : null;
     const result = { keyRef: hashSecret(key.id), id: hashSecret(key.id), fixedCredential };
     for (const field of LIST_KEY_FIELDS) result[field] = key[field];
-    result.usageHistory = compactUsageHistoryForList(key.usageHistory || {});
+    result.usageHistory = compactUsageHistoryForList(key.usageHistory || {}, 7);
     return result;
 }
 

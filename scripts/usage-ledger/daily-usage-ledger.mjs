@@ -5,6 +5,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import Database from 'better-sqlite3';
 
 // Single pricing source shared with src/plugins/api-potluck/cost-estimator.js.
 // Resolution order supports both in-repo runs and standalone copies under the
@@ -542,6 +543,68 @@ export function buildDailyRowsFromPotluck(store = {}, range = {}) {
   return mergeRows(rows);
 }
 
+function resolveSqliteKeyRef(keyHash, keyLookup) {
+  return keyLookup?.byHash?.get(keyHash) || {
+    key: null,
+    keyHash,
+    keyPrefix: null,
+    keyName: null,
+  };
+}
+
+function readSqliteUsageDays(databasePath, range = {}) {
+  if (!databasePath || !fs.existsSync(databasePath)) return null;
+  const database = new Database(databasePath, { readonly: true, fileMustExist: true });
+  try {
+    const table = database.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'potluck_usage_history'"
+    ).get();
+    if (!table) return null;
+    const from = range.from || '0000-01-01';
+    const to = range.to || '9999-12-31';
+    return database.prepare(`
+      SELECT key_ref, usage_date, day_json
+      FROM potluck_usage_history
+      WHERE usage_date >= ? AND usage_date <= ?
+      ORDER BY usage_date, key_ref
+    `).all(from, to).map(row => ({
+      keyHash: row.key_ref,
+      date: row.usage_date,
+      day: JSON.parse(row.day_json)
+    }));
+  } finally {
+    database.close();
+  }
+}
+
+export function buildDailyRowsFromSqliteRows(rows = [], store = {}, range = {}) {
+  const keyLookup = buildKeyLookup(store);
+  const ledgerRows = [];
+  for (const row of rows) {
+    const keyRef = resolveSqliteKeyRef(row.key_ref, keyLookup);
+    const date = row.usage_date;
+    const day = typeof row.day_json === 'string' ? JSON.parse(row.day_json) : row.day_json;
+    const accountRows = rowsFromAccounts(day.accounts || {}, {
+      date,
+      source: 'sqlite-potluck-usage-history',
+      keyRef,
+    });
+    ledgerRows.push(...accountRows);
+    ledgerRows.push(...rowsFromDaySummary(day, { date, keyRef, coveredRows: accountRows }));
+  }
+  return mergeRows(ledgerRows);
+}
+
+export function buildDailyRowsFromSqlite(databasePath, store = {}, range = {}) {
+  const days = readSqliteUsageDays(databasePath, range);
+  if (days === null) return null;
+  return buildDailyRowsFromSqliteRows(days.map(({ keyHash, date, day }) => ({
+    key_ref: keyHash,
+    usage_date: date,
+    day_json: day,
+  })), store, range);
+}
+
 export function buildHourlyRowsFromPotluck(store = {}, range = {}) {
   const rows = [];
   for (const [rawKey, keyData] of Object.entries(store.keys || {})) {
@@ -556,6 +619,25 @@ export function buildHourlyRowsFromPotluck(store = {}, range = {}) {
           keyRef,
         }));
       }
+    }
+  }
+  return mergeRows(rows);
+}
+
+export function buildHourlyRowsFromSqlite(databasePath, store = {}, range = {}) {
+  const days = readSqliteUsageDays(databasePath, range);
+  if (days === null) return null;
+  const keyLookup = buildKeyLookup(store);
+  const rows = [];
+  for (const { keyHash, date, day } of days) {
+    const keyRef = resolveSqliteKeyRef(keyHash, keyLookup);
+    for (const [hour, hourData] of Object.entries(day.hours || {})) {
+      rows.push(...rowsFromAccounts(hourData.accounts || {}, {
+        date,
+        hour,
+        source: 'sqlite-potluck-usage-history',
+        keyRef,
+      }));
     }
   }
   return mergeRows(rows);
@@ -2301,8 +2383,15 @@ async function commandWrite(args) {
   if (!from) throw new Error('--from is required');
   const store = await readJson(path.join(base, 'api-potluck-keys.json'));
   const ledgerRoot = args['ledger-dir'] || path.join(base, 'permanent-usage-ledger');
-  const dailyRows = args.hourly ? [] : buildDailyRowsFromPotluck(store, { from, to });
-  const hourlyRows = args.daily ? [] : buildHourlyRowsFromPotluck(store, { from, to });
+  const sqlitePath = args['sqlite-path'] || process.env.USAGE_EVENT_DB_PATH || path.join(base, 'usage-events', 'usage-events.sqlite');
+  const dailyRows = args.hourly ? [] : (
+    buildDailyRowsFromSqlite(sqlitePath, store, { from, to })
+      ?? buildDailyRowsFromPotluck(store, { from, to })
+  );
+  const hourlyRows = args.daily ? [] : (
+    buildHourlyRowsFromSqlite(sqlitePath, store, { from, to })
+      ?? buildHourlyRowsFromPotluck(store, { from, to })
+  );
   const result = {
     daily: await writeRowsByDate(dailyRows, path.join(ledgerRoot, 'daily')),
     hourly: await writeRowsByDate(hourlyRows, path.join(ledgerRoot, 'hourly')),

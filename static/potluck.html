@@ -2534,16 +2534,45 @@
         }
 
         function getLedgerKeyRangeSummary(key, range = currentUsageRange) {
+            return buildKeyRangeSummaryFromLedger(key, range)?.summary || null;
+        }
+
+        function buildKeyRangeSummaryFromLedger(key, range = currentUsageRange) {
             const ledgerData = getLedgerRangeStatsFor(range);
             const source = ledgerData?.keySummaries?.[key?.id];
             if (!source) return null;
 
             const summary = createUsageSummaryBucket();
+            const providers = {};
+            const models = {};
+            const providerModels = {};
+            const accounts = {};
+            const daily = {};
             addUsageBucket(summary, source.summary || {});
+            Object.entries(source.providers || {}).forEach(([name, usage]) => addUsageMap(providers, name, usage));
+            Object.entries(source.models || {}).forEach(([name, usage]) => addUsageMap(models, name, usage));
+            Object.entries(source.providerModels || {}).forEach(([provider, modelMap]) => addProviderModelUsageMap(providerModels, provider, modelMap));
+            Object.entries(source.accounts || {}).forEach(([name, account]) => addAccountUsageMap(accounts, name, account));
+            Object.entries(source.daily || {}).forEach(([date, usage]) => { daily[date] = { summary: usage }; });
             (ledgerData.missingDates || [])
                 .filter(date => key?.usageHistory?.[date])
-                .forEach(date => addUsageBucket(summary, key.usageHistory[date]?.summary || {}));
-            return withCacheHitRatio(summary);
+                .forEach(date => {
+                    const day = key.usageHistory[date] || {};
+                    addUsageBucket(summary, day.summary || {});
+                    Object.entries(day.providers || {}).forEach(([name, usage]) => addUsageMap(providers, name, usage));
+                    Object.entries(day.models || {}).forEach(([name, usage]) => addUsageMap(models, name, usage));
+                    Object.entries(day.accounts || {}).forEach(([name, account]) => addAccountUsageMap(accounts, name, account));
+                    daily[date] = day;
+                });
+            return {
+                dates: [...new Set([...(ledgerData.availableDates || []), ...Object.keys(daily)])].sort(),
+                summary: withCacheHitRatio(summary),
+                providers,
+                models,
+                providerModels,
+                accounts,
+                daily
+            };
         }
 
         function renderUsageCoverage(ledgerStats, usageHistory = {}) {
@@ -3253,7 +3282,8 @@
 
                 const rangeSummary = currentUsageRange === 'custom'
                     ? getCustomKeyRangeSummary(key)
-                    : summarizeUsageHistoryForRange(key.usageHistory || {}, currentUsageRange);
+                    : (buildKeyRangeSummaryFromLedger(key, currentUsageRange)
+                        || summarizeUsageHistoryForRange(key.usageHistory || {}, currentUsageRange));
                 const rangeMetrics = getKeyRangeMetrics(key, currentUsageRange);
                 const rangeLabel = getUsageRangeLabel(currentUsageRange);
                 const topProviders = Object.entries(rangeSummary.providers)
@@ -3265,7 +3295,7 @@
                     `<span class="dist-badge">${escapeHtml(name)}: <b>${formatTokenCompact(count)}</b></span>`
                 ).join('');
                 const dailyUsage = renderKeyDailyUsage(
-                    currentUsageRange === 'custom' ? rangeSummary.daily : key.usageHistory,
+                    rangeSummary.daily || key.usageHistory,
                     currentUsageRange
                 );
 

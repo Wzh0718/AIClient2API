@@ -4,6 +4,8 @@ import {
   aggregateAuditEvents,
   buildKeyLookup,
   buildDailyRowsFromPotluck,
+  buildDailyRowsFromSqlite,
+  buildDailyRowsFromSqliteRows,
   buildHourlyRowsFromPotluck,
   hashSecret,
   makeKeyRef,
@@ -11,6 +13,38 @@ import {
   buildUniqueEmailProviderMap,
   resolveAuditProvider,
 } from '../../scripts/usage-ledger/daily-usage-ledger.mjs';
+
+test('SQLite usage history remains ledger-readable after metadata JSON is stripped', () => {
+  const rawKey = 'example_sqlite_key';
+  const rows = buildDailyRowsFromSqliteRows([{
+    key_ref: hashSecret(rawKey),
+    usage_date: '2026-08-27',
+    day_json: JSON.stringify({
+      summary: { requestCount: 2, promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+      models: {
+        'gpt-5.5': { requestCount: 2, promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+      },
+      accounts: {
+        'openai-codex-oauth:user@example.com': {
+          provider: 'openai-codex-oauth',
+          accountEmail: 'user@example.com',
+          models: {
+            'gpt-5.5': { requestCount: 2, promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+          },
+        },
+      },
+    })
+  }], {
+    keys: { [rawKey]: { name: 'SQLite Key' } },
+  }, { from: '2026-08-27', to: '2026-08-27' });
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].key, rawKey);
+  assert.equal(rows[0].keyName, 'SQLite Key');
+  assert.equal(rows[0].keyHash, hashSecret(rawKey));
+  assert.equal(rows[0].usage.requestCount, 2);
+  assert.equal(rows[0].usage.totalTokens, 120);
+});
 
 test('potluck daily rows canonicalize account email and preserve original key', () => {
   const store = {
