@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { ProviderPoolManager } from '../src/providers/provider-pool-manager.js';
+import { ProviderPoolManager, getAntigravityElasticFallbackModels } from '../src/providers/provider-pool-manager.js';
 
 jest.mock('../src/providers/adapter.js', () => ({
     getServiceAdapter: jest.fn(),
@@ -15,6 +15,9 @@ const providerType = 'gemini-antigravity';
 const sourceModel = 'gemini-2.5-flash-lite';
 const firstFallback = 'gemini-2.5-flash';
 const secondFallback = 'gemini-3.1-flash-lite';
+const thirdFallback = 'gemini-3-flash';
+const fourthFallback = 'gemini-3.6-flash';
+const fifthFallback = 'gemini-3.5-flash';
 
 function coolingUntil(delayMs) {
     return {
@@ -65,6 +68,18 @@ function createCoordinatedManager(providers, coordination, overrides = {}) {
 }
 
 describe('Antigravity elastic queue and model fallback', () => {
+    test('only falls forward to stronger models when the requested model is in the middle', () => {
+        const configured = [firstFallback, secondFallback, thirdFallback, fourthFallback, fifthFallback];
+        expect(getAntigravityElasticFallbackModels(sourceModel, configured)).toEqual(configured);
+        expect(getAntigravityElasticFallbackModels(firstFallback, configured)).toEqual([
+            secondFallback, thirdFallback, fourthFallback, fifthFallback
+        ]);
+        expect(getAntigravityElasticFallbackModels(secondFallback, configured)).toEqual([
+            thirdFallback, fourthFallback, fifthFallback
+        ]);
+        expect(getAntigravityElasticFallbackModels(fifthFallback, configured)).toEqual([]);
+    });
+
     test('waits for a short source-model cooldown and keeps the requested model', async () => {
         const manager = createManager([
             provider('gemini-a', { [sourceModel]: coolingUntil(60) })

@@ -29,22 +29,40 @@ import { createProviderStateEvent, applyProviderStateEvent } from '../runtime/pr
 import { matchesModelFamily } from './openai/codex-model-routing.js';
 
 const ANTIGRAVITY_ELASTIC_SOURCE_MODEL = 'gemini-2.5-flash-lite';
+const ANTIGRAVITY_ELASTIC_MODEL_ORDER = Object.freeze([
+    'gemini-2.5-flash-lite',
+    'gemini-2.5-flash',
+    'gemini-3.1-flash-lite',
+    'gemini-3-flash',
+    'gemini-3.6-flash',
+    'gemini-3.5-flash'
+]);
 const ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS = Object.freeze({
-    'gemini-2.5-flash': ['gemini-3.1-flash-lite'],
-    'gemini-2.5-flash-lite': ['gemini-2.5-flash', 'gemini-3.1-flash-lite'],
-    'gemini-3.1-flash-lite': []
+    ...Object.fromEntries(ANTIGRAVITY_ELASTIC_MODEL_ORDER.map((model, index) => [
+        model,
+        ANTIGRAVITY_ELASTIC_MODEL_ORDER.slice(index + 1)
+    ]))
 });
 const ANTIGRAVITY_ELASTIC_DEFAULTS = Object.freeze({
     enabled: true,
     maxQueueWaitMs: 45_000,
     preferOriginalWaitMs: 10_000,
-    fallbackModels: ['gemini-2.5-flash', 'gemini-3.1-flash-lite'],
+    fallbackModels: ANTIGRAVITY_ELASTIC_MODEL_ORDER.slice(1),
     globalQueueLimit: 512,
     perKeyModelQueueLimit: 256,
     globalQueuedBytesLimit: 64 * 1024 * 1024,
     recoveryJitterMinMs: 50,
     recoveryJitterMaxMs: 250
 });
+
+export function getAntigravityElasticFallbackModels(requestedModel, configuredFallbacks = []) {
+    const canonicalRequestedModel = normalizeAntigravityQuotaModel(requestedModel);
+    const allowedFallbacks = ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS[canonicalRequestedModel] || [];
+    const configured = Array.isArray(configuredFallbacks)
+        ? configuredFallbacks.map(model => String(model || '').trim()).filter(Boolean)
+        : [];
+    return allowedFallbacks.filter(model => configured.length === 0 || configured.includes(model));
+}
 
 function positiveInteger(value, fallback, { allowZero = false } = {}) {
     const parsed = Number(value);
@@ -3051,8 +3069,7 @@ export class ProviderPoolManager {
         const policy = this._getAntigravityElasticRoutingConfig();
         const canonicalRequestedModel = normalizeAntigravityQuotaModel(requestedModel);
         const configuredFallbacks = Array.isArray(policy.fallbackModels) ? policy.fallbackModels : [];
-        const allowedFallbacks = ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS[canonicalRequestedModel] || [];
-        const models = [requestedModel, ...allowedFallbacks.filter(model => configuredFallbacks.length === 0 || configuredFallbacks.includes(model))];
+        const models = [requestedModel, ...getAntigravityElasticFallbackModels(requestedModel, configuredFallbacks)];
         const startedAt = Date.now();
         const deadline = startedAt + policy.maxQueueWaitMs;
         let queueEntry = null;
