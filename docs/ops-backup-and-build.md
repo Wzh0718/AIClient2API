@@ -27,7 +27,7 @@ The script verifies the archive with `gzip -t` and deletes it on corruption, so 
 ```bash
 ./scripts/ops/build-image.sh                 # HEAD -> aiclient2api:customized-branch-<sha>-<date>
 ./scripts/ops/build-image.sh v3.3.2          # build a tag
-BUILD_HTTP_PROXY=http://host.docker.internal:7890 ./scripts/ops/build-image.sh   # proxy for Go sidecar downloads (Windows Docker Desktop)
+BUILD_HTTP_PROXY=http://192.168.4.242:7890 ./scripts/ops/build-image.sh   # project build proxy for Go/npm downloads
 ```
 
 `BUILD_HTTP_PROXY` is also forwarded to npm in the Node build stage (`HTTP_PROXY`/`HTTPS_PROXY` plus npm's explicit proxy settings), so the same command covers both Go and npm dependency downloads. A proxy can improve reliability and sometimes throughput for large dependency downloads; a small registry ping may show little difference. Keep the default registry unless an approved mirror is available, and never place proxy credentials in the repository or build logs.

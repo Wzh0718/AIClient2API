@@ -85,7 +85,7 @@
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
     border-radius: 0.5rem;
-    margin-bottom: 1rem;
+    margin-bottom: 0;
     overflow: hidden;
 }
 
@@ -302,7 +302,7 @@
 .usage-provider-groups {
     display: grid;
     grid-template-columns: 1fr;
-    gap: 1rem;
+    gap: 0;
     align-items: start;
 }
 

@@ -202,7 +202,7 @@ Expected: New tests pass; the known unrelated `listedKey` fixture failure, if st
 Run with the already-approved local proxy if Docker dependency downloads require it:
 
 ```powershell
-docker build --build-arg HTTP_PROXY=http://host.docker.internal:7890 --build-arg HTTPS_PROXY=http://host.docker.internal:7890 --build-arg ALL_PROXY=http://host.docker.internal:7890 -t aiclient2api:custom-<new-commit> .
+docker build --build-arg HTTP_PROXY=http://192.168.10.64:7890 --build-arg HTTPS_PROXY=http://192.168.10.64:7890 --build-arg ALL_PROXY=http://192.168.10.64:7890 -t aiclient2api:custom-<new-commit> .
 ```
 
 Expected: Build succeeds and the image label points to the new commit.
@@ -257,4 +257,3 @@ git commit -m "feat(usage): refine Codex weekly quota estimate display"
 ```
 
 Do not push and do not update production.
-

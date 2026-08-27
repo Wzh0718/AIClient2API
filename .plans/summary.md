@@ -23,3 +23,4 @@ keep: UI 和管理输出只使用脱敏凭据引用，不显示 Token、Cookie�
 keep: 未执行真实浏览器截图或页面 smoke；未执行 git push。
 [quota-fingerprint-diagnosis | 2026-08-17T11:40:00+08:00] ✓ 完成额度/指纹只读诊断，并另开隐含周限快照观测计划
 keep: 13/13 账号 session+migrated；部分号隐含周限从约 8B 落到 1–2B，部分号没有；不改指纹默认。
+[ops-memory | 2026-08-27] Docker 构建代理固定使用 `http://192.168.10.64:7890`；不要再使用 `http://host.docker.internal:7890`。该规则仅适用于 AIClient-2-API 项目的镜像构建，不改变应用运行时代理配置。

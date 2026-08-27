@@ -10,7 +10,7 @@
 #   IMAGE_TAG=aiclient2api:customized-branch-<shortsha>-<yyyymmdd>
 #
 # 可选代理（Go sidecar 依赖下载失败时）:
-#   BUILD_HTTP_PROXY=http://host.docker.internal:7890 build-image.sh
+#   BUILD_HTTP_PROXY=http://192.168.4.242:7890 build-image.sh
 set -eu
 
 GIT_REF=${1:-HEAD}
