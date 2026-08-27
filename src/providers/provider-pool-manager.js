@@ -473,7 +473,7 @@ function getCodexTokenQuotaStatus(providerType, providerStatus, usageCache = nul
     const config = providerStatus?.config || {};
     const { max5hPercent, maxWeeklyPercent } = getCodexQuotaLimits(config, bucket);
     if (!max5hPercent && !maxWeeklyPercent) {
-        return { limited: false, exceeded: false };
+        return { limited: false, exceeded: false, configured: false };
     }
 
     const uuid = config.uuid || providerStatus?.uuid;
@@ -491,6 +491,7 @@ function getCodexTokenQuotaStatus(providerType, providerStatus, usageCache = nul
             return {
                 limited: true,
                 exceeded: true,
+                configured: true,
                 bucket,
                 reason: `${bucket} 5h usage quota reached (${usagePercent.toFixed(1)}%/${max5hPercent}%)`,
                 usagePercent
@@ -506,6 +507,7 @@ function getCodexTokenQuotaStatus(providerType, providerStatus, usageCache = nul
             return {
                 limited: true,
                 exceeded: true,
+                configured: true,
                 bucket,
                 reason: `${bucket} weekly usage quota reached (${usagePercent.toFixed(1)}%/${maxWeeklyPercent}%)`,
                 usagePercent
@@ -513,7 +515,7 @@ function getCodexTokenQuotaStatus(providerType, providerStatus, usageCache = nul
         }
     }
 
-    return { limited: true, exceeded: false, reason: warnings.join('; ') || null };
+    return { limited: true, exceeded: false, configured: true, reason: warnings.join('; ') || null };
 }
 
 export function isCodex53QuotaExhaustionError(error) {
@@ -2752,11 +2754,22 @@ export class ProviderPoolManager {
                 updatedLastKnownPlan = true;
             }
 
-            if (isCodexQuotaBucketCoolingDown(provider.config, bucket, now)) {
+            const quotaStatus = getCodexTokenQuotaStatus(providerType, provider, usageCache, bucket);
+            if (quotaStatus.configured === false) {
+                // No local quota limit is configured; leave any diagnostic state untouched.
+            } else if (!quotaStatus.limited) {
+                this.markCodexQuotaBucketHealthy(providerType, provider.config, bucket);
+            } else if (quotaStatus.exceeded) {
                 limitedCount += 1;
-                recordFilterReason('cooldown');
-                this._log('info', `Skipping Codex provider ${this._getDisplayName(provider.config)}: ${bucket} quota bucket is cooling down`);
+                recordFilterReason(`${bucket}_quota_exceeded`);
+                this._log('info', `Skipping Codex provider ${this._getDisplayName(provider.config)}: ${quotaStatus.reason}`);
+                this.markCodexQuotaBucketUnhealthy(providerType, provider.config, bucket, quotaStatus.reason);
                 continue;
+            } else {
+                if (quotaStatus.reason) {
+                    this._log('warn', `Codex quota check for ${this._getDisplayName(provider.config)}: ${quotaStatus.reason}`);
+                }
+                this.markCodexQuotaBucketHealthy(providerType, provider.config, bucket);
             }
 
             if (isCodexRateLimitCoolingDown(provider.config, bucket, now)) {
@@ -2767,23 +2780,10 @@ export class ProviderPoolManager {
                 continue;
             }
 
-            const quotaStatus = getCodexTokenQuotaStatus(providerType, provider, usageCache, bucket);
             if (!quotaStatus.limited) {
                 allowed.push(provider);
                 continue;
             }
-
-            limitedCount += 1;
-            if (quotaStatus.exceeded) {
-                recordFilterReason(`${bucket}_quota_exceeded`);
-                this._log('info', `Skipping Codex provider ${this._getDisplayName(provider.config)}: ${quotaStatus.reason}`);
-                this.markCodexQuotaBucketUnhealthy(providerType, provider.config, bucket, quotaStatus.reason);
-                continue;
-            }
-            if (quotaStatus.reason) {
-                this._log('warn', `Codex quota check for ${this._getDisplayName(provider.config)}: ${quotaStatus.reason}`);
-            }
-            this.markCodexQuotaBucketHealthy(providerType, provider.config, bucket);
             allowed.push(provider);
         }
 
@@ -4082,7 +4082,8 @@ export class ProviderPoolManager {
             isHealthy: false,
             lastErrorTime: new Date().toISOString(),
             lastErrorMessage: errorMessage || null,
-            scheduledRecoveryTime: recoveryTime ? new Date(recoveryTime).toISOString() : null
+            scheduledRecoveryTime: recoveryTime ? new Date(recoveryTime).toISOString() : null,
+            updatedAt: new Date().toISOString()
         };
         provider.config.lastUsed = new Date().toISOString();
         this._log('warn', `Marked Codex quota bucket ${bucket} as unhealthy for ${this._getDisplayName(provider.config)} (${providerType}). Reason: ${errorMessage || 'Quota exhausted'}`);
@@ -4123,7 +4124,8 @@ export class ProviderPoolManager {
             isHealthy: true,
             lastErrorTime: null,
             lastErrorMessage: null,
-            scheduledRecoveryTime: null
+            scheduledRecoveryTime: null,
+            updatedAt: new Date().toISOString()
         };
         this._log('info', `Recovered Codex quota bucket ${bucket} for ${this._getDisplayName(provider.config)} (${providerType})`);
         this._debouncedSave(providerType);
@@ -4142,7 +4144,14 @@ export class ProviderPoolManager {
             general: quotaHealth.general ? { ...quotaHealth.general } : quotaHealth.general,
             codex53: quotaHealth.codex53 ? { ...quotaHealth.codex53 } : quotaHealth.codex53
         };
-        if (JSON.stringify(provider.config.codexQuotaHealth || null) === JSON.stringify(nextQuotaHealth)) {
+        const currentQuotaHealth = provider.config.codexQuotaHealth || {};
+        const updatedAt = new Date().toISOString();
+        for (const bucket of ['general', 'codex53']) {
+            if (nextQuotaHealth[bucket] && JSON.stringify(currentQuotaHealth[bucket] || null) !== JSON.stringify(nextQuotaHealth[bucket])) {
+                nextQuotaHealth[bucket].updatedAt = updatedAt;
+            }
+        }
+        if (JSON.stringify(currentQuotaHealth) === JSON.stringify(nextQuotaHealth)) {
             return provider.config.codexQuotaHealth;
         }
 

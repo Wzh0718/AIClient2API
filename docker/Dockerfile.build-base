@@ -1,0 +1,12 @@
+FROM node:20-alpine
+
+ARG BUILD_HTTP_PROXY
+ARG HTTPS_PROXY
+ARG ALPINE_MIRROR=mirrors.aliyun.com
+RUN sed -i "s#dl-cdn.alpinelinux.org#$ALPINE_MIRROR#g" /etc/apk/repositories \
+    && http_proxy="$BUILD_HTTP_PROXY" https_proxy="$HTTPS_PROXY" \
+       HTTP_PROXY="$BUILD_HTTP_PROXY" HTTPS_PROXY="$HTTPS_PROXY" \
+       apk add --no-cache git tar procps python3 make g++
+
+LABEL org.opencontainers.image.title="AIClient-2-API Node build base"
+LABEL yyn.base_role="node20-alpine-build-base"

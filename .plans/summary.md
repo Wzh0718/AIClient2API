@@ -23,4 +23,11 @@ keep: UI 和管理输出只使用脱敏凭据引用，不显示 Token、Cookie�
 keep: 未执行真实浏览器截图或页面 smoke；未执行 git push。
 [quota-fingerprint-diagnosis | 2026-08-17T11:40:00+08:00] ✓ 完成额度/指纹只读诊断，并另开隐含周限快照观测计划
 keep: 13/13 账号 session+migrated；部分号隐含周限从约 8B 落到 1–2B，部分号没有；不改指纹默认。
-[ops-memory | 2026-08-27] Docker 构建代理固定使用 `http://192.168.10.64:7890`；不要再使用 `http://host.docker.internal:7890`。该规则仅适用于 AIClient-2-API 项目的镜像构建，不改变应用运行时代理配置。
+[ops-memory | 2026-08-27] Docker 构建代理固定使用 `http://192.168.4.242:7890`；不要再使用旧地址或 `http://host.docker.internal:7890`。该规则仅适用于 AIClient-2-API 项目的镜像构建，不改变应用运行时代理配置。
+[ops-memory | 2026-08-27-build-latency] 最近一周镜像打包/本地容器更新复盘：超过 3 分钟的主要耗时来自依赖阶段而非容器切换。`build-image.sh` 每次从 `git archive` 创建全新上下文，Dockerfile 随后重复执行 Go sidecar 的 `go mod download/tidy`、Node 原生依赖编译和 `npm install`；构建代理未显式传入或 registry/上游网络抖动时，会出现 Go 下载失败、npm install 长时间无输出。此前多次会话还把在线 SQLite/日志备份混入发布链路，导致额外分钟级延迟和失败重试；蓝绿候选预检本身通常不是主要瓶颈。
+keep: 构建与发布分层计时；依赖下载失败不得静默放行；候选预检只复制必要配置并排除 `request-audit/`、`app-logs/`、`runtime-hook-spool/` 和活跃历史数据库；生产切换前完成备份策略确认，避免在线大库复制阻塞发布。
+next: 评估新增项目级 `scripts/ops/reliable-build-image.sh`（或增强现有 `build-image.sh`）：固定/校验构建代理，启用 BuildKit cache mount，记录 export/dependency/build/load 各阶段耗时，依赖下载设置有限重试与超时，失败时保留诊断摘要；脚本只负责可追溯镜像构建，不自动替换容器。目标是把正常增量构建控制在 1–2 分钟，并让网络失败快速、可解释地退出。
+[ops-memory | 2026-08-27-build-stability-implemented] 已增强现有 `build-image.sh` 与 Dockerfile：默认项目构建代理、BuildKit Go/npm cache、有限重试、阶段耗时输出；保留 `go mod tidy` 以兼容 clean archive 的缺失 checksum，并移除会触发 Docker Hub frontend 拉取的 syntax 声明。冷构建仍可能受 Alpine 包下载影响，后续构建依赖层可复用。
+[ops-memory | 2026-08-27-build-base] 构建代理已切换为 `http://192.168.4.242:7890`。新增可选 `docker/Dockerfile.build-base` 与 `scripts/ops/build-base-image.sh`，可预装 `git/tar/procps/python3/make/g++` 并通过 `NODE_BASE_IMAGE` 接入应用构建；默认仍使用 `node:20-alpine`，避免新机器因缺少内部镜像无法构建。内部基础镜像主要优化冷构建/缓存丢失场景，需在 Node/Alpine 安全更新时定期重建。
+[ops-memory | 2026-08-27-build-base-attempt] Windows Docker Desktop 冷构建内部基础镜像时，代理连通性正常，但 Alpine 编译工具包下载在约 5 分钟内无足够进展，已停止，当前未生成 `aiclient2api:node20-alpine-build-base`。小写/大写代理环境变量均已加入 Dockerfile，后续可在网络更稳定时重试。
+[ops-memory | 2026-08-27-local-cutover-speed] 使用现有健康镜像完成一次真实本地更新流程：候选容器健康预检约 7 秒，停旧/重建同名容器/health/runtime 验证总计约 46.2 秒；新容器 healthy、`/health=200`、`/runtime/health=200`、重启次数 0，旧容器保留为时间戳备份。该耗时不包含镜像冷构建。

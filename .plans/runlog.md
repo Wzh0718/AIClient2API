@@ -107,6 +107,21 @@ DECISION: Reuse the existing multi-worker control-process single-writer architec
 环境记录：一次 PowerShell 传递正则的 node -e 命令因双重转义失败，改用单引号包裹的内存 vm.Script 检查成功；此前临时文件语法检查方式受本机策略拦截，未改用写盘绕过。
 RETROSPECTIVE: No high-signal memory updates.
 
+## Build stability optimization - 2026-08-27
+产物：scripts/ops/build-image.sh、Dockerfile、docs/ops-backup-and-build.md、tests/ops-build-image-stability-source.test.js。
+关键决策：增强现有构建入口，不新增重复脚本；构建失败只有限重试，不自动替换容器；保留 go mod tidy，避免 clean archive 缺少 go.sum 导致 sidecar 编译失败。
+验证：构建稳定性与蓝绿源码测试 7/7 通过；`wsl sh -n scripts/ops/build-image.sh` 通过；`docker build --check AIClient-2-API` 通过。一次冷构建在约 5 分钟时仍卡在 Alpine 编译工具下载，已主动停止，未修改运行中容器。
+
+## Build base image extension - 2026-08-27
+产物：docker/Dockerfile.build-base、scripts/ops/build-base-image.sh、Dockerfile、docs/ops-backup-and-build.md。
+关键决策：内部基础镜像作为可选路径，不强制替换官方基础镜像；应用 Dockerfile 通过 `NODE_BASE_IMAGE` 显式接入。
+验证：构建源码测试 8/8 通过；两个 shell 脚本 `sh -n` 通过；`docker build --check .` 通过且无警告。
+
+## Local Docker Desktop speed run - 2026-08-27
+产物：outputs/local-container-speed-test-20260827.ps1（测速审计脚本）。
+关键决策：本次使用现有镜像测量容器更新切换，不把未完成的冷基础镜像构建误算为成功；旧容器保留作回滚。
+验证：候选健康预检 7 秒；完整切换 46.2 秒；新容器 healthy，`/health=200`，`/runtime/health=200`，restartCount=0；旧容器 `aiclient2api-speed-backup-20260827-181129` 保留。
+
 ## gpt-image-2 Capacity Hotfix - 2026-08-14T19:06:29+08:00
 DECISION: 复用现有 BigObjectCapacity、RuntimeMetrics 与分块响应机制，不新增第二套限流器；累计 backpressureMs 仅保留观测用途，图片准入继续由 active byte budget、单 worker RSS 与 event-loop p95 控制，避免累计指标形成永久熔断。
 

@@ -896,6 +896,7 @@ export class CodexConverter extends BaseConverter {
             object: "response",
             created_at: unixTimestamp,
             model: response.model || model,
+            ...(response.service_tier ? { service_tier: response.service_tier } : {}),
             status: "completed",
             output: output,
             incomplete_details: response.incomplete_details || null,

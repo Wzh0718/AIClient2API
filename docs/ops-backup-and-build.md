@@ -30,6 +30,17 @@ The script verifies the archive with `gzip -t` and deletes it on corruption, so 
 BUILD_HTTP_PROXY=http://192.168.4.242:7890 ./scripts/ops/build-image.sh   # project build proxy for Go/npm downloads
 ```
 
-`BUILD_HTTP_PROXY` is also forwarded to npm in the Node build stage (`HTTP_PROXY`/`HTTPS_PROXY` plus npm's explicit proxy settings), so the same command covers both Go and npm dependency downloads. A proxy can improve reliability and sometimes throughput for large dependency downloads; a small registry ping may show little difference. Keep the default registry unless an approved mirror is available, and never place proxy credentials in the repository or build logs.
+The build helper defaults to the project Docker build proxy `http://192.168.4.242:7890`; override it with `BUILD_HTTP_PROXY=` only when needed. The proxy is forwarded to Go and npm (`HTTP_PROXY`/`HTTPS_PROXY` plus npm's explicit proxy settings). `BUILD_RETRIES` (default `2`) and `BUILD_RETRY_DELAY_SEC` (default `5`) provide bounded retries, while each archive/build/verify phase prints elapsed seconds. Retries reuse BuildKit's cached layers, so a transient registry failure does not discard completed dependency work.
+
+The Dockerfile mounts BuildKit caches for Go modules, Go compilation, and npm's cache. Keep BuildKit enabled. The first cold build can still spend several minutes downloading Alpine packages and compiling native modules; subsequent builds should reuse those layers unless the base image, package manifests, or native-tool layer changes. Do not hide dependency failures with `|| true`; a missing Go checksum or native module must fail the build.
+
+For machines that build frequently, prepare the optional internal base once:
+
+```bash
+./scripts/ops/build-base-image.sh aiclient2api:node20-alpine-build-base
+NODE_BASE_IMAGE=aiclient2api:node20-alpine-build-base ./scripts/ops/build-image.sh
+```
+
+This preinstalls `git`, `tar`, `procps`, `python3`, `make`, and `g++`. It mainly improves cold-build and cache-reset scenarios; normal warm builds already reuse Docker layers. The application image remains compatible with the official `node:20-alpine` default when `NODE_BASE_IMAGE` is not set. The trade-off is maintaining and periodically rebuilding the internal base when the Node/Alpine security baseline changes.
 
 Labels `yyn.base_commit`, `yyn.build_source=git-archive`, and `yyn.build_date` are stamped for container source verification. Rollout still follows the AGENTS.md remote ops protocol: record current image/health, rename the old container as a timestamped backup, start the new one, verify Docker health and `/health`.

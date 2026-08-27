@@ -216,6 +216,69 @@ describe('provider state persistence events', () => {
         });
     });
 
+    test('applies a newer quota recovery snapshot even when the incoming child has no error timestamp', () => {
+        const providerPools = { test: [{
+            uuid: 'one',
+            codexQuotaHealth: {
+                general: {
+                    isHealthy: false,
+                    lastErrorTime: '2026-08-26T08:00:00.000Z',
+                    scheduledRecoveryTime: '2099-01-01T00:00:00.000Z'
+                }
+            }
+        }] };
+
+        const applied = applyProviderStateEvent(providerPools, {
+            type: 'provider_state',
+            providerType: 'test',
+            uuid: 'one',
+            configRevision: 1,
+            occurredAt: '2026-08-26T09:00:00.000Z',
+            state: {
+                codexQuotaHealth: {
+                    general: {
+                        isHealthy: true,
+                        lastErrorTime: null,
+                        scheduledRecoveryTime: null,
+                        updatedAt: '2026-08-26T09:00:00.000Z'
+                    }
+                }
+            }
+        }, { revision: 1 });
+
+        expect(applied).toBe(true);
+        expect(providerPools.test[0].codexQuotaHealth.general).toMatchObject({
+            isHealthy: true,
+            scheduledRecoveryTime: null
+        });
+    });
+
+    test('replays a control worker quota recovery event to every execution worker state', () => {
+        const controlConfig = {
+            uuid: 'one',
+            codexQuotaHealth: {
+                general: {
+                    isHealthy: true,
+                    scheduledRecoveryTime: null,
+                    updatedAt: '2026-08-26T09:00:00.000Z'
+                }
+            }
+        };
+        const event = createProviderStateEvent('openai-codex-oauth', controlConfig, 4);
+        event.occurredAt = '2026-08-26T09:00:01.000Z';
+        const executionPools = [
+            { 'openai-codex-oauth': [{ uuid: 'one', codexQuotaHealth: { general: { isHealthy: false, scheduledRecoveryTime: '2099-01-01T00:00:00.000Z', updatedAt: '2026-08-26T08:00:00.000Z' } } }] },
+            { 'openai-codex-oauth': [{ uuid: 'one', codexQuotaHealth: { general: { isHealthy: false, scheduledRecoveryTime: '2099-01-01T00:00:00.000Z', updatedAt: '2026-08-26T08:00:00.000Z' } } }] }
+        ];
+
+        for (const pools of executionPools) {
+            expect(applyProviderStateEvent(pools, event, { revision: 4 })).toBe(true);
+        }
+
+        expect(executionPools.every(pools => pools['openai-codex-oauth'][0].codexQuotaHealth.general.isHealthy)).toBe(true);
+        expect(executionPools.every(pools => pools['openai-codex-oauth'][0].codexQuotaHealth.general.scheduledRecoveryTime === null)).toBe(true);
+    });
+
     test('does not let an older usage snapshot roll back usageCount', () => {
         const providerPools = { test: [{
             uuid: 'one',

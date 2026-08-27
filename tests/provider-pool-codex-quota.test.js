@@ -93,6 +93,117 @@ afterEach(() => {
 });
 
 describe('provider pool Codex token quota', () => {
+    test('fresh usage cache recovery re-enables a provider stuck in a future quota cooldown', async () => {
+        writeCodexUsageCache([
+            {
+                uuid: 'aaa-codex-over',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 10, unit: 'percent' },
+                        { id: 'secondary_window', percent: 20, unit: 'percent' }
+                    ]
+                }
+            },
+            {
+                uuid: 'zzz-codex-ok',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 15, unit: 'percent' },
+                        { id: 'secondary_window', percent: 25, unit: 'percent' }
+                    ]
+                }
+            }
+        ]);
+
+        const manager = createQuotaPoolManager({
+            over: {
+                codexQuotaHealth: {
+                    general: {
+                        isHealthy: false,
+                        scheduledRecoveryTime: '2099-01-01T00:00:00.000Z'
+                    }
+                }
+            }
+        });
+
+        const allowed = manager._filterCodexProvidersByTokenQuota(
+            'openai-codex-oauth',
+            manager.providerStatus['openai-codex-oauth'],
+            'gpt-5.5'
+        );
+
+        expect(allowed.map(provider => provider.uuid)).toContain('aaa-codex-over');
+        expect(manager.providerStatus['openai-codex-oauth'][0].config.codexQuotaHealth.general).toMatchObject({
+            isHealthy: true,
+            scheduledRecoveryTime: null
+        });
+    });
+
+    test('fresh usage cache recovery preserves an independent upstream rate-limit cooldown', async () => {
+        writeCodexUsageCache([
+            {
+                uuid: 'aaa-codex-over',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 10, unit: 'percent' },
+                        { id: 'secondary_window', percent: 20, unit: 'percent' }
+                    ]
+                }
+            },
+            {
+                uuid: 'zzz-codex-ok',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 15, unit: 'percent' },
+                        { id: 'secondary_window', percent: 25, unit: 'percent' }
+                    ]
+                }
+            }
+        ]);
+
+        const manager = createQuotaPoolManager({
+            over: {
+                codexQuotaHealth: {
+                    general: {
+                        isHealthy: false,
+                        scheduledRecoveryTime: '2099-01-01T00:00:00.000Z'
+                    }
+                },
+                codexRateLimitCooldown: {
+                    general: {
+                        isCoolingDown: true,
+                        scheduledRecoveryTime: '2099-01-01T00:00:00.000Z',
+                        source: 'upstream_429'
+                    }
+                }
+            }
+        });
+
+        const allowed = manager._filterCodexProvidersByTokenQuota(
+            'openai-codex-oauth',
+            manager.providerStatus['openai-codex-oauth'],
+            'gpt-5.5'
+        );
+
+        expect(allowed.map(provider => provider.uuid)).not.toContain('aaa-codex-over');
+        expect(manager.providerStatus['openai-codex-oauth'][0].config.codexQuotaHealth.general).toMatchObject({
+            isHealthy: true,
+            scheduledRecoveryTime: null
+        });
+        expect(manager.providerStatus['openai-codex-oauth'][0].config.codexRateLimitCooldown.general).toMatchObject({
+            isCoolingDown: true,
+            source: 'upstream_429'
+        });
+    });
+
     test.each(['gpt-5.3', 'gpt-5.3-fast', 'gpt-5.4', 'gpt-5.4-fast', 'gpt-5.4-mini-fast'])(
         'does not apply an ordinary unavailable-model fallback to %s',
         (model) => {

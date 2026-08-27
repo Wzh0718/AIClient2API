@@ -39,32 +39,55 @@ function toTimestamp(value) {
     return Number.isFinite(parsed) ? parsed : null;
 }
 
+function quotaStateTimestamp(state) {
+    if (!state || typeof state !== 'object') return -Infinity;
+    return toTimestamp(state.updatedAt)
+        ?? toTimestamp(state.lastErrorTime)
+        ?? toTimestamp(state.scheduledRecoveryTime)
+        ?? -Infinity;
+}
+
 function mergeQuotaState(currentValue, incomingValue) {
     if (!currentValue || typeof currentValue !== 'object') return structuredClone(incomingValue);
     if (!incomingValue || typeof incomingValue !== 'object') return structuredClone(currentValue);
 
     const merged = { ...structuredClone(currentValue), ...structuredClone(incomingValue) };
-    for (const childKey of ['families', 'models']) {
-        if (currentValue[childKey] || incomingValue[childKey]) {
-            merged[childKey] = { ...(currentValue[childKey] || {}) };
-            for (const [name, incomingChild] of Object.entries(incomingValue[childKey] || {})) {
-                const currentChild = currentValue[childKey]?.[name];
-                if (!currentChild || !incomingChild || typeof incomingChild !== 'object') {
-                    merged[childKey][name] = structuredClone(incomingChild);
+    const childKeys = new Set([
+        ...Object.keys(currentValue),
+        ...Object.keys(incomingValue)
+    ]);
+    for (const childKey of childKeys) {
+        const incomingChild = incomingValue[childKey];
+        const currentChild = currentValue[childKey];
+        if (!incomingChild || typeof incomingChild !== 'object' || Array.isArray(incomingChild)) continue;
+        if (!currentChild || typeof currentChild !== 'object' || Array.isArray(currentChild)) {
+            merged[childKey] = structuredClone(incomingChild);
+            continue;
+        }
+
+        if (childKey === 'families' || childKey === 'models') {
+            merged[childKey] = { ...structuredClone(currentChild) };
+            for (const [name, incomingEntry] of Object.entries(incomingChild)) {
+                const currentEntry = currentChild[name];
+                if (!currentEntry || !incomingEntry || typeof incomingEntry !== 'object') {
+                    merged[childKey][name] = structuredClone(incomingEntry);
                     continue;
                 }
-                const incomingAt = Math.max(
-                    toTimestamp(incomingChild.lastErrorTime) ?? -Infinity,
-                    toTimestamp(incomingChild.scheduledRecoveryTime) ?? -Infinity
-                );
-                const currentAt = Math.max(
-                    toTimestamp(currentChild.lastErrorTime) ?? -Infinity,
-                    toTimestamp(currentChild.scheduledRecoveryTime) ?? -Infinity
-                );
+                const incomingAt = quotaStateTimestamp(incomingEntry);
+                const currentAt = quotaStateTimestamp(currentEntry);
                 if (incomingAt >= currentAt || (incomingAt === -Infinity && currentAt === -Infinity)) {
-                    merged[childKey][name] = structuredClone(incomingChild);
+                    merged[childKey][name] = structuredClone(incomingEntry);
                 }
             }
+            continue;
+        }
+
+        const incomingAt = quotaStateTimestamp(incomingChild);
+        const currentAt = quotaStateTimestamp(currentChild);
+        if (incomingAt < currentAt && currentAt !== -Infinity) {
+            merged[childKey] = structuredClone(currentChild);
+        } else {
+            merged[childKey] = structuredClone(incomingChild);
         }
     }
     return merged;
