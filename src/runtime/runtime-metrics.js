@@ -1,5 +1,24 @@
 import { monitorEventLoopDelay, performance } from 'perf_hooks';
 
+function readNonNegativeNumber(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
+function readSampleRate(value, fallback = 0) {
+    return Math.min(1, readNonNegativeNumber(value, fallback));
+}
+
+function safeMetadata(metadata = {}) {
+    const allowed = [
+        'method', 'path', 'model', 'providerType', 'stream',
+        'requestBodyBytes', 'responseStatus'
+    ];
+    return Object.fromEntries(allowed
+        .filter(name => metadata[name] !== undefined && metadata[name] !== null)
+        .map(name => [name, metadata[name]]));
+}
+
 const REQUIRED_STAGE_NAMES = [
     'providerFilterMs',
     'redisLeaseMs',
@@ -47,6 +66,16 @@ export class RuntimeMetrics {
         this.requests = { total: 0, success: 0, failed: 0, byWorker: {}, byKind: {} };
         this.output = { bytes: 0, backpressureMs: 0 };
         this.inFlight = 0;
+        this.sampleRate = readSampleRate(options.sampleRate ?? process.env.REQUEST_PERF_SAMPLE_RATE, 0);
+        this.slowRequestMs = readNonNegativeNumber(options.slowRequestMs ?? process.env.REQUEST_PERF_SLOW_MS, 0);
+        this.random = options.random || Math.random;
+        this.onProfile = typeof options.onProfile === 'function' ? options.onProfile : null;
+    }
+
+    configure(options = {}) {
+        if (options.sampleRate !== undefined) this.sampleRate = readSampleRate(options.sampleRate, this.sampleRate);
+        if (options.slowRequestMs !== undefined) this.slowRequestMs = readNonNegativeNumber(options.slowRequestMs, this.slowRequestMs);
+        return { sampleRate: this.sampleRate, slowRequestMs: this.slowRequestMs };
     }
 
     recordStage(name, elapsed) {
@@ -57,18 +86,39 @@ export class RuntimeMetrics {
         this.stageSamples.set(name, samples);
     }
 
-    beginRequest({ workerId = 'standalone', kind = 'model' } = {}) {
+    beginRequest({ workerId = 'standalone', kind = 'model', metadata = {} } = {}) {
         const startedAt = this.now();
         let ended = false;
+        let finalProfile = null;
+        let requestMetadata = safeMetadata(metadata);
+        const sampled = this.random() < this.sampleRate;
+        const stageDurations = {};
+        let requestOutputBytes = 0;
+        let requestBackpressureMs = 0;
         this.inFlight++;
-        const recordStage = (name, elapsed) => this.recordStage(name, elapsed);
+        const recordStage = (name, elapsed) => {
+            const value = Math.max(0, Number(elapsed) || 0);
+            stageDurations[name] = value;
+            this.recordStage(name, value);
+        };
         return {
             mark: name => recordStage(name, this.now() - startedAt),
             recordStage,
-            addOutputBytes: bytes => { this.output.bytes += Math.max(0, Number(bytes) || 0); },
-            addBackpressureMs: ms => { this.output.backpressureMs += Math.max(0, Number(ms) || 0); },
+            setMetadata: metadataUpdate => {
+                requestMetadata = { ...requestMetadata, ...safeMetadata(metadataUpdate) };
+            },
+            addOutputBytes: bytes => {
+                const value = Math.max(0, Number(bytes) || 0);
+                requestOutputBytes += value;
+                this.output.bytes += value;
+            },
+            addBackpressureMs: ms => {
+                const value = Math.max(0, Number(ms) || 0);
+                requestBackpressureMs += value;
+                this.output.backpressureMs += value;
+            },
             end: ({ statusCode = 200 } = {}) => {
-                if (ended) return;
+                if (ended) return finalProfile;
                 ended = true;
                 this.inFlight--;
                 this.requests.total++;
@@ -76,7 +126,29 @@ export class RuntimeMetrics {
                 else this.requests.success++;
                 this.requests.byWorker[workerId] = (this.requests.byWorker[workerId] || 0) + 1;
                 this.requests.byKind[kind] = (this.requests.byKind[kind] || 0) + 1;
-                recordStage('complete', this.now() - startedAt);
+                const durationMs = this.now() - startedAt;
+                recordStage('complete', durationMs);
+                requestMetadata = { ...requestMetadata, responseStatus: statusCode };
+                finalProfile = sampled || (this.slowRequestMs > 0 && durationMs >= this.slowRequestMs)
+                    ? {
+                        workerId,
+                        kind,
+                        statusCode,
+                        durationMs,
+                        metadata: requestMetadata,
+                        stages: { ...stageDurations },
+                        outputBytes: requestOutputBytes,
+                        backpressureMs: requestBackpressureMs
+                    }
+                    : null;
+                if (finalProfile) {
+                    try {
+                        this.onProfile?.(finalProfile);
+                    } catch {
+                        // Diagnostics must never affect request handling.
+                    }
+                }
+                return finalProfile;
             }
         };
     }

@@ -1451,6 +1451,9 @@ export function getRequestBody(req, options = {}) {
                 return resolve({});
             }
             try {
+                requestContext.get('runtimeRequest')?.setMetadata?.({
+                    requestBodyBytes: Buffer.byteLength(body)
+                });
                 const parsed = JSON.parse(body);
                 requestContext.get('runtimeRequest')?.mark?.('bodyParsed');
                 resolve(parsed);
@@ -1641,6 +1644,11 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             model = requestBody.model;
         }
         const usageTrackingModel = getUsageTrackingModel(model, requestBody, toProvider);
+        requestContext.get('runtimeRequest')?.setMetadata?.({
+            model: usageTrackingModel,
+            providerType: toProvider,
+            stream: true
+        });
         const addEvent = getProtocolPrefix(fromProvider) === MODEL_PROTOCOL_PREFIX.CLAUDE || getProtocolPrefix(fromProvider) === MODEL_PROTOCOL_PREFIX.OPENAI_RESPONSES;
         // 为每个请求生成唯一 ID，用于在单例 converter 中隔离并发流状态
         const streamRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
@@ -2131,6 +2139,11 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             model = requestBody.model;
         }
         const usageTrackingModel = getUsageTrackingModel(model, requestBody, toProvider);
+        requestContext.get('runtimeRequest')?.setMetadata?.({
+            model: usageTrackingModel,
+            providerType: toProvider,
+            stream: false
+        });
         
         const responseText = extractResponseText(nativeResponse, toProvider);
 

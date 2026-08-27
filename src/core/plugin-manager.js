@@ -13,6 +13,8 @@ import { promises as fs } from 'fs';
 import logger from '../utils/logger.js';
 import { existsSync } from 'fs';
 import path from 'path';
+import { performance } from 'node:perf_hooks';
+import requestContext from '../utils/context.js';
 import {
     auditSecurityEvent,
     isInsidePath,
@@ -596,7 +598,15 @@ class PluginManager {
     async executeHook(hookName, ...args) {
         const bridgedHooks = ['onUnaryResponse', 'onStreamChunk', 'onContentGenerated', 'onRequestCompleted', 'onUpstreamRequestPrepared'];
         if (this.runtimeHookBridge && bridgedHooks.includes(hookName)) {
-            await this.runtimeHookBridge.handle(hookName, args[0]);
+            const startedAt = performance.now();
+            try {
+                await this.runtimeHookBridge.handle(hookName, args[0]);
+            } finally {
+                requestContext.get('runtimeRequest')?.recordStage?.(
+                    `runtimeHookBridge:${hookName}`,
+                    performance.now() - startedAt
+                );
+            }
         }
         for (const plugin of this.getEnabledPlugins()) {
             if (this.runtimeHookBridge && ['api-potluck', 'request-audit', 'model-usage-stats'].includes(plugin.name)) {
@@ -659,11 +669,21 @@ class PluginManager {
     }
 
     executePluginOperation(plugin, operationName, fn, operationTimeoutMs = PLUGIN_OPERATION_TIMEOUT_MS) {
+        const startedAt = performance.now();
+        const runtimeRequest = requestContext.get('runtimeRequest');
+        const recordDuration = () => runtimeRequest?.recordStage?.(
+            `plugin:${plugin?.name || 'unknown'}:${operationName}`,
+            performance.now() - startedAt
+        );
         const operationPromise = Promise.resolve().then(fn);
         if (operationTimeoutMs === null) {
             return operationPromise.then(result => {
+                recordDuration();
                 plugin._errorCount = 0;
                 return result;
+            }, error => {
+                recordDuration();
+                throw error;
             });
         }
 
@@ -682,8 +702,12 @@ class PluginManager {
             operationPromise,
             timeoutPromise
         ]).then(result => {
+            recordDuration();
             plugin._errorCount = 0;
             return result;
+        }, error => {
+            recordDuration();
+            throw error;
         }).finally(() => clearTimeout(timeoutId));
     }
 

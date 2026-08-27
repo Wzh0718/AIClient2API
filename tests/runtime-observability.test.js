@@ -101,6 +101,92 @@ describe('runtime observability baseline', () => {
         expect(JSON.stringify(snapshot)).not.toContain('requestBody');
     });
 
+    test('emits a sampled request profile with safe metadata and stage timings', () => {
+        let now = 100;
+        const profiles = [];
+        const metrics = new RuntimeMetrics({
+            now: () => now,
+            eventLoopDelay: { enable: jest.fn(), reset: jest.fn(), percentile: () => 0, max: 0 },
+            sampleRate: 1,
+            slowRequestMs: 1000,
+            random: () => 0,
+            onProfile: profile => profiles.push(profile)
+        });
+
+        const request = metrics.beginRequest({
+            workerId: 'execution-1',
+            kind: 'model',
+            metadata: {
+                method: 'POST',
+                path: '/v1/chat/completions',
+                model: 'gpt-5.5',
+                providerType: 'openai-codex-oauth',
+                stream: true,
+                requestBodyBytes: 512
+            }
+        });
+        request.recordStage('requestConvertMs', 12);
+        request.addOutputBytes(2048);
+        now = 160;
+        const profile = request.end({ statusCode: 200 });
+
+        expect(profile).toMatchObject({
+            workerId: 'execution-1',
+            kind: 'model',
+            statusCode: 200,
+            durationMs: 60,
+            metadata: {
+                method: 'POST',
+                path: '/v1/chat/completions',
+                model: 'gpt-5.5',
+                providerType: 'openai-codex-oauth',
+                stream: true,
+                requestBodyBytes: 512
+            },
+            outputBytes: 2048,
+            stages: { requestConvertMs: 12 }
+        });
+        expect(profiles).toHaveLength(1);
+        expect(JSON.stringify(profile)).not.toMatch(/prompt|imageData|apiKey|token|cookie|rawBody/i);
+    });
+
+    test('emits only slow requests when sampling is disabled', () => {
+        let now = 0;
+        const profiles = [];
+        const metrics = new RuntimeMetrics({
+            now: () => now,
+            eventLoopDelay: { enable: jest.fn(), reset: jest.fn(), percentile: () => 0, max: 0 },
+            sampleRate: 0,
+            slowRequestMs: 50,
+            random: () => 0.99,
+            onProfile: profile => profiles.push(profile)
+        });
+
+        metrics.beginRequest({ metadata: { method: 'GET', path: '/health' } }).end({ statusCode: 200 });
+        now = 100;
+        const slowRequest = metrics.beginRequest({ metadata: { method: 'POST', path: '/v1/responses' } });
+        now = 200;
+        slowRequest.end({ statusCode: 500 });
+
+        expect(profiles).toHaveLength(1);
+        expect(profiles[0]).toMatchObject({ statusCode: 500, durationMs: 100 });
+    });
+
+    test('diagnostic callback failures do not affect request completion', () => {
+        let now = 0;
+        const metrics = new RuntimeMetrics({
+            now: () => now,
+            eventLoopDelay: { enable: jest.fn(), reset: jest.fn(), percentile: () => 0, max: 0 },
+            sampleRate: 1,
+            onProfile: () => { throw new Error('logging failed'); }
+        });
+        const request = metrics.beginRequest();
+        now = 10;
+
+        expect(() => request.end({ statusCode: 200 })).not.toThrow();
+        expect(metrics.snapshot().requests.total).toBe(1);
+    });
+
     test('request body parsing marks the active runtime request without retaining the body', async () => {
         const marks = [];
         const body = JSON.stringify({ ok: true });

@@ -229,6 +229,8 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         LOG_LEVEL: "info",
         LOG_DIR: "logs",
         LOG_INCLUDE_REQUEST_ID: true,
+        REQUEST_PERF_SAMPLE_RATE: 0,
+        REQUEST_PERF_SLOW_MS: 0,
         LOG_INCLUDE_TIMESTAMP: true,
         LOG_MAX_FILE_SIZE: 10485760,
         LOG_MAX_FILES: 10,

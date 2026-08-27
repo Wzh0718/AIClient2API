@@ -24,6 +24,41 @@ function generateRequestId() {
     return randomUUID();
 }
 
+function logRequestProfile(profile) {
+    if (!profile) return;
+    try {
+        logger.info(`[Request Perf] ${JSON.stringify(profile)}`);
+    } catch {
+        // Performance diagnostics must never affect request handling.
+    }
+}
+
+function getChunkBytes(chunk) {
+    if (chunk === undefined || chunk === null) return 0;
+    if (typeof chunk === 'function') return 0;
+    return typeof chunk === 'string' ? Buffer.byteLength(chunk) : (chunk.byteLength || chunk.length || 0);
+}
+
+function instrumentResponseMetrics(res, runtimeRequest) {
+    if (!res || res.__runtimeMetricsInstrumented) return;
+    res.__runtimeMetricsInstrumented = true;
+    if (typeof res.write === 'function') {
+        const write = res.write.bind(res);
+        res.write = (chunk, ...args) => {
+            runtimeRequest.addOutputBytes(getChunkBytes(chunk));
+            return write(chunk, ...args);
+        };
+    }
+    if (typeof res.end === 'function') {
+        const end = res.end.bind(res);
+        res.end = (chunk, ...args) => {
+            runtimeRequest.addOutputBytes(getChunkBytes(chunk));
+            runtimeRequest.mark('responseFinalizeMs');
+            return end(chunk, ...args);
+        };
+    }
+}
+
 function isAuditableModelRequest(method, path) {
     const value = String(path || '');
     const route = value.replace(/^\/(?:[^/]+)\/(?=v1(?:beta)?\/)/, '/');
@@ -49,14 +84,19 @@ export function createRequestHandler(config, providerPoolManager) {
         const originalPath = initialRequestUrl.pathname;
         const workerId = process.env.RUNTIME_WORKER_ID || (process.env.RUNTIME_WORKER_ROLE === 'execution' ? `execution-${process.pid}` : 'standalone');
         const requestKind = /\/images\/(?:generations|edits)/.test(originalPath) ? 'image' : 'model';
-        const runtimeRequest = runtimeMetrics.beginRequest({ workerId, kind: requestKind });
+        const runtimeRequest = runtimeMetrics.beginRequest({
+            workerId,
+            kind: requestKind,
+            metadata: { method: req.method, path: originalPath }
+        });
         res.runtimeRequest = runtimeRequest;
+        instrumentResponseMetrics(res, runtimeRequest);
         // Unit/in-process adapters may provide a minimal response object without
         // EventEmitter methods. Real Node responses still get lifecycle metrics;
         // lightweight test doubles continue through the normal handler path.
         if (typeof res.once === 'function') {
-            res.once('finish', () => runtimeRequest.end({ statusCode: res.statusCode }));
-            res.once('close', () => runtimeRequest.end({ statusCode: res.statusCode || 499 }));
+            res.once('finish', () => logRequestProfile(runtimeRequest.end({ statusCode: res.statusCode })));
+            res.once('close', () => logRequestProfile(runtimeRequest.end({ statusCode: res.statusCode || 499 })));
         }
 
         return requestContext.run({ requestId, runtimeRequest, requestAudit: { requestId, ...network, originalPath } }, async () => {
@@ -66,6 +106,7 @@ export function createRequestHandler(config, providerPoolManager) {
                 currentConfig._monitorRequestId = requestId;
                 currentConfig._originalRequestPath = originalPath;
                 currentConfig._requestAuditLifecycle = true;
+                runtimeRequest.setMetadata({ providerType: currentConfig.MODEL_PROVIDER });
                 const auditLifecycle = instrumentResponseForAudit(res, async ({ normalizedPath, response, errorClass }) => {
                     const pluginManager = getPluginManager();
                     await pluginManager.executeHook('onRequestCompleted', {

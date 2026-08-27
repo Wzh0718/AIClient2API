@@ -413,6 +413,10 @@ function gracefulShutdown(exitCode = 0) {
 async function startServer() {
     // Initialize configuration
     await initializeConfig(process.argv.slice(2), 'configs/config.json');
+    runtimeMetrics.configure({
+        sampleRate: process.env.REQUEST_PERF_SAMPLE_RATE ?? CONFIG.REQUEST_PERF_SAMPLE_RATE,
+        slowRequestMs: process.env.REQUEST_PERF_SLOW_MS ?? CONFIG.REQUEST_PERF_SLOW_MS
+    });
     if (startupShutdownGate.shouldAbort('TLS sidecar startup')) return null;
 
     if (!IS_EXECUTION_WORKER) {
