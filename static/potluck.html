@@ -2190,54 +2190,11 @@
             }
             if (range === 'custom') {
                 const rangeSummary = getCustomKeyRangeSummary(key);
-                return {
-                    requestCount: rangeSummary.summary.requestCount,
-                    totalTokens: rangeSummary.summary.totalTokens,
-                    cachedTokens: rangeSummary.summary.cachedTokens,
-                    cacheHitRatio: rangeSummary.summary.cacheHitRatio,
-                    cost: rangeSummary.summary.cost
-                };
-            }
-            if (range === 'total') {
-                return {
-                    requestCount: Number(key.totalUsage || 0),
-                    totalTokens: Number(key.totalTokens || 0),
-                    cachedTokens: Number(key.totalCachedTokens || 0),
-                    cacheHitRatio: Number(key.totalCacheHitRatio || 0),
-                    cost: key.cost
-                };
-            }
-
-            if (range === 'today') {
-                const todayCost = key.usageHistory?.[getTodayDateKey()]?.summary?.cost;
-                return {
-                    requestCount: Number(key.todayUsage || 0),
-                    totalTokens: Number(key.todayTotalTokens || 0),
-                    cachedTokens: Number(key.todayCachedTokens || 0),
-                    cacheHitRatio: Number(key.todayCacheHitRatio || 0),
-                    cost: todayCost
-                };
-            }
-
-            if (range === '7d') {
-                const rangeSummary = summarizeUsageHistoryForRange(key.usageHistory || {}, range).summary;
-                return {
-                    requestCount: Number(key.weeklyUsage || 0),
-                    totalTokens: Number(key.weeklyTotalTokens || 0),
-                    cachedTokens: Number(key.weeklyCachedTokens || 0),
-                    cacheHitRatio: Number(key.weeklyCacheHitRatio || 0),
-                    cost: rangeSummary.cost
-                };
+                return buildRangeMetricsFromSummary(rangeSummary.summary);
             }
 
             const rangeSummary = summarizeUsageHistoryForRange(key.usageHistory || {}, range).summary;
-            return {
-                requestCount: rangeSummary.requestCount,
-                totalTokens: rangeSummary.totalTokens,
-                cachedTokens: rangeSummary.cachedTokens,
-                cacheHitRatio: rangeSummary.cacheHitRatio,
-                cost: rangeSummary.cost
-            };
+            return buildRangeMetricsFromSummary(rangeSummary);
         }
 
         function renderKeyDailyUsage(usageHistory = {}, range = currentUsageRange) {
@@ -2541,7 +2498,8 @@
                 Object.entries(source.daily || {}).forEach(([date, usage]) => { daily[date] = { summary: usage }; });
             }
 
-            const liveDates = (ledgerData?.missingDates || [])
+            const candidateLiveDates = ledgerData ? (ledgerData.missingDates || []) : Object.keys(key.usageHistory || {});
+            const liveDates = candidateLiveDates
                 .filter(date => date >= currentCustomRange.from && date <= currentCustomRange.to)
                 .filter(date => key.usageHistory?.[date]);
             liveDates.forEach(date => {
@@ -2563,6 +2521,16 @@
 
         function getCustomKeyRangeSummary(key) {
             return key?._customRangeSummary || buildCustomKeyRangeSummary(key);
+        }
+
+        function buildRangeMetricsFromSummary(summary = {}) {
+            return {
+                requestCount: Number(summary.requestCount || 0),
+                totalTokens: Number(summary.totalTokens || 0),
+                cachedTokens: Number(summary.cachedTokens || 0),
+                cacheHitRatio: Number(summary.cacheHitRatio || 0),
+                cost: summary.cost || null
+            };
         }
 
         function getLedgerKeyRangeSummary(key, range = currentUsageRange) {

@@ -45,6 +45,16 @@ describe('api potluck keys list compact source', () => {
         const html = fs.readFileSync(path.join(process.cwd(), 'static/potluck.html'), 'utf8').replace(/\r\n/g, '\n');
 
         expect(source).toContain('const LIST_KEY_FIELDS');
+        expect(source).toContain("'weeklyUsage'");
+        expect(source).toContain("'weeklyPromptTokens'");
+        expect(source).toContain("'weeklyCompletionTokens'");
+        expect(source).toContain("'weeklyReasoningTokens'");
+        expect(source).toContain("'weeklyTotalTokens'");
+        expect(source).toContain("'weeklyCachedTokens'");
+        expect(source).toContain("'todayCacheHitRatio'");
+        expect(source).toContain("'weeklyCacheHitRatio'");
+        expect(source).toContain("'totalCacheHitRatio'");
+        expect(source).toContain("'cost'");
         expect(source).toContain("subPath === '/detail'");
         expect(source).toContain('secret');
         expect(html).toContain('copyKeyFromDetail');
@@ -59,5 +69,23 @@ describe('api potluck keys list compact source', () => {
         expect(source).toContain("detail === 'history'");
         expect(source).toContain("detail === 'full'");
         expect(source).toContain('const detail = getRequestDetailOptions(req);');
+    });
+
+    test('builds key summaries with usage-history weekly metrics and compact cost data', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'src/plugins/api-potluck/key-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain('const summaryHistory = cloneUsageHistorySummaryOnly(');
+        expect(source).toContain('const weeklySummary = getRecentHistorySummary(summaryHistory, 7);');
+        expect(source).toContain('weeklyTotalTokens: weeklySummary.totalTokens');
+        expect(source).toContain('weeklyCacheHitRatio: weeklySummary.cacheHitRatio');
+        expect(source).toContain('cost: buildCost(');
+    });
+
+    test('uses usage history as the fallback source for every range when ledger data is unavailable', () => {
+        const html = fs.readFileSync(path.join(process.cwd(), 'static/potluck.html'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(html).toContain('const rangeSummary = summarizeUsageHistoryForRange(key.usageHistory || {}, range).summary;');
+        expect(html).toContain('return buildRangeMetricsFromSummary(rangeSummary);');
+        expect(html).toContain('const candidateLiveDates = ledgerData ? (ledgerData.missingDates || []) : Object.keys(key.usageHistory || {});');
     });
 });

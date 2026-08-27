@@ -122,6 +122,16 @@ RETROSPECTIVE: No high-signal memory updates.
 关键决策：本次使用现有镜像测量容器更新切换，不把未完成的冷基础镜像构建误算为成功；旧容器保留作回滚。
 验证：候选健康预检 7 秒；完整切换 46.2 秒；新容器 healthy，`/health=200`，`/runtime/health=200`，restartCount=0；旧容器 `aiclient2api-speed-backup-20260827-181129` 保留。
 
+## Potluck range data diagnosis and local fix - 2026-08-27
+产物：src/plugins/api-potluck/api-routes.js、src/plugins/api-potluck/key-manager.js、static/potluck.html、tests/api-potluck-keys-compact-source.test.js。
+关键决策：所有没有真实 ledger 覆盖的范围统一使用 usageHistory；列表摘要显式返回 weekly/cache ratio/cost；不恢复历史 reset-token 已清零数据。
+验证：4 个相关 Jest 套件 58/58 通过；源码测试 7/7 通过；本地修复镜像 `aiclient2api:local-usage-range-fix-20260827` 已切换，health/runtime 均 200，容器 healthy。
+
+## Production readonly backup - 2026-08-27
+产物：`/root/backups/aiclient2api-configs/full-readonly-20260827-234151`。
+关键决策：只备份一次；静态配置排除日志/request-audit；SQLite 先中止高写放大在线 backup，再短暂 pause 复制主库/WAL/SHM；坏的中断备份保留并标记 `.incomplete`。
+验证：生产容器仍 running/healthy、restartCount=0；备份 SQLite `quick_check=ok`、history_rows=1700，目录约 2.3G、513 个文件。
+
 ## gpt-image-2 Capacity Hotfix - 2026-08-14T19:06:29+08:00
 DECISION: 复用现有 BigObjectCapacity、RuntimeMetrics 与分块响应机制，不新增第二套限流器；累计 backpressureMs 仅保留观测用途，图片准入继续由 active byte budget、单 worker RSS 与 event-loop p95 控制，避免累计指标形成永久熔断。
 

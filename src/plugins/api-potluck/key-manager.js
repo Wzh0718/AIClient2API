@@ -2646,7 +2646,27 @@ export async function getStats(options = {}) {
 
         if (includeKeySummaries) {
             const rates = rateManager.getStats(`key:${key.id}`);
-            const summaryHistory = Object.fromEntries(Object.entries(key.usageHistory || {}).map(([date, day]) => [date, { summary: day?.summary || {} }]));
+            const summaryHistory = cloneUsageHistorySummaryOnly(
+                key.usageHistory || {},
+                conversionModel,
+                { compactCosts: true }
+            );
+            const weeklySummary = getRecentHistorySummary(summaryHistory, 7);
+            const weeklyModels = {};
+            for (const date of getRecentDateKeys(7)) {
+                for (const [model, usage] of Object.entries(key.usageHistory?.[date]?.models || {})) {
+                    weeklyModels[model] = normalizeUsageBucket(weeklyModels[model]);
+                    addUsage(weeklyModels[model], usage);
+                }
+            }
+            const weeklyCost = buildCost(weeklySummary, weeklyModels, conversionModel);
+            const totalCost = buildCost({
+                promptTokens: key.totalPromptTokens,
+                cachedTokens: key.totalCachedTokens,
+                completionTokens: key.totalCompletionTokens,
+                reasoningTokens: key.totalReasoningTokens,
+                totalTokens: key.totalTokens
+            }, key.totalModels || {}, conversionModel);
             keySummaries.push({
                 id: key.id,
                 name: key.name || '',
@@ -2678,7 +2698,18 @@ export async function getStats(options = {}) {
                 queueTimeoutMs: toNumber(key.queueTimeoutMs || 300000),
                 concurrencyMode: key.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
                 fixedCredential: key.fixedCredential ? { ...key.fixedCredential } : null,
-                usageHistory: summaryHistory
+                usageHistory: summaryHistory,
+                weeklyUsage: weeklySummary.requestCount,
+                weeklyPromptTokens: weeklySummary.promptTokens,
+                weeklyCompletionTokens: weeklySummary.completionTokens,
+                weeklyReasoningTokens: weeklySummary.reasoningTokens,
+                weeklyTotalTokens: weeklySummary.totalTokens,
+                weeklyCachedTokens: weeklySummary.cachedTokens,
+                todayCacheHitRatio: key.todayPromptTokens > 0 ? key.todayCachedTokens / key.todayPromptTokens : 0,
+                weeklyCacheHitRatio: weeklySummary.cacheHitRatio,
+                totalCacheHitRatio: key.totalPromptTokens > 0 ? key.totalCachedTokens / key.totalPromptTokens : 0,
+                cost: totalCost,
+                weeklyCost
             });
         }
     }

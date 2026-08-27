@@ -102,7 +102,10 @@ const LIST_KEY_FIELDS = [
     'todayReasoningTokens', 'todayTotalTokens', 'todayCachedTokens', 'totalUsage', 'totalPromptTokens',
     'totalCompletionTokens', 'totalReasoningTokens', 'totalTokens', 'totalCachedTokens', 'lastResetDate',
     'lastUsedAt', 'qps', 'tps', 'rpm', 'maxQps', 'maxTps', 'maxRpm', 'routingMode', 'primaryGroupId',
-    'manualLock', 'concurrencyLimit', 'queueLimit', 'queueTimeoutMs', 'concurrencyMode', 'maskedKey'
+    'manualLock', 'concurrencyLimit', 'queueLimit', 'queueTimeoutMs', 'concurrencyMode', 'maskedKey',
+    'weeklyUsage', 'weeklyPromptTokens', 'weeklyCompletionTokens', 'weeklyReasoningTokens',
+    'weeklyTotalTokens', 'weeklyCachedTokens', 'todayCacheHitRatio', 'weeklyCacheHitRatio',
+    'totalCacheHitRatio', 'cost'
 ];
 
 function getRequestDetailOptions(req) {
