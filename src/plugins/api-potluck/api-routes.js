@@ -30,7 +30,7 @@ import {
 } from './key-manager.js';
 import { getRequestBody } from '../../utils/common.js';
 import { extractCodexCredentialIdentity } from '../../utils/codex-utils.js';
-import { getBeijingDateKey, listLedgerDates, readLedgerRangeStats, resolveRangeDates } from './ledger-range-stats.js';
+import { getBeijingDateKey, listLedgerDates, readLedgerRangeStats, readSqliteRowsForDates, resolveRangeDates } from './ledger-range-stats.js';
 import {
     CredentialGroupService,
     calculateCredentialCapacity,
@@ -846,6 +846,19 @@ async function loadLedgerRangeStatsForRange(range, conversionModel, options = {}
     });
     const includeKeySummaries = Boolean(options.includeKeySummaries || options.targetKeyId);
     const keyHashToId = includeKeySummaries ? buildLedgerKeyHashLookup(options.targetKeyId) : null;
+    let extraRows = [];
+    try {
+        const metadataPath = path.join(process.cwd(), 'configs', 'api-potluck-keys.json');
+        const sqlitePath = process.env.USAGE_EVENT_DB_PATH
+            || path.join(process.cwd(), 'configs', 'usage-events', 'usage-events.sqlite');
+        const store = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+        const ledgerDateSet = new Set(listLedgerDates(ledgerDailyDir));
+        const today = getBeijingDateKey();
+        const missingCandidates = dates.filter(date => date === today || !ledgerDateSet.has(date));
+        extraRows = readSqliteRowsForDates(sqlitePath, missingCandidates, store);
+    } catch {
+        extraRows = [];
+    }
     const stats = await readLedgerRangeStats({
         ledgerDailyDir,
         dates,
@@ -853,7 +866,8 @@ async function loadLedgerRangeStatsForRange(range, conversionModel, options = {}
         keyHashToId,
         includeKeySummaries,
         includeKeyModels: Boolean(options.targetKeyId),
-        keyDailyLimit: options.targetKeyId ? Number.POSITIVE_INFINITY : 35
+        keyDailyLimit: options.targetKeyId ? Number.POSITIVE_INFINITY : 35,
+        extraRows
     });
     const ledgerDates = listLedgerDates(ledgerDailyDir);
     const today = getBeijingDateKey();

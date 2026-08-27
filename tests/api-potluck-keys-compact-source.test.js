@@ -94,4 +94,14 @@ describe('api potluck keys list compact source', () => {
         expect(source).toContain('compactUsageHistoryForList(key.usageHistory || {}, 7)');
         expect(source).toContain('function compactUsageHistoryForList(usageHistory = {}, maxDays = 7)');
     });
+
+    test('fills missing ledger dates from SQLite usage history for live distributions', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'src/plugins/api-potluck/ledger-range-stats.js'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain("from '../../../scripts/usage-ledger/daily-usage-ledger.mjs'");
+        expect(source).toContain('buildDailyRowsFromSqliteRows');
+        expect(source).toContain('potluck_usage_history');
+        expect(source).toContain('extraRows');
+        expect(source).toContain('availableDates.push(date)');
+    });
 });

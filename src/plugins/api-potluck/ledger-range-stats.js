@@ -8,8 +8,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import Database from 'better-sqlite3';
 
 import { buildAveragePricingProfile, DEFAULT_CONVERSION_MODEL, PRICING_VERSION, estimateUsageCost, normalizeConversionModel } from './cost-estimator.js';
+import { buildDailyRowsFromSqliteRows } from '../../../scripts/usage-ledger/daily-usage-ledger.mjs';
 
 function toNumber(value) {
     const num = Number(value);
@@ -263,6 +265,30 @@ async function addFileRows(aggregator, filePath) {
     }
 }
 
+export function readSqliteRowsForDates(databasePath, dates, store) {
+    if (!databasePath || !fs.existsSync(databasePath) || !Array.isArray(dates) || dates.length === 0) return [];
+    let database;
+    try {
+        database = new Database(databasePath, { readonly: true, fileMustExist: true });
+        const table = database.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'potluck_usage_history'"
+        ).get();
+        if (!table) return [];
+        const placeholders = dates.map(() => '?').join(',');
+        const rows = database.prepare(`
+            SELECT key_ref, usage_date, day_json
+            FROM potluck_usage_history
+            WHERE usage_date IN (${placeholders})
+            ORDER BY usage_date, key_ref
+        `).all(...dates);
+        return buildDailyRowsFromSqliteRows(rows, store);
+    } catch {
+        return [];
+    } finally {
+        database?.close();
+    }
+}
+
 export function listLedgerDates(ledgerDailyDir) {
     if (!fs.existsSync(ledgerDailyDir)) return [];
     return fs.readdirSync(ledgerDailyDir)
@@ -283,7 +309,8 @@ export async function readLedgerRangeStats({
     keyHashToId = null,
     includeKeySummaries = false,
     includeKeyModels = false,
-    keyDailyLimit = 35
+    keyDailyLimit = 35,
+    extraRows = []
 } = {}) {
     const aggregator = createLedgerRangeAggregator({
         conversionModel,
@@ -295,16 +322,34 @@ export async function readLedgerRangeStats({
     const availableDates = [];
     const missingDates = [];
     const todayKey = getBeijingDateKey(now);
+    const extraRowsByDate = new Map();
+    for (const row of extraRows || []) {
+        if (!row?.date) continue;
+        if (!extraRowsByDate.has(row.date)) extraRowsByDate.set(row.date, []);
+        extraRowsByDate.get(row.date).push(row);
+    }
 
     for (const date of dates) {
         // 当天账本可能是凌晨 write 的静态快照，分布面板始终以实时 usageHistory 为准。
         if (date === todayKey) {
-            missingDates.push(date);
+            const liveRows = extraRowsByDate.get(date) || [];
+            if (liveRows.length > 0) {
+                liveRows.forEach(row => aggregator.addRow(row));
+                availableDates.push(date);
+            } else {
+                missingDates.push(date);
+            }
             continue;
         }
         const filePath = path.join(ledgerDailyDir, `usage-${date}.jsonl`);
         if (!fs.existsSync(filePath)) {
-            missingDates.push(date);
+            const liveRows = extraRowsByDate.get(date) || [];
+            if (liveRows.length > 0) {
+                liveRows.forEach(row => aggregator.addRow(row));
+                availableDates.push(date);
+            } else {
+                missingDates.push(date);
+            }
             continue;
         }
         await addFileRows(aggregator, filePath);
