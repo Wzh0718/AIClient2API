@@ -1534,10 +1534,11 @@ export class ProviderPoolManager {
             const resolvedPath = path.resolve(filePath);
             const credentials = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
             const expiryTime = Number(credentials.expiry_date);
-            const safetyWindowMs = 5 * 60 * 1000;
             if (!credentials.access_token) return { ok: false, reason: 'access_token_missing' };
             if (!Number.isFinite(expiryTime)) return { ok: false, reason: 'expiry_date_invalid' };
-            if (expiryTime <= Date.now() + safetyWindowMs) return { ok: false, reason: 'expiry_date_not_in_future_window' };
+            // 安全窗口只用于请求前的提前刷新触发，不用于判断刷新后的授权是否健康。
+            // 只要凭据当前仍未过期，就不应因“距离过期不足安全窗口”进入中间异常状态。
+            if (expiryTime <= Date.now()) return { ok: false, reason: 'expiry_date_expired' };
             const adapterCredentials = serviceAdapter?.antigravityApiService?.authClient?.credentials
                 || serviceAdapter?.authClient?.credentials
                 || serviceAdapter?.credentials;
