@@ -320,6 +320,46 @@ describe('API Potluck key credential routing', () => {
                 manualLock: true
             }
         });
+        expect(response.body.data).not.toHaveProperty('usageHistory');
+    });
+
+    test('does not return usage history from routing and concurrency mutations', async () => {
+        const { keyManager, apiRoutes } = await loadPotluckModules();
+        const token = writeAdminToken();
+        const created = await keyManager.createKey('Large History', 1000);
+        const stored = readStore();
+        stored.keys[created.id].usageHistory = Object.fromEntries(Array.from({ length: 35 }, (_, index) => [
+            `2026-07-${String(index + 1).padStart(2, '0')}`,
+            {
+                summary: { requestCount: 100 },
+                providers: { 'openai-codex-oauth': { requestCount: 100, totalTokens: 1000 } },
+                models: { 'gpt-5': { requestCount: 100, totalTokens: 1000 } },
+                providerModels: { 'openai-codex-oauth': { 'gpt-5': { requestCount: 100, totalTokens: 1000 } } },
+                accounts: { account: { summary: { requestCount: 100 }, models: { 'gpt-5': { requestCount: 100 } } } },
+                hours: { '12': { summary: { requestCount: 100 }, models: { 'gpt-5': { requestCount: 100 } } } }
+            }
+        ]));
+        writeStore(stored);
+
+        const routeResponse = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'PUT',
+            `/api/potluck/keys/${encodeURIComponent(created.id)}/routing`,
+            { routingMode: 'pool', primaryGroupId: null, fixedCredential: null, manualLock: false },
+            token
+        );
+        const concurrencyResponse = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'PUT',
+            `/api/potluck/keys/${encodeURIComponent(created.id)}/concurrency`,
+            { concurrencyLimit: 10, queueLimit: 20, queueTimeoutMs: 300000, concurrencyMode: 'enforce' },
+            token
+        );
+
+        expect(routeResponse.body.data).not.toHaveProperty('usageHistory');
+        expect(concurrencyResponse.body.data).not.toHaveProperty('usageHistory');
+        expect(JSON.stringify(routeResponse.body).length).toBeLessThan(100_000);
+        expect(JSON.stringify(concurrencyResponse.body).length).toBeLessThan(100_000);
     });
 
     test('updates the authoritative credential-group assignment with Key routing', async () => {
