@@ -294,6 +294,16 @@ describe('API Potluck admin range and key detail UI source', () => {
         expect(source).toContain('ledgerData?.keySummaries?.[key.id]');
     });
 
+    test('admin request frequency follows the selected usage range', () => {
+        const source = loadPotluckSource();
+
+        expect(source).toContain('function getRangeRateMetrics(');
+        expect(source).toContain('rangeSummary.summary.requestCount');
+        expect(source).toContain('rangeRate.qps');
+        expect(source).toContain('rangeRate.rpm');
+        expect(source).toContain('所选范围平均');
+    });
+
     test('admin provider account tree rolls account cost up to provider headers', () => {
         const source = loadPotluckSource();
 

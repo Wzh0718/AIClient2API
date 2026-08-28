@@ -1351,7 +1351,7 @@
             <div class="stat-card pink">
                 <div class="label">今日总调用</div>
                 <div class="value" id="todayUsage">0</div>
-                <div style="font-size:12px;color:var(--text-secondary);margin-top:4px">QPS: <span id="currentQps" style="font-weight:700;color:var(--primary-color)">0.00</span> (峰值: <span id="maxQps">0.00</span>) | RPM: <span id="currentRpm" style="font-weight:700;color:var(--primary-color)">0.00</span> (峰值: <span id="maxRpm">0.00</span>)</div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-top:4px"><span id="requestRateLabel">所选范围平均</span> QPS: <span id="currentQps" style="font-weight:700;color:var(--primary-color)">0.00</span> (峰值: <span id="maxQps">0.00</span>) | RPM: <span id="currentRpm" style="font-weight:700;color:var(--primary-color)">0.00</span> (峰值: <span id="maxRpm">0.00</span>)</div>
             </div>
             <div class="stat-card cyan">
                 <div class="label">累计调用</div>
@@ -2197,6 +2197,53 @@
             return buildRangeMetricsFromSummary(rangeSummary);
         }
 
+        function getRangeRateSeconds(range = currentUsageRange, rangeSummary = {}) {
+            const ledgerStats = getLedgerRangeStatsFor(range);
+            const summaryDates = Array.isArray(rangeSummary?.dates) ? rangeSummary.dates.filter(Boolean).sort() : [];
+            const ledgerDates = [
+                ...(ledgerStats?.availableDates || []),
+                ...(ledgerStats?.missingDates || [])
+            ].filter(Boolean).sort();
+            const todayKey = getTodayDateKey();
+            let from = todayKey;
+            let to = todayKey;
+            if (range === 'custom' && currentCustomRange.from && currentCustomRange.to) {
+                from = currentCustomRange.from;
+                to = currentCustomRange.to;
+            } else if (range === '7d') {
+                from = shiftDateKey(todayKey, -6);
+            } else if (range === '30d') {
+                from = shiftDateKey(todayKey, -29);
+            } else if (range === 'total') {
+                from = ledgerDates[0] || summaryDates[0] || todayKey;
+                to = ledgerDates[ledgerDates.length - 1] || summaryDates[summaryDates.length - 1] || todayKey;
+            }
+            const startMs = Date.parse(`${from}T00:00:00+08:00`);
+            const endMs = to === todayKey
+                ? Date.now()
+                : Date.parse(`${shiftDateKey(to, 1)}T00:00:00+08:00`);
+            return Math.max(1, (endMs - startMs) / 1000);
+        }
+
+        function getRangeRateMetrics(rangeSummary = {}, range = currentUsageRange) {
+            const requestCount = Number(rangeSummary?.summary?.requestCount || 0);
+            const seconds = getRangeRateSeconds(range, rangeSummary);
+            const qps = requestCount / seconds;
+            return {
+                qps,
+                rpm: qps * 60,
+                requestCount,
+                seconds
+            };
+        }
+
+        function renderRangeRateSummary(rangeSummary, range = currentUsageRange) {
+            const rangeRate = getRangeRateMetrics(rangeSummary, range);
+            document.getElementById('requestRateLabel').textContent = `${getUsageRangeLabel(range)}平均`;
+            document.getElementById('currentQps').textContent = rangeRate.qps.toFixed(2);
+            document.getElementById('currentRpm').textContent = rangeRate.rpm.toFixed(2);
+        }
+
         function renderKeyDailyUsage(usageHistory = {}, range = currentUsageRange) {
             const activeDates = getUsageRangeDates(range, usageHistory);
             const sourceDates = range === 'total' ? Object.keys(usageHistory || {}).sort().slice(-35) : activeDates.slice(-35);
@@ -2655,6 +2702,7 @@
             const ledgerStats = getLedgerRangeStatsFor(range);
             if ((!usageHistory || Object.keys(usageHistory).length === 0) && !ledgerStats) {
                 document.getElementById('usageStatsSection').style.display = 'none';
+                renderRangeRateSummary({ summary: { requestCount: 0 }, dates: [] }, range);
                 return;
             }
 
@@ -2663,6 +2711,8 @@
             const rangeSummary = ledgerStats
                 ? buildRangeSummaryFromLedger(ledgerStats, usageHistory, range)
                 : summarizeUsageHistoryForRange(usageHistory, range);
+
+            renderRangeRateSummary(rangeSummary, range);
 
             renderUsageCoverage(ledgerStats, usageHistory);
 
@@ -3287,6 +3337,7 @@
                     : (buildKeyRangeSummaryFromLedger(key, currentUsageRange)
                         || summarizeUsageHistoryForRange(key.usageHistory || {}, currentUsageRange));
                 const rangeMetrics = getKeyRangeMetrics(key, currentUsageRange);
+                const rangeRate = getRangeRateMetrics(rangeSummary, currentUsageRange);
                 const rangeLabel = getUsageRangeLabel(currentUsageRange);
                 const topProviders = Object.entries(rangeSummary.providers)
                     .map(([name, usage]) => [name, usageTokens(usage)])
@@ -3328,8 +3379,8 @@
                         </div>
                         <div class="key-stat">
                             <div class="label">请求频率</div>
-                            <div class="value">${(key.qps || 0).toFixed(2)} QPS / ${(key.rpm || 0).toFixed(0)} RPM</div>
-                            <div class="value muted">峰值: ${(key.maxQps || 0).toFixed(2)} QPS / ${(key.maxRpm || 0).toFixed(0)} RPM</div>
+                            <div class="value">${rangeRate.qps.toFixed(2)} QPS / ${rangeRate.rpm.toFixed(0)} RPM</div>
+                            <div class="value muted">所选范围平均 · 峰值: ${(key.maxQps || 0).toFixed(2)} QPS / ${(key.maxRpm || 0).toFixed(0)} RPM</div>
                         </div>
                         <div class="key-stat">
                             <div class="label">Token 速率</div>
@@ -3499,8 +3550,10 @@
             const rangeLabel = getUsageRangeLabel(currentUsageRange);
             const rangeSummary = currentUsageRange === 'custom'
                 ? getCustomKeyRangeSummary(key)
-                : summarizeUsageHistoryForRange(key.usageHistory || {}, currentUsageRange);
+                : (buildKeyRangeSummaryFromLedger(key, currentUsageRange)
+                    || summarizeUsageHistoryForRange(key.usageHistory || {}, currentUsageRange));
             const rangeMetrics = getKeyRangeMetrics(key, currentUsageRange);
+            const rangeRate = getRangeRateMetrics(rangeSummary, currentUsageRange);
             const maskedKey = key.maskedKey || `${key.id.substring(0, 12)}...${key.id.substring(key.id.length - 4)}`;
             const dailyLimit = Number(key.dailyLimit || 0);
             const isUnlimited = dailyLimit <= 0;
@@ -3535,9 +3588,9 @@
                         <div class="subvalue">缓存 ${formatTokenCompact(rangeMetrics.cachedTokens || 0)} · ${formatPercentRatio(rangeMetrics.cacheHitRatio)}${rangeMetrics.cost ? ` · ${formatUsd(getDisplayCostUsd(rangeMetrics.cost))}` : ''}</div>
                     </div>
                     <div class="detail-metric">
-                        <div class="label">实时速率</div>
-                        <div class="value">${(key.qps || 0).toFixed(2)} QPS</div>
-                        <div class="subvalue">${(key.rpm || 0).toFixed(0)} RPM · ${(key.tps || 0).toFixed(1)} TPS</div>
+                        <div class="label">${rangeLabel}平均速率</div>
+                        <div class="value">${rangeRate.qps.toFixed(2)} QPS</div>
+                        <div class="subvalue">${rangeRate.rpm.toFixed(0)} RPM · ${(key.tps || 0).toFixed(1)} TPS</div>
                     </div>
                 </div>
                 <div class="detail-sections">
