@@ -178,31 +178,28 @@ export class AntigravityApiServiceAdapter extends ApiServiceAdapter {
 
     async generateContent(model, requestBody) {
         if (!this.antigravityApiService.isInitialized) {
-            logger.warn("antigravityApiService not initialized, attempting to re-initialize...");
-            await this.antigravityApiService.initialize();
+            await this.antigravityApiService._ensureInitialized();
         }
         return this.antigravityApiService.generateContent(model, requestBody);
     }
 
     async *generateContentStream(model, requestBody) {
         if (!this.antigravityApiService.isInitialized) {
-            logger.warn("antigravityApiService not initialized, attempting to re-initialize...");
-            await this.antigravityApiService.initialize();
+            await this.antigravityApiService._ensureInitialized();
         }
         yield* this.antigravityApiService.generateContentStream(model, requestBody);
     }
 
     async listModels() {
         if (!this.antigravityApiService.isInitialized) {
-            logger.warn("antigravityApiService not initialized, attempting to re-initialize...");
-            await this.antigravityApiService.initialize();
+            await this.antigravityApiService._ensureInitialized();
         }
         return this.antigravityApiService.listModels();
     }
 
     async refreshToken() {
         if (!this.antigravityApiService.isInitialized) {
-            await this.antigravityApiService.initialize();
+            await this.antigravityApiService._ensureInitialized();
         }
         if (this.isExpiryDateNear() === true) {
             logger.info(`[Antigravity] Expiry date is near, refreshing token...`);
@@ -214,7 +211,7 @@ export class AntigravityApiServiceAdapter extends ApiServiceAdapter {
 
     async forceRefreshToken() {
         if (!this.antigravityApiService.isInitialized) {
-            await this.antigravityApiService.initialize();
+            await this.antigravityApiService._ensureInitialized();
         }
         logger.info(`[Antigravity] Force refreshing token...`);
         await this.antigravityApiService.initializeAuth(true);
@@ -231,8 +228,7 @@ export class AntigravityApiServiceAdapter extends ApiServiceAdapter {
      */
     async getUsageLimits() {
         if (!this.antigravityApiService.isInitialized) {
-            logger.warn("antigravityApiService not initialized, attempting to re-initialize...");
-            await this.antigravityApiService.initialize();
+            await this.antigravityApiService._ensureInitialized();
         }
         return this.antigravityApiService.getUsageLimits();
     }

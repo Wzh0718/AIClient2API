@@ -1004,6 +1004,9 @@ export class AntigravityApiService {
 
         this.availableModels = [];
         this.isInitialized = false;
+        this.initializationPromise = null;
+        this.initializationFailure = null;
+        this.initializationFailureUntil = 0;
 
         this.config = config;
         this.host = config.HOST;
@@ -1118,7 +1121,49 @@ export class AntigravityApiService {
         ];
     }
 
-    async initialize() {
+    _createInitializationCooldownError() {
+        const error = new Error('Antigravity provider initialization is cooling down after a recent failure');
+        error.code = 'PROVIDER_INITIALIZATION_COOLDOWN';
+        error.statusCode = 503;
+        error.retryAfter = Math.max(1, Math.ceil((this.initializationFailureUntil - Date.now()) / 1000));
+        error.retryAfterSeconds = error.retryAfter;
+        error.retryAfterMs = error.retryAfter * 1000;
+        error.cause = this.initializationFailure;
+        return error;
+    }
+
+    _ensureInitialized() {
+        if (this.isInitialized) return Promise.resolve();
+
+        if (this.initializationPromise) {
+            return this.initializationPromise;
+        }
+
+        if (this.initializationFailureUntil > Date.now()) {
+            return Promise.reject(this._createInitializationCooldownError());
+        }
+
+        const startedAt = Date.now();
+        this.initializationPromise = this._initializeOnce()
+            .then(() => {
+                this.initializationFailure = null;
+                this.initializationFailureUntil = 0;
+                return undefined;
+            })
+            .catch(error => {
+                this.initializationFailure = error;
+                this.initializationFailureUntil = Date.now() + 30_000;
+                logger.error(`[Antigravity] Initialization failed after ${Date.now() - startedAt}ms; cooling down for 30s: ${error.message}`);
+                throw error;
+            })
+            .finally(() => {
+                this.initializationPromise = null;
+            });
+
+        return this.initializationPromise;
+    }
+
+    async _initializeOnce() {
         if (this.isInitialized) return;
         logger.info('[Antigravity] Initializing Antigravity API Service...');
         // 注意：V2 读写分离架构下，初始化不再执行同步认证/刷新逻辑
@@ -1129,6 +1174,10 @@ export class AntigravityApiService {
 
         this.isInitialized = true;
         logger.info(`[Antigravity] Initialization complete. Project ID: ${this.projectId}`);
+    }
+
+    initialize() {
+        return this._ensureInitialized();
     }
 
     /**
