@@ -43,8 +43,9 @@ describe('API Potluck admin range and key detail UI source', () => {
     test('admin provider distribution shows token share from the center provider view', () => {
         const source = loadPotluckSource();
 
-        expect(source).toContain("const statsResult = await apiRequest(`${API_BASE}/stats?${getCostQuery()}`)");
-        expect(source).toContain('const stats = statsResult?.success ? statsResult.data : keysResult.data.stats');
+        expect(source).toContain("const overviewResult = await apiRequest(`${API_BASE}/overview?${getCostQuery()}`)");
+        expect(source).toContain('const keysResult = overviewResult?.success');
+        expect(source).toContain('refreshLedgerRangeStats(currentUsageRange, { force: true })');
         expect(source).toContain('function renderProviderAccountTokenTree(elementId, providers, accounts, totalTokens)');
         expect(source).toContain("elementId: 'providerAccountDistribution'");
         expect(source).toContain('renderSynchronizedProviderViews()');
