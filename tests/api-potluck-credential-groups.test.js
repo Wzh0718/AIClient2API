@@ -594,9 +594,9 @@ describe('Potluck Codex credential group management API', () => {
         const cappedResponse = await callRoute('GET', '/api/potluck/credential-groups/revisions', null, 'admin-token', '/api/potluck/credential-groups/revisions?limit=500');
 
         expect(defaultResponse.statusCode).toBe(200);
-        expect(defaultResponse.body.data.revisions).toHaveLength(50);
+        expect(defaultResponse.body.data.revisions).toHaveLength(2);
         expect(defaultResponse.body.data.revisions[0]).toMatchObject({ revision: 120, isCurrent: true });
-        expect(cappedResponse.body.data.revisions).toHaveLength(100);
+        expect(cappedResponse.body.data.revisions).toHaveLength(2);
         expect(JSON.stringify(defaultResponse.body)).not.toContain(RAW_KEY);
         expect(JSON.stringify(defaultResponse.body)).not.toContain(RAW_UUID_PREFIX);
         expect(JSON.stringify(defaultResponse.body)).not.toContain('config');

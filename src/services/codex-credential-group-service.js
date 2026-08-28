@@ -6,6 +6,7 @@ const DEFAULT_TIME_ZONE = 'Asia/Shanghai';
 const DEFAULT_HISTORY_DAYS = 7;
 const DEFAULT_UNKNOWN_CAPACITY = 0.5;
 const STORE_VERSION = 1;
+const MAX_RETAINED_REVISIONS = 2;
 const MAX_CREDENTIALS_PER_GROUP = 2;
 const DEMAND_MODEL_FILTER = 'gpt-*';
 const DEMAND_MODEL_FILTER_CASE_SENSITIVE = false;
@@ -125,6 +126,28 @@ function defaultStore() {
 
 function getRevision(store, revision) {
     return (store.revisions || []).find(entry => entry.revision === revision) || null;
+}
+
+function compactRevisions(store) {
+    const revisions = Array.isArray(store.revisions) ? store.revisions : [];
+    if (revisions.length <= MAX_RETAINED_REVISIONS) return { store, changed: false };
+
+    const currentRevision = Number(store.currentRevision || 0);
+    const current = revisions.find(entry => Number(entry?.revision) === currentRevision)
+        || revisions[revisions.length - 1];
+    const previousRevision = Number(current?.previousRevision || 0);
+    const previous = previousRevision
+        ? revisions.find(entry => Number(entry?.revision) === previousRevision)
+        : revisions
+            .filter(entry => Number(entry?.revision) < Number(current?.revision || currentRevision))
+            .sort((a, b) => Number(b.revision) - Number(a.revision))[0];
+    const retained = [previous, current]
+        .filter(Boolean)
+        .filter((entry, index, entries) => entries.findIndex(item => item.revision === entry.revision) === index)
+        .sort((a, b) => Number(a.revision) - Number(b.revision));
+
+    store.revisions = retained;
+    return { store, changed: true };
 }
 
 function createCredentialGroupError(code, message, details = null) {
@@ -921,15 +944,25 @@ export class CredentialGroupService {
     readStoreSync() {
         try {
             const parsed = JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
-            return {
+            const store = {
                 ...defaultStore(),
                 ...parsed,
                 revisions: Array.isArray(parsed.revisions) ? parsed.revisions : []
             };
+            const compacted = compactRevisions(store);
+            if (compacted.changed) this.writeStoreSync(store);
+            return store;
         } catch (error) {
             if (error.code === 'ENOENT') return defaultStore();
             throw error;
         }
+    }
+
+    writeStoreSync(store) {
+        fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+        const tempPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}`;
+        fs.writeFileSync(tempPath, JSON.stringify(store, null, 2), { encoding: 'utf8', mode: 0o600 });
+        fs.renameSync(tempPath, this.filePath);
     }
 
     async writeStore(store) {
@@ -1020,6 +1053,7 @@ export class CredentialGroupService {
         store.version = STORE_VERSION;
         store.currentRevision = revision;
         store.revisions.push(entry);
+        compactRevisions(store);
         await this.writeStore(store);
         return cloneJson(entry);
     }

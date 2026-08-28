@@ -614,6 +614,42 @@ describe('Codex credential routing decisions', () => {
 });
 
 describe('Codex credential group revisions', () => {
+    test('keeps only the current and immediately previous full revisions', async () => {
+        const filePath = makeTempFile();
+        const service = new CredentialGroupService({ filePath, now: () => NOW });
+        for (let index = 1; index <= 4; index += 1) {
+            await service.apply({
+                applicable: true,
+                groups: [{ id: `group-${index}`, credentialUuids: [`cred-${index}`] }],
+                keyAssignments: []
+            });
+        }
+
+        const persisted = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        expect(persisted.currentRevision).toBe(4);
+        expect(persisted.revisions.map(entry => entry.revision)).toEqual([3, 4]);
+        expect((await service.getRollbackTarget()).revision).toBe(3);
+    });
+
+    test('loads legacy stores with long history while exposing only rollback-capable revisions', async () => {
+        const filePath = makeTempFile();
+        const revisions = Array.from({ length: 26 }, (_, index) => ({
+            revision: index + 1,
+            action: 'key-routing-update',
+            createdAt: NOW.toISOString(),
+            previousRevision: index || null,
+            config: {
+                groups: [{ id: `group-${index + 1}`, credentialUuids: [`cred-${index + 1}`] }],
+                keyAssignments: []
+            }
+        }));
+        fs.writeFileSync(filePath, JSON.stringify({ version: 1, currentRevision: 26, revisions }));
+
+        const service = new CredentialGroupService({ filePath, now: () => NOW });
+        expect((await service.listRevisions({ limit: 100 })).map(entry => entry.revision)).toEqual([26, 25]);
+        expect((await service.getRollbackTarget()).revision).toBe(25);
+    });
+
     test('applies revisions and rolls back to the previous configuration', async () => {
         const filePath = makeTempFile();
         const service = new CredentialGroupService({ filePath, now: () => NOW });
@@ -657,7 +693,7 @@ describe('Codex credential group revisions', () => {
         });
     });
 
-    test('lists newest revision metadata only, defaulting to 50 and capping at 100 entries', async () => {
+    test('lists the retained revision metadata without exposing configuration contents', async () => {
         const filePath = makeTempFile();
         const revisions = Array.from({ length: 120 }, (_, index) => ({
             revision: index + 1,
@@ -676,8 +712,8 @@ describe('Codex credential group revisions', () => {
         const defaultList = await service.listRevisions();
         const cappedList = await service.listRevisions({ limit: 500 });
 
-        expect(defaultList).toHaveLength(50);
-        expect(cappedList).toHaveLength(100);
+        expect(defaultList).toHaveLength(2);
+        expect(cappedList).toHaveLength(2);
         expect(defaultList[0]).toMatchObject({
             revision: 120,
             action: 'rollback',
@@ -686,7 +722,7 @@ describe('Codex credential group revisions', () => {
             assignmentCount: 1,
             isCurrent: true
         });
-        expect(defaultList.at(-1).revision).toBe(71);
+        expect(defaultList.at(-1).revision).toBe(119);
         expect(defaultList[0]).not.toHaveProperty('config');
         expect(JSON.stringify(defaultList)).not.toContain('secret-cred');
         expect(JSON.stringify(defaultList)).not.toContain('secret-key');
