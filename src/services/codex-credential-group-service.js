@@ -348,6 +348,16 @@ export function summarizeKeyDemand(key = {}, options = {}) {
 
     for (const [date, day] of Object.entries(key.usageHistory || {})) {
         if (date < startDate || date > endDate) continue;
+        const compactDemand = day?.demand && typeof day.demand === 'object' ? day.demand : null;
+        if (compactDemand) {
+            actualUsd += toFiniteNumber(compactDemand.actualUsd, 0);
+            estimatedUsd += toFiniteNumber(compactDemand.estimatedUsd, 0);
+            missingPriceTokens += toFiniteNumber(compactDemand.missingPriceTokens, 0);
+            estimatedPriceTokens += toFiniteNumber(compactDemand.estimatedPriceTokens, 0);
+            totalTokens += toFiniteNumber(compactDemand.totalTokens, 0);
+            requestCount += toFiniteNumber(compactDemand.requestCount, 0);
+            continue;
+        }
         const models = day?.models && typeof day.models === 'object' ? day.models : {};
         for (const [modelName, modelUsage] of Object.entries(models)) {
             if (!String(modelName || '').toLowerCase().startsWith('gpt-')) continue;
@@ -733,7 +743,8 @@ export function generateCredentialGroupSuggestion(options = {}) {
         capacity: group.capacity,
         confidence: group.confidence,
         predictedDemand: group._assignedDemand,
-        predictedDemandUsd: demandMetric === 'usd' ? group._assignedDemand : 0,
+        predictedDemandUsd: demandMetric === 'usd' ? group._assignedDemand : null,
+        predictedDemandUsdAvailable: demandMetric === 'usd',
         demandShare,
         capacityShare,
         loadIndex: capacityShare > 0 ? demandShare / capacityShare : 0,

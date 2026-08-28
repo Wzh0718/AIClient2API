@@ -416,6 +416,35 @@ describe('Potluck Codex credential group management API', () => {
         expect(response.body.data.suggestion.groups.map(group => group.credentialCount)).toEqual([2, 2, 2, 2, 2]);
     });
 
+    test('keeps USD demand in preview when compact key history omits model details', async () => {
+        const response = await createPreview({
+            keys: [{
+                id: RAW_KEY,
+                keyId: RAW_KEY,
+                name: 'Compact history key',
+                enabled: true,
+                routingMode: 'auto',
+                usageHistory: {
+                    '2026-08-14': {
+                        summary: { requestCount: 2, totalTokens: 100 },
+                        demand: {
+                            requestCount: 2,
+                            totalTokens: 100,
+                            actualUsd: 2.5,
+                            estimatedUsd: 0.75,
+                            usd: 3.25
+                        }
+                    }
+                }
+            }]
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.body.data.suggestion.demandMetric).toBe('usd');
+        expect(response.body.data.suggestion.groups.reduce((sum, group) => sum + Number(group.predictedDemandUsd || 0), 0)).toBeCloseTo(3.25, 10);
+        expect(response.body.data.suggestion.groups.every(group => group.predictedDemandUsdAvailable === true)).toBe(true);
+    });
+
     test('applies a preview as a revision and synchronizes Key routing in one batch', async () => {
         const preview = await createPreview({ credentialCount: 3 });
         const previewId = preview.body.data.previewId;

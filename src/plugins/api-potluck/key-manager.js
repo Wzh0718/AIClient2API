@@ -1413,6 +1413,27 @@ function cloneUsageHistorySummaryOnly(usageHistory = {}, conversionModel = DEFAU
     return compact;
 }
 
+function buildCompactGptDemand(day = {}, conversionModel = DEFAULT_CONVERSION_MODEL) {
+    const demand = createUsageBucket();
+    const gptModels = {};
+    for (const [modelName, usage] of Object.entries(day?.models || {})) {
+        if (!String(modelName || '').toLowerCase().startsWith('gpt-')) continue;
+        gptModels[modelName] = usage;
+        addUsage(demand, usage);
+    }
+    if (Object.keys(gptModels).length === 0) return null;
+    const cost = buildCost(demand, gptModels, conversionModel);
+    return {
+        requestCount: toNumber(demand.requestCount),
+        totalTokens: toNumber(demand.totalTokens),
+        actualUsd: toNumber(cost.actualUsd),
+        estimatedUsd: toNumber(cost.estimatedUsd),
+        missingPriceTokens: toNumber(cost.missingPriceTokens),
+        estimatedPriceTokens: toNumber(cost.estimatedPriceTokens),
+        usd: toNumber(cost.usd)
+    };
+}
+
 function cloneCredentialRoutingUsageHistory(usageHistory = {}) {
     const recentEntries = Object.entries(usageHistory || {})
         .sort(([left], [right]) => left.localeCompare(right))
@@ -1427,6 +1448,8 @@ function cloneCredentialRoutingUsageHistory(usageHistory = {}) {
         if (day?.summary?.cost) {
             compact[date].summary.cost = cloneCompactCostBucket(day.summary.cost);
         }
+        const demand = day?.demand || buildCompactGptDemand(day, DEFAULT_CONVERSION_MODEL);
+        if (demand) compact[date].demand = demand;
     }
     return compact;
 }

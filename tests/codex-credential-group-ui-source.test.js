@@ -59,6 +59,12 @@ describe('Codex credential-group UI source', () => {
         expect(providerManager).not.toContain("'/api/potluck/credential-groups");
     });
 
+    test('does not render unavailable demand as a fake zero-dollar amount', () => {
+        expect(providerManager).toContain('predictedDemandUsdAvailable');
+        expect(providerManager).toContain('暂无价格');
+        expect(providerManager).toContain('formatCredentialGroupGroupDemand(group)');
+    });
+
     test('requires confirmation for apply and rollback and sends the current revision for rollback', () => {
         expect(providerManager).toContain("window.confirm(t('providers.credentialGroups.applyConfirm'))");
         expect(providerManager).toContain("window.confirm(t('providers.credentialGroups.rollbackConfirm'))");

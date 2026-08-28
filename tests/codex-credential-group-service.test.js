@@ -290,6 +290,33 @@ describe('Codex key demand and capacity-aware assignment', () => {
         expect(suggestion.groups.reduce((sum, group) => sum + group.predictedDemandUsd, 0)).toBeCloseTo(101, 10);
     });
 
+    test('uses compact GPT demand summaries when model details are omitted', () => {
+        const demand = summarizeKeyDemand({
+            usageHistory: {
+                '2026-08-14': {
+                    summary: { totalTokens: 100, requestCount: 2 },
+                    demand: {
+                        requestCount: 2,
+                        totalTokens: 100,
+                        actualUsd: 2.5,
+                        estimatedUsd: 0.75,
+                        missingPriceTokens: 100,
+                        estimatedPriceTokens: 900,
+                        usd: 3.25
+                    }
+                }
+            }
+        }, { now: NOW });
+
+        expect(demand).toMatchObject({
+            metric: 'usd',
+            usd: 3.25,
+            totalDemand: 3.25,
+            totalTokens: 100,
+            requestCount: 2
+        });
+    });
+
     test('does not let large non-gpt usage increase a key assignment demand', () => {
         const suggestion = generateCredentialGroupSuggestion({
             credentials: createCredentials(3),

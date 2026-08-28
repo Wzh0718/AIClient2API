@@ -305,7 +305,7 @@ function renderCredentialGroupCards(groups, emptyKey = 'providers.credentialGrou
         const credentialRefs = Array.isArray(group?.credentialRefs) ? group.credentialRefs : [];
         const credentialCount = Number(group?.credentialCount ?? credentialRefs.length);
         const capacity = formatCredentialGroupNumber(group?.capacity, 2);
-        const predictedDemand = formatCredentialGroupUsd(group?.predictedDemandUsd ?? group?.predictedDemand);
+        const predictedDemand = formatCredentialGroupGroupDemand(group);
         const loadIndex = formatCredentialGroupLoadIndex(group?.loadIndex);
         const lockBadge = group?.manualLock === true
             ? credentialGroupBadge(t('providers.credentialGroups.status.locked'), 'is-locked')
@@ -419,6 +419,13 @@ function formatCredentialGroupDemand(demand) {
         tokens: formatCredentialGroupNumber(demand.totalTokens, 0),
         cost
     });
+}
+
+function formatCredentialGroupGroupDemand(group = {}) {
+    if (group?.predictedDemandUsdAvailable === false || group?.predictedDemandUsd === null) {
+        return t('providers.credentialGroups.noPrice') || '暂无价格';
+    }
+    return formatCredentialGroupUsd(group?.predictedDemandUsd ?? group?.predictedDemand);
 }
 
 function renderCredentialGroupKeyTable(keys, emptyKey = 'providers.credentialGroups.empty.keys', scope = 'keys') {
