@@ -95,6 +95,16 @@ describe('API Potluck admin range and key detail UI source', () => {
         expect(source).not.toContain("document.getElementById('modelDistribution').innerHTML = '<div class=\"detail-empty\">当前范围暂无模型数据</div>'");
     });
 
+    test('initial dashboard load renders the token usage calendar after range stats load', () => {
+        const source = loadPotluckSource();
+        const loadDataStart = source.indexOf('async function loadData()');
+        const loadDataEnd = source.indexOf('\n        function renderCalendar(', loadDataStart);
+        const loadData = source.slice(loadDataStart, loadDataEnd);
+
+        expect(loadData).toContain('await refreshLedgerRangeStats(currentUsageRange, { force: true });');
+        expect(loadData).toContain('renderCalendar(currentStats?.usageHistory || {});');
+    });
+
     test('admin dashboard folds account token share into the provider tree view', () => {
         const source = loadPotluckSource();
 
