@@ -851,12 +851,13 @@
                   <th>Cached</th>
                   <th>缓存率</th>
                   <th>Total</th>
+                  <th>耗时</th>
                   <th>状态</th>
                   <th>详情</th>
                 </tr>
               </thead>
               <tbody id="requestRows">
-                <tr><td colspan="12"><div class="empty">暂无数据。请选择 key 或输入完整 key 和时间窗后查询。</div></td></tr>
+                <tr><td colspan="13"><div class="empty">暂无数据。请选择 key 或输入完整 key 和时间窗后查询。</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -956,6 +957,10 @@
     let rawCaptureState = null;
 
     const fmt = value => Number(value || 0).toLocaleString('zh-CN');
+    const formatDuration = value => {
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 0 ? `${number.toFixed(number < 100 ? 1 : 0)} ms` : '—';
+    };
     const fmtPct = value => `${(Number(value || 0) * 100).toFixed(2)}%`;
     const clamp01 = value => Math.max(0, Math.min(1, Number(value || 0)));
     const pad2 = value => String(value).padStart(2, '0');
@@ -1312,7 +1317,7 @@
       }).join('');
 
       return `
-        <td class="detail-cell" colspan="12">
+        <td class="detail-cell" colspan="13">
           <div class="detail-panel">
                 <div>
                   <h3>单次请求 token 分类</h3>
@@ -1333,6 +1338,9 @@
               <div class="detail-box"><span>响应字节</span><strong>${fmt(event.response?.bytes)}</strong></div>
               <div class="detail-box"><span>图片结果</span><strong>${event.response?.hasImageResult === true ? '有' : event.response?.hasImageResult === false ? '无' : '不适用'}</strong></div>
               <div class="detail-box"><span>HTTP 状态</span><strong>${escapeHtml(event.response?.httpStatus ?? event.status?.httpStatus ?? '-')}</strong></div>
+              <div class="detail-box"><span>请求耗时</span><strong>${formatDuration(event.response?.durationMs)}</strong></div>
+              <div class="detail-box"><span>Worker</span><strong>${escapeHtml(event.runtime?.workerId || '-')}</strong></div>
+              <div class="detail-box"><span>背压耗时</span><strong>${formatDuration(event.runtime?.backpressureMs)}</strong></div>
             </div>
           </div>
         </td>`;
@@ -1344,7 +1352,7 @@
       body.innerHTML = '';
 
       if (!requests || requests.length === 0) {
-        body.innerHTML = '<tr><td colspan="12"><div class="empty">这个过滤条件下没有审计事件。确认服务已开启 request-audit，且日志还在保留期内。</div></td></tr>';
+        body.innerHTML = '<tr><td colspan="13"><div class="empty">这个过滤条件下没有审计事件。确认服务已开启 request-audit，且日志还在保留期内。</div></td></tr>';
         return;
       }
 
@@ -1362,6 +1370,7 @@
           <td>${fmt(usage.cachedTokens)}</td>
           <td><span class="pill ${Number(usage.cacheHitRatio || 0) >= .2 ? 'good' : 'warn'}">${fmtPct(usage.cacheHitRatio)}</span></td>
           <td>${fmt(usage.totalTokens)}</td>
+          <td>${formatDuration(event.response?.durationMs)}</td>
           <td>${outcomePill(event.status)}</td>
           <td><button class="expand-btn" type="button" data-index="${index}" aria-expanded="false">展开</button></td>
         `;

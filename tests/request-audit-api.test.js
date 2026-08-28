@@ -31,6 +31,23 @@ describe('request audit api aggregation', () => {
     expect(summary.contextSections.conversation.tokens).toBe(1250);
   });
 
+  test('summarizes request durations while ignoring legacy records without timing', () => {
+    const summary = buildAuditSummary([
+      { request: { model: 'gpt-5.5' }, response: { durationMs: 100 }, usage: {} },
+      { request: { model: 'gpt-5.5' }, response: { durationMs: 300 }, usage: {} },
+      { request: { model: 'gpt-5.5' }, response: {}, usage: {} }
+    ]);
+
+    expect(summary.timing).toEqual({
+      count: 2,
+      p50: 100,
+      p95: 300,
+      p99: 300,
+      max: 300,
+      average: 200
+    });
+  });
+
   test('summary includes analysis freshness and diagnostic counts', async () => {
     const payload = await callRoute('/api/request-audit/summary', {
       _requestAuditSkipAuth: true,

@@ -91,12 +91,23 @@ export function createRequestHandler(config, providerPoolManager) {
         });
         res.runtimeRequest = runtimeRequest;
         instrumentResponseMetrics(res, runtimeRequest);
+        let runtimeCompletion = null;
+        const finalizeRuntime = statusCode => {
+            runtimeCompletion ||= runtimeRequest.end({ statusCode });
+            return runtimeCompletion;
+        };
         // Unit/in-process adapters may provide a minimal response object without
         // EventEmitter methods. Real Node responses still get lifecycle metrics;
         // lightweight test doubles continue through the normal handler path.
         if (typeof res.once === 'function') {
-            res.once('finish', () => logRequestProfile(runtimeRequest.end({ statusCode: res.statusCode })));
-            res.once('close', () => logRequestProfile(runtimeRequest.end({ statusCode: res.statusCode || 499 })));
+            res.once('finish', () => {
+                finalizeRuntime(res.statusCode);
+                logRequestProfile(runtimeRequest.getProfile?.());
+            });
+            res.once('close', () => {
+                finalizeRuntime(res.statusCode || 499);
+                logRequestProfile(runtimeRequest.getProfile?.());
+            });
         }
 
         return requestContext.run({ requestId, runtimeRequest, requestAudit: { requestId, ...network, originalPath } }, async () => {
@@ -117,6 +128,7 @@ export function createRequestHandler(config, providerPoolManager) {
                         normalizedPath,
                         ...network,
                         response,
+                        runtime: runtimeCompletion || finalizeRuntime(response.httpStatus ?? 499),
                         errorClass
                     });
                 }, { autoFinalize: false });

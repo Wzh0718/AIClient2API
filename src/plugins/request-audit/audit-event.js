@@ -83,18 +83,44 @@ function sanitizePath(value) {
     return String(value).split('?')[0] || null;
 }
 
+function sanitizeDiagnosticCode(value) {
+    if (value === undefined || value === null || value === '') return null;
+    const text = String(value);
+    return text.length <= 128 ? text : text.slice(0, 128);
+}
+
 function normalizeResponse(context = {}) {
     const source = context.response || {};
     const rawStatus = source.httpStatus ?? context.httpStatus;
     const httpStatus = Number.isInteger(Number(rawStatus)) ? Number(rawStatus) : null;
     const rawImageResult = source.hasImageResult ?? context.hasImageResult;
+    const rawDuration = source.durationMs ?? context.durationMs;
+    const durationMs = Number.isFinite(Number(rawDuration)) && Number(rawDuration) >= 0 ? Number(rawDuration) : null;
+    const errorCode = sanitizeDiagnosticCode(source.errorCode ?? context.errorCode);
     return {
         httpStatus,
         bytes: Math.max(0, toNumber(source.bytes ?? context.responseBytes)),
         completed: source.completed === true,
         clientAborted: source.clientAborted === true,
-        hasImageResult: typeof rawImageResult === 'boolean' ? rawImageResult : null
+        hasImageResult: typeof rawImageResult === 'boolean' ? rawImageResult : null,
+        durationMs,
+        errorCode
     };
+}
+
+function normalizeRuntime(runtime = {}) {
+    if (!runtime || typeof runtime !== 'object') return undefined;
+    const stages = runtime.stages && typeof runtime.stages === 'object'
+        ? Object.fromEntries(Object.entries(runtime.stages)
+            .map(([name, value]) => [name, Number(value)])
+            .filter(([, value]) => Number.isFinite(value) && value >= 0))
+        : {};
+    const workerId = typeof runtime.workerId === 'string' && runtime.workerId.length <= 128 ? runtime.workerId : null;
+    const requestKind = runtime.kind === 'image' || runtime.kind === 'model' ? runtime.kind : null;
+    const outputBytes = Number.isFinite(Number(runtime.outputBytes)) && Number(runtime.outputBytes) >= 0 ? Number(runtime.outputBytes) : null;
+    const backpressureMs = Number.isFinite(Number(runtime.backpressureMs)) && Number(runtime.backpressureMs) >= 0 ? Number(runtime.backpressureMs) : null;
+    if (!workerId && !requestKind && outputBytes === null && backpressureMs === null && !Object.keys(stages).length) return undefined;
+    return { workerId, requestKind, outputBytes, backpressureMs, stages };
 }
 
 function deriveStatus(context, response) {
@@ -129,6 +155,7 @@ export function buildRequestAuditEvent(context = {}) {
     const requestedModel = context.originalRequestBody?.model || actualModel;
     const cacheAffinityScope = context._codexCacheAffinityScope || {};
     const response = normalizeResponse(context);
+    const runtime = normalizeRuntime(context.runtime);
     const derivedStatus = deriveStatus(context, response);
     const selectedProviderUuid = context._codexRouting?.selectedProviderUuid || null;
     const modelRouting = context._modelRouting || context._codexRouting || {};
@@ -242,6 +269,7 @@ export function buildRequestAuditEvent(context = {}) {
             cooldownApplied: Boolean(context.cooldownApplied)
         },
         response,
+        ...(runtime ? { runtime } : {}),
         usage
     };
 }

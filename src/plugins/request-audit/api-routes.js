@@ -39,6 +39,25 @@ function ensureBucket(map, key) {
     return map[bucketKey];
 }
 
+function summarizeDurations(events = []) {
+    const values = events
+        .map(event => Number(event?.response?.durationMs))
+        .filter(value => Number.isFinite(value) && value >= 0)
+        .sort((a, b) => a - b);
+    if (values.length === 0) {
+        return { count: 0, p50: null, p95: null, p99: null, max: null, average: null };
+    }
+    const percentile = percentage => values[Math.min(values.length - 1, Math.max(0, Math.ceil(values.length * percentage) - 1))];
+    return {
+        count: values.length,
+        p50: percentile(0.5),
+        p95: percentile(0.95),
+        p99: percentile(0.99),
+        max: values[values.length - 1],
+        average: values.reduce((sum, value) => sum + value, 0) / values.length
+    };
+}
+
 function sendJson(res, statusCode, data) {
     res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(data));
@@ -92,7 +111,8 @@ export function buildAuditSummary(events = []) {
         },
         models: {},
         accounts: {},
-        contextSections: {}
+        contextSections: {},
+        timing: summarizeDurations(events)
     };
 
     for (const event of events) {

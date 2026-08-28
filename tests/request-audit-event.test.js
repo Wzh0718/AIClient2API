@@ -49,6 +49,59 @@ describe('request audit event', () => {
     });
   });
 
+  test('persists normalized request timing and runtime diagnostics without secrets', () => {
+    const event = buildRequestAuditEvent({
+      requestId: 'req-runtime-diagnostics',
+      model: 'gemini-2.5-flash',
+      response: {
+        httpStatus: 200,
+        bytes: 1234,
+        completed: true,
+        clientAborted: false,
+        hasImageResult: null,
+        durationMs: 842,
+        errorCode: 'UPSTREAM_TIMEOUT'
+      },
+      runtime: {
+        workerId: 'execution-2',
+        kind: 'model',
+        outputBytes: 1234,
+        backpressureMs: 7,
+        stages: {
+          requestConvertMs: 12,
+          upstreamFirstByteMs: 410,
+          upstreamCompleteMs: 825,
+          responseFinalizeMs: 4
+        },
+        metadata: { diagnosticLabel: 'internal-only' }
+      }
+    });
+
+    expect(event.response).toMatchObject({ durationMs: 842, errorCode: 'UPSTREAM_TIMEOUT' });
+    expect(event.runtime).toEqual({
+      workerId: 'execution-2',
+      requestKind: 'model',
+      outputBytes: 1234,
+      backpressureMs: 7,
+      stages: {
+        requestConvertMs: 12,
+        upstreamFirstByteMs: 410,
+        upstreamCompleteMs: 825,
+        responseFinalizeMs: 4
+      }
+    });
+    expect(JSON.stringify(event)).not.toContain('diagnosticLabel');
+  });
+
+  test.each([NaN, Infinity, -1, 'bad'])('normalizes invalid duration %p to null', durationMs => {
+    const event = buildRequestAuditEvent({
+      requestId: `req-invalid-duration-${String(durationMs)}`,
+      response: { httpStatus: 200, completed: true, durationMs }
+    });
+
+    expect(event.response.durationMs).toBeNull();
+  });
+
   test('records cache coordination evidence without raw identifiers', () => {
     const event = buildRequestAuditEvent({
       requestId: 'req-cache-v4',

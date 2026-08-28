@@ -90,6 +90,7 @@ export class RuntimeMetrics {
         const startedAt = this.now();
         let ended = false;
         let finalProfile = null;
+        let completionSnapshot = null;
         let requestMetadata = safeMetadata(metadata);
         const sampled = this.random() < this.sampleRate;
         const stageDurations = {};
@@ -118,7 +119,7 @@ export class RuntimeMetrics {
                 this.output.backpressureMs += value;
             },
             end: ({ statusCode = 200 } = {}) => {
-                if (ended) return finalProfile;
+                if (ended) return completionSnapshot;
                 ended = true;
                 this.inFlight--;
                 this.requests.total++;
@@ -129,17 +130,18 @@ export class RuntimeMetrics {
                 const durationMs = this.now() - startedAt;
                 recordStage('complete', durationMs);
                 requestMetadata = { ...requestMetadata, responseStatus: statusCode };
+                completionSnapshot = {
+                    workerId,
+                    kind,
+                    statusCode,
+                    durationMs,
+                    metadata: requestMetadata,
+                    stages: { ...stageDurations },
+                    outputBytes: requestOutputBytes,
+                    backpressureMs: requestBackpressureMs
+                };
                 finalProfile = sampled || (this.slowRequestMs > 0 && durationMs >= this.slowRequestMs)
-                    ? {
-                        workerId,
-                        kind,
-                        statusCode,
-                        durationMs,
-                        metadata: requestMetadata,
-                        stages: { ...stageDurations },
-                        outputBytes: requestOutputBytes,
-                        backpressureMs: requestBackpressureMs
-                    }
+                    ? completionSnapshot
                     : null;
                 if (finalProfile) {
                     try {
@@ -148,8 +150,10 @@ export class RuntimeMetrics {
                         // Diagnostics must never affect request handling.
                     }
                 }
-                return finalProfile;
-            }
+                return completionSnapshot;
+            },
+            getProfile: () => finalProfile,
+            getCompletion: () => completionSnapshot
         };
     }
 
