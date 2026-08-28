@@ -106,6 +106,31 @@ function createProviderPoolManager() {
 }
 
 describe('provider auth failure health marking', () => {
+    test('always terminates a normal OpenAI stream with one DONE marker', async () => {
+        const service = {
+            async *generateContentStream() {
+                yield { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] };
+            }
+        };
+        const res = new FakeResponse();
+
+        await handleStreamRequest(
+            res,
+            service,
+            'gpt-5.4-mini',
+            { messages: [{ role: 'user', content: 'ping' }] },
+            'openai',
+            'openai',
+            'none',
+            null,
+            createProviderPoolManager(),
+            'openai-provider-1',
+            'OpenAI Provider'
+        );
+
+        expect((res.body.match(/data: \[DONE\]/g) || [])).toHaveLength(1);
+    });
+
     test('records Codex overload for the next request without marking the provider unhealthy', async () => {
         const failoverKey = 'session:stream-overload-test';
         codexOverloadFailoverStore.clear(failoverKey);

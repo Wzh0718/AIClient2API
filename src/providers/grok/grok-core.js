@@ -1323,8 +1323,8 @@ export class GrokApiService {
 
             for await (const line of rl) {
                 const trimmed = line.trim();
-                if (!trimmed) continue;
-                let dataStr = trimmed.startsWith('data: ') ? trimmed.slice(6).trim() : trimmed;
+                if (!trimmed || trimmed.startsWith(':')) continue;
+                let dataStr = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
                 if (dataStr === '[DONE]') break;
                 try {
                     const json = JSON.parse(dataStr);

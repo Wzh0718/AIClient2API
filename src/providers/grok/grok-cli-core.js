@@ -2445,11 +2445,11 @@ export class GrokCliApiService {
 
     parseSSELine(line) {
         const trimmedLine = String(line || '').trim();
-        if (!trimmedLine || trimmedLine.startsWith('event: ') || trimmedLine.startsWith('id: ') || trimmedLine.startsWith('retry: ')) {
+        if (!trimmedLine || trimmedLine.startsWith(':') || trimmedLine.startsWith('event:') || trimmedLine.startsWith('id:') || trimmedLine.startsWith('retry:')) {
             return null;
         }
 
-        const dataStr = trimmedLine.startsWith('data: ') ? trimmedLine.slice(6).trim() : trimmedLine;
+        const dataStr = trimmedLine.startsWith('data:') ? trimmedLine.slice(5).trim() : trimmedLine;
         if (!dataStr || dataStr === '[DONE]') return null;
 
         try {

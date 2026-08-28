@@ -20,6 +20,16 @@ import { GrokCliApiService } from '../src/providers/grok/grok-cli-core.js';
 import { formatGrokCliUsage } from '../src/services/usage-service.js';
 
 describe('Grok CLI upstream usage support', () => {
+    test('ignores SSE comments and accepts data prefixes without a space', () => {
+        const service = new GrokCliApiService({
+            MODEL_PROVIDER: 'grok-cli-oauth'
+        });
+
+        expect(service.parseSSELine(': keepalive')).toBeNull();
+        expect(service.parseSSELine('event: message')).toBeNull();
+        expect(service.parseSSELine('data:{"type":"message"}')).toEqual({ type: 'message' });
+    });
+
     test('formats the billing response as quota rather than credential status', () => {
         const formatted = formatGrokCliUsage({
             account: 'grok@example.com',

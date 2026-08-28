@@ -2074,10 +2074,8 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             if (!res.writableEnded) {
                 try {
                     if (clientProtocol === MODEL_PROTOCOL_PREFIX.OPENAI) {
-                        if (!hasMessageStop) {
-                            await writeWithBackpressure(res, 'data: [DONE]\n\n');
-                            hasMessageStop = true;
-                        }
+                        await writeWithBackpressure(res, 'data: [DONE]\n\n');
+                        hasMessageStop = true;
                     } else if (clientProtocol === MODEL_PROTOCOL_PREFIX.OPENAI_RESPONSES) {
                         // OpenAI Responses 以 response.completed/response.incomplete（或 error）作为结束事件。
                         // 连接关闭即表示流结束；不要再追加 `event: done` + `data: {}`，否则会触发下游类型校验失败（AI_TypeValidationError）。

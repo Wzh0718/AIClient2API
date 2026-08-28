@@ -1194,6 +1194,13 @@ export class ClaudeConverter extends BaseConverter {
      */
     cleanUrlFormatFromSchema(schema) {
         if (!schema || typeof schema !== 'object') return;
+
+        if (Array.isArray(schema.enum)) {
+            schema.enum = schema.enum.filter(value => typeof value === 'string');
+            if (schema.enum.length === 0) {
+                delete schema.enum;
+            }
+        }
         
         // 如果是属性对象，检查并清理 format
         if (schema.type === 'string' && schema.format === 'uri') {

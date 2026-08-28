@@ -272,7 +272,7 @@ function cleanJsonSchemaGeneric(schema, options, recursiveFn) {
         return schema.map(item => recursiveFn(item));
     }
 
-    const { allowedKeys, excludedKeys, typeHandler } = options;
+    const { allowedKeys, excludedKeys, typeHandler, sanitizeEnum = false } = options;
     const sanitized = {};
 
     for (const [key, value] of Object.entries(schema)) {
@@ -304,6 +304,16 @@ function cleanJsonSchemaGeneric(schema, options, recursiveFn) {
             continue;
         }
 
+        if (key === 'enum' && sanitizeEnum) {
+            if (Array.isArray(value)) {
+                const stringEnum = value.filter(item => typeof item === 'string');
+                if (stringEnum.length > 0) {
+                    sanitized[key] = stringEnum;
+                }
+            }
+            continue;
+        }
+
         // 其他属性直接复制
         sanitized[key] = value;
     }
@@ -327,7 +337,8 @@ export function cleanJsonSchemaProperties(schema) {
         schema,
         {
             allowedKeys: GEMINI_ALLOWED_KEYS,
-            typeHandler: handleGeminiTypeField
+            typeHandler: handleGeminiTypeField,
+            sanitizeEnum: true
         },
         cleanJsonSchemaProperties
     );
