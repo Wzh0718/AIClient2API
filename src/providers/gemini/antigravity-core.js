@@ -20,6 +20,7 @@ import { cleanJsonSchemaProperties } from '../../converters/utils.js';
 import { getProviderPoolManager } from '../../services/service-manager.js';
 import { MODEL_PROVIDER } from '../../utils/common.js';
 import { normalizeAntigravityToolConfig } from './antigravity-tool-config.js';
+import { classifyProviderInitializationError, hashDiagnosticIdentifier } from '../../utils/gemini-diagnostics.js';
 
 // --- Constants ---
 const CREDENTIALS_DIR = '.antigravity';
@@ -1136,6 +1137,12 @@ export class AntigravityApiService {
         if (this.isInitialized) return Promise.resolve();
 
         if (this.initializationPromise) {
+            logger.info(`[Gemini Diagnostics] ${JSON.stringify({
+                event: 'provider_initialization_deduplicated',
+                providerUuidHash: hashDiagnosticIdentifier(this.uuid),
+                workerId: process.env.RUNTIME_WORKER_ID || 'standalone',
+                initializationState: 'warming'
+            })}`);
             return this.initializationPromise;
         }
 
@@ -1144,15 +1151,40 @@ export class AntigravityApiService {
         }
 
         const startedAt = Date.now();
+        logger.info(`[Gemini Diagnostics] ${JSON.stringify({
+            event: 'provider_initialization_start',
+            providerUuidHash: hashDiagnosticIdentifier(this.uuid),
+            workerId: process.env.RUNTIME_WORKER_ID || 'standalone',
+            initializationState: 'warming',
+            trigger: 'request'
+        })}`);
         this.initializationPromise = this._initializeOnce()
             .then(() => {
                 this.initializationFailure = null;
                 this.initializationFailureUntil = 0;
+                logger.info(`[Gemini Diagnostics] ${JSON.stringify({
+                    event: 'provider_initialization_end',
+                    providerUuidHash: hashDiagnosticIdentifier(this.uuid),
+                    workerId: process.env.RUNTIME_WORKER_ID || 'standalone',
+                    durationMs: Date.now() - startedAt,
+                    success: true,
+                    state: 'active'
+                })}`);
                 return undefined;
             })
             .catch(error => {
                 this.initializationFailure = error;
                 this.initializationFailureUntil = Date.now() + 30_000;
+                logger.info(`[Gemini Diagnostics] ${JSON.stringify({
+                    event: 'provider_initialization_end',
+                    providerUuidHash: hashDiagnosticIdentifier(this.uuid),
+                    workerId: process.env.RUNTIME_WORKER_ID || 'standalone',
+                    durationMs: Date.now() - startedAt,
+                    success: false,
+                    state: 'cooldown',
+                    errorClass: classifyProviderInitializationError(error),
+                    cooldownMs: 30_000
+                })}`);
                 logger.error(`[Antigravity] Initialization failed after ${Date.now() - startedAt}ms; cooling down for 30s: ${error.message}`);
                 throw error;
             })
@@ -1324,6 +1356,7 @@ export class AntigravityApiService {
 
     async discoverProjectAndModels() {
         const configuredProjectId = this.projectId;
+        const entitlementStartedAt = Date.now();
         logger.info(configuredProjectId
             ? `[Antigravity] Probing account entitlements for configured Project ID: ${configuredProjectId}`
             : '[Antigravity] Discovering Project ID...');
@@ -1342,6 +1375,15 @@ export class AntigravityApiService {
             };
 
             const loadResponse = await this.callApi('loadCodeAssist', loadRequest);
+            logger.info(`[Gemini Diagnostics] ${JSON.stringify({
+                event: 'provider_entitlement_probe',
+                providerUuidHash: hashDiagnosticIdentifier(this.uuid),
+                workerId: process.env.RUNTIME_WORKER_ID || 'standalone',
+                durationMs: Date.now() - entitlementStartedAt,
+                success: true,
+                cached: false,
+                configuredProject: Boolean(configuredProjectId)
+            })}`);
             
             // 提取账号邮箱
             if (loadResponse.manageSubscriptionUri) {
@@ -1421,6 +1463,15 @@ export class AntigravityApiService {
             await this.fetchAvailableModels();
             return discoveredProjectId;
         } catch (error) {
+            logger.info(`[Gemini Diagnostics] ${JSON.stringify({
+                event: 'provider_entitlement_probe',
+                providerUuidHash: hashDiagnosticIdentifier(this.uuid),
+                workerId: process.env.RUNTIME_WORKER_ID || 'standalone',
+                durationMs: Date.now() - entitlementStartedAt,
+                success: false,
+                cached: false,
+                errorClass: classifyProviderInitializationError(error)
+            })}`);
             logger.error('[Antigravity] Failed to discover Project ID:', error.response?.data || error.message);
             if (configuredProjectId) {
                 logger.warn(`[Antigravity] Entitlement probe failed; continuing with configured Project ID: ${configuredProjectId}`);
@@ -1439,6 +1490,7 @@ export class AntigravityApiService {
     }
 
     async fetchAvailableModels() {
+        const modelListStartedAt = Date.now();
         logger.info('[Antigravity] Fetching available models...');
 
         for (const baseURL of this.baseURLs) {
@@ -1469,6 +1521,15 @@ export class AntigravityApiService {
                         });
 
                     logger.info(`[Antigravity] Available models: [${this.availableModels.join(', ')}]`);
+                    logger.info(`[Gemini Diagnostics] ${JSON.stringify({
+                        event: 'provider_model_list_probe',
+                        providerUuidHash: hashDiagnosticIdentifier(this.uuid),
+                        workerId: process.env.RUNTIME_WORKER_ID || 'standalone',
+                        durationMs: Date.now() - modelListStartedAt,
+                        success: true,
+                        cached: false,
+                        modelCount: this.availableModels.length
+                    })}`);
                     return;
                 }
             } catch (error) {
@@ -1478,6 +1539,16 @@ export class AntigravityApiService {
 
         logger.warn('[Antigravity] Failed to fetch models from all endpoints. Using default models.');
         this.availableModels = ANTIGRAVITY_MODELS;
+        logger.info(`[Gemini Diagnostics] ${JSON.stringify({
+            event: 'provider_model_list_probe',
+            providerUuidHash: hashDiagnosticIdentifier(this.uuid),
+            workerId: process.env.RUNTIME_WORKER_ID || 'standalone',
+            durationMs: Date.now() - modelListStartedAt,
+            success: false,
+            cached: true,
+            modelCount: this.availableModels.length,
+            errorClass: 'upstream_error'
+        })}`);
     }
 
     async listModels() {

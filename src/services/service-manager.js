@@ -35,6 +35,7 @@ import { performance } from 'node:perf_hooks';
 import { runtimeMetrics } from '../runtime/runtime-metrics.js';
 import requestContext from '../utils/context.js';
 import { PotluckKeyConcurrencyLimiter } from '../plugins/api-potluck/key-concurrency-limiter.js';
+import { buildGeminiSelectionDiagnostic } from '../utils/gemini-diagnostics.js';
 
 // 存储 ProviderPoolManager 实例
 let providerPoolManager = null;
@@ -63,6 +64,24 @@ function isCodexProviderType(providerType) {
 
 function isGeminiProviderType(providerType) {
     return providerType === MODEL_PROVIDER.GEMINI_CLI || providerType === MODEL_PROVIDER.ANTIGRAVITY;
+}
+
+function logGeminiSelectionDiagnostic(providerType, requestedModel, selectionDiagnostics, selectedProvider, startedAt, config = null) {
+    if (!isGeminiProviderType(providerType)) return;
+    try {
+        const event = buildGeminiSelectionDiagnostic({
+            workerId: process.env.RUNTIME_WORKER_ID || 'standalone',
+            providerType,
+            requestedModel,
+            selectionDiagnostics,
+            selectedProvider,
+            durationMs: performance.now() - startedAt
+        });
+        if (config) config._geminiSelectionDiagnostic = event;
+        logger.info(`[Gemini Diagnostics] ${JSON.stringify(event)}`);
+    } catch {
+        // Diagnostics must never change request behavior.
+    }
 }
 
 async function getGeminiProviderEmail(providerType, credPath) {
@@ -771,6 +790,7 @@ export function createProviderSelectionError(providerType, model, selectionDiagn
 }
 
 function throwProviderSelectionFailure(config, model, options, selectionDiagnostics, availabilityError = null) {
+    logGeminiSelectionDiagnostic(config.MODEL_PROVIDER, model, selectionDiagnostics, null, selectionDiagnostics.selectionStartedAt || performance.now(), config);
     if (availabilityError) throw availabilityError;
     const error = createProviderSelectionError(config.MODEL_PROVIDER, model, selectionDiagnostics, options);
     if (error.status >= 500) logger.error(error.message);
@@ -1492,6 +1512,7 @@ export async function getApiService(config, requestedModel = null, options = {})
     const providerFilterStartedAt = performance.now();
     if (providerPoolManager && ((config.providerPools && config.providerPools[config.MODEL_PROVIDER]) || isPoolable)) {
         const selectionDiagnostics = initializeSelectionDiagnostics(options.selectionDiagnostics || {});
+        selectionDiagnostics.selectionStartedAt = providerFilterStartedAt;
         const groupSelection = await selectCodexCredentialGroupProvider(
             config,
             config.MODEL_PROVIDER,
@@ -1519,6 +1540,7 @@ export async function getApiService(config, requestedModel = null, options = {})
             config.customName = serviceConfig.customName;
             const customNameDisplay = serviceConfig.customName ? ` (${serviceConfig.customName})` : '';
             logger.info(`[API Service] Using pooled configuration for ${config.MODEL_PROVIDER}: ${serviceConfig.uuid}${customNameDisplay}${actualModelName ? ` (model: ${actualModelName})` : ''}`);
+            logGeminiSelectionDiagnostic(config.MODEL_PROVIDER, actualModelName, selectionDiagnostics, selectedProviderConfig, providerFilterStartedAt, config);
         } else {
             throwProviderSelectionFailure(
                 config,
@@ -1591,11 +1613,13 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
     let actualModel = actualModelName;
     let selectedModelFallbackReason = null;
     const selectionDiagnostics = initializeSelectionDiagnostics(options.selectionDiagnostics || {});
+    selectionDiagnostics.selectionStartedAt = null;
     const routingOptions = {
         ...options,
         selectionDiagnostics
     };
     const providerFilterStartedAt = performance.now();
+    selectionDiagnostics.selectionStartedAt = providerFilterStartedAt;
     
     const isPoolable = PROVIDER_MAPPINGS.some(m => m.providerType === config.MODEL_PROVIDER);
     if (providerPoolManager && ((config.providerPools && config.providerPools[config.MODEL_PROVIDER]) || isPoolable)) {
@@ -1776,6 +1800,7 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
             selectedUuid = selectedProviderConfig.uuid;
             actualModel = fallbackModel || actualModelName;
             selectedModelFallbackReason = fallbackReason || null;
+            logGeminiSelectionDiagnostic(config.MODEL_PROVIDER, actualModelName, selectionDiagnostics, selectedProviderConfig, providerFilterStartedAt, config);
             config._modelRouting = {
                 requestedModel: actualModelName,
                 actualModel,

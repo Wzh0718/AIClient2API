@@ -32,6 +32,49 @@ import {
     applyModelFallbackResponseHeaders,
     shouldPreserveFallbackResponseModel
 } from './model-fallback-response-metadata.js';
+import {
+    buildGeminiRetryDiagnostic,
+    buildGeminiCleanupDiagnostic,
+    classifyProviderInitializationError
+} from './gemini-diagnostics.js';
+
+function isGeminiDiagnosticsProvider(providerType) {
+    return providerType === MODEL_PROVIDER.GEMINI_CLI || providerType === MODEL_PROVIDER.ANTIGRAVITY;
+}
+
+function logGeminiRetryDiagnostic({ mode, model, providerType, providerUuid, attempt, maxRetries, error, backoffMs, switchedProvider, nextEligibleCount = null, fallbackCount = 0, outcome }) {
+    if (!isGeminiDiagnosticsProvider(providerType)) return;
+    try {
+        logger.info(`[Gemini Diagnostics] ${JSON.stringify(buildGeminiRetryDiagnostic({
+            workerId: process.env.RUNTIME_WORKER_ID || 'standalone', mode, requestedModel: model,
+            providerType, providerUuid, attempt, maxRetries,
+            reason: classifyProviderInitializationError(error),
+            status: getErrorStatusCode(error), backoffMs, switchedProvider,
+            nextEligibleCount, fallbackCount, outcome
+        }))}`);
+    } catch {}
+}
+
+function logGeminiCleanupDiagnostic({ mode, model, providerType, providerUuid, clientAborted, queueCancelled = false, leaseReleased = false, upstreamAborted = false, retryTimerCancelled = false, startedAt }) {
+    if (!isGeminiDiagnosticsProvider(providerType)) return;
+    try {
+        logger.info(`[Gemini Diagnostics] ${JSON.stringify(buildGeminiCleanupDiagnostic({
+            workerId: process.env.RUNTIME_WORKER_ID || 'standalone', requestedModel: model, providerType, providerUuid,
+            clientAborted, queueCancelled, leaseReleased, upstreamAborted, retryTimerCancelled,
+            cleanupMs: startedAt ? performance.now() - startedAt : 0
+        }))}`);
+    } catch {}
+}
+
+function updateGeminiRequestMetadata({ retryCount, fallbackCount, providerUuid } = {}) {
+    const runtimeRequest = requestContext.get('runtimeRequest');
+    if (!runtimeRequest?.setMetadata) return;
+    runtimeRequest.setMetadata({
+        ...(retryCount !== undefined ? { geminiRetryCount: retryCount } : {}),
+        ...(fallbackCount !== undefined ? { geminiFallbackCount: fallbackCount } : {}),
+        ...(providerUuid ? { geminiFinalProviderUuidHash: buildGeminiRetryDiagnostic({ providerUuid }).providerUuidHash } : {})
+    });
+}
 
 const CODEX_FINGERPRINT_HEADER_NAMES = Object.freeze([
     'x-codex-turn-metadata',
@@ -1609,6 +1652,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
     const onClientClose = () => {
         clientDisconnected.value = true;
         logger.info('[Stream] Client disconnected, stopping stream processing');
+        logGeminiCleanupDiagnostic({ mode: 'stream', model, providerType: toProvider, providerUuid: pooluuid, clientAborted: true, upstreamAborted: true, startedAt: retryContext?._startedAt });
     };
     
     const onClientError = (err) => {
@@ -1905,6 +1949,8 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             ].filter(Boolean);
             // Codex 上游容量/过载已由服务端进行受控轮转，避免额外等待；其他类型保留原有抖动。
             const randomDelay = isProviderTransient ? 0 : Math.floor(Math.random() * 10000);
+            updateGeminiRequestMetadata({ retryCount: currentRetry + 1 });
+            logGeminiRetryDiagnostic({ mode: 'stream', model, providerType: toProvider, providerUuid: pooluuid, attempt: currentRetry + 1, maxRetries, error, backoffMs: randomDelay, switchedProvider: false, fallbackCount: retryContext?.geminiFallbackCount || 0, outcome: 'scheduled' });
             logger.info(`[Stream Retry] Credential switch requested. Waiting ${randomDelay}ms before retry ${currentRetry + 1}/${maxRetries} with different credential...`);
             await new Promise(resolve => setTimeout(resolve, randomDelay));
             
@@ -1946,6 +1992,8 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 }
                 
                 if (result && result.service) {
+                    updateGeminiRequestMetadata({ providerUuid: result.uuid });
+                    logGeminiRetryDiagnostic({ mode: 'stream', model, providerType: toProvider, providerUuid: pooluuid, attempt: currentRetry + 1, maxRetries, error, backoffMs: randomDelay, switchedProvider: true, nextEligibleCount: selectionDiagnostics.eligibleCandidateCount, fallbackCount: retryContext?.geminiFallbackCount || 0, outcome: 'switch' });
                     logger.info(`[Stream Retry] Switched to new credential: ${result.uuid} (provider: ${result.actualProviderType})`);
                     const requestedResponseModel = retryContext?.clientRequestedModel || model;
                     const retryModelRouting = {
@@ -1988,6 +2036,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                         result.serviceConfig?.codexEmail || accountEmail
                     );
                 } else {
+                    logGeminiRetryDiagnostic({ mode: 'stream', model, providerType: toProvider, providerUuid: pooluuid, attempt: currentRetry + 1, maxRetries, error, backoffMs: randomDelay, switchedProvider: false, nextEligibleCount: selectionDiagnostics.eligibleCandidateCount, fallbackCount: retryContext?.geminiFallbackCount || 0, outcome: 'exhausted' });
                     logger.info(`[Stream Retry] No healthy credential available for retry.`);
                 }
             } catch (retryError) {
@@ -2013,6 +2062,8 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 const fallback = await tryTemporaryRouteFallback(retryContext);
                 if (fallback?.service) {
                     providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
+                    updateGeminiRequestMetadata({ fallbackCount: (retryContext?.geminiFallbackCount || 0) + 1 });
+                    logGeminiRetryDiagnostic({ mode: 'stream', model, providerType: toProvider, providerUuid: pooluuid, attempt: currentRetry, maxRetries, error, switchedProvider: true, fallbackCount: (retryContext?.geminiFallbackCount || 0) + 1, outcome: 'fallback' });
                     logger.warn(`[Temporary Route] Falling back before stream start: ${toProvider}/${model} -> ${fallback.toProvider}/${fallback.model}`);
                     return await handleStreamRequest(
                         res,
@@ -2059,6 +2110,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         if (providerPoolManager && pooluuid) {
             providerPoolManager.releaseSlot(toProvider, pooluuid);
         }
+        logGeminiCleanupDiagnostic({ mode: 'stream', model, providerType: toProvider, providerUuid: pooluuid, clientAborted: clientDisconnected.value, leaseReleased: Boolean(providerPoolManager && pooluuid), upstreamAborted: clientDisconnected.value, retryTimerCancelled: false, startedAt: retryContext?._startedAt });
 
         // 只在首次请求时移除事件监听器（避免重试时误删）
         if (!isRetry) {
@@ -2114,6 +2166,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
     const maxRetries = retryContext?.maxRetries ?? 5;
     const currentRetry = retryContext?.currentRetry ?? 0;
     const CONFIG = retryContext?.CONFIG;
+    const cleanupStartedAt = performance.now();
     recordTemporaryRouteResult(retryContext, {
         actualProviderType: toProvider,
         actualModel: model,
@@ -2269,6 +2322,8 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             ].filter(Boolean);
             // Codex 上游容量/过载已由服务端进行受控轮转，避免额外等待；其他类型保留原有抖动。
             const randomDelay = isProviderTransient ? 0 : Math.floor(Math.random() * 10000);
+            updateGeminiRequestMetadata({ retryCount: currentRetry + 1 });
+            logGeminiRetryDiagnostic({ mode: 'unary', model, providerType: toProvider, providerUuid: pooluuid, attempt: currentRetry + 1, maxRetries, error, backoffMs: randomDelay, switchedProvider: false, fallbackCount: retryContext?.geminiFallbackCount || 0, outcome: 'scheduled' });
             logger.info(`[Unary Retry] Credential switch requested. Waiting ${randomDelay}ms before retry ${currentRetry + 1}/${maxRetries} with different credential...`);
             await new Promise(resolve => setTimeout(resolve, randomDelay));
             
@@ -2310,6 +2365,8 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 }
                 
                 if (result && result.service) {
+                    updateGeminiRequestMetadata({ providerUuid: result.uuid });
+                    logGeminiRetryDiagnostic({ mode: 'unary', model, providerType: toProvider, providerUuid: pooluuid, attempt: currentRetry + 1, maxRetries, error, backoffMs: randomDelay, switchedProvider: true, nextEligibleCount: selectionDiagnostics.eligibleCandidateCount, fallbackCount: retryContext?.geminiFallbackCount || 0, outcome: 'switch' });
                     logger.info(`[Unary Retry] Switched to new credential: ${result.uuid} (provider: ${result.actualProviderType})`);
                     const requestedResponseModel = retryContext?.clientRequestedModel || model;
                     const retryModelRouting = {
@@ -2350,6 +2407,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                         result.serviceConfig?.codexEmail || accountEmail
                     );
                 } else {
+                    logGeminiRetryDiagnostic({ mode: 'unary', model, providerType: toProvider, providerUuid: pooluuid, attempt: currentRetry + 1, maxRetries, error, backoffMs: randomDelay, switchedProvider: false, nextEligibleCount: selectionDiagnostics.eligibleCandidateCount, fallbackCount: retryContext?.geminiFallbackCount || 0, outcome: 'exhausted' });
                     logger.info(`[Unary Retry] No healthy credential available for retry.`);
                 }
             } catch (retryError) {
@@ -2374,6 +2432,8 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             const fallback = await tryTemporaryRouteFallback(retryContext);
             if (fallback?.service) {
                 providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
+                updateGeminiRequestMetadata({ fallbackCount: (retryContext?.geminiFallbackCount || 0) + 1 });
+                logGeminiRetryDiagnostic({ mode: 'unary', model, providerType: toProvider, providerUuid: pooluuid, attempt: currentRetry, maxRetries, error, switchedProvider: true, fallbackCount: (retryContext?.geminiFallbackCount || 0) + 1, outcome: 'fallback' });
                 logger.warn(`[Temporary Route] Falling back before unary response: ${toProvider}/${model} -> ${fallback.toProvider}/${fallback.model}`);
                 return await handleUnaryRequest(
                     res,
@@ -2419,6 +2479,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         if (providerPoolManager && pooluuid) {
             providerPoolManager.releaseSlot(toProvider, pooluuid);
         }
+        logGeminiCleanupDiagnostic({ mode: 'unary', model, providerType: toProvider, providerUuid: pooluuid, clientAborted: false, leaseReleased: Boolean(providerPoolManager && pooluuid), startedAt: cleanupStartedAt });
     }
 }
 
@@ -2886,6 +2947,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     const credentialSwitchMaxRetries = CONFIG.CREDENTIAL_SWITCH_MAX_RETRIES || 5;
     const retryContext = {
         CONFIG,
+        _startedAt: performance.now(),
         currentRetry: 0,
         maxRetries: credentialSwitchMaxRetries,
         clientRequestedModel,
@@ -2904,6 +2966,12 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             temporaryRouteFallbackAttempted: temporaryRouteFallbackUsed
         } : {})
     };
+    requestContext.get('runtimeRequest')?.setMetadata?.({
+        ...(CONFIG._geminiSelectionDiagnostic ? { geminiSelection: CONFIG._geminiSelectionDiagnostic } : {}),
+        geminiRetryCount: 0,
+        geminiFallbackCount: 0,
+        ...(actualUuid ? { geminiFinalProviderUuidHash: buildGeminiRetryDiagnostic({ providerUuid: actualUuid }).providerUuidHash } : {})
+    });
     
     if (isStream) {
         await handleStreamRequest(res, service, model, processedRequestBody, fromProvider, toProvider, CONFIG.PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, actualUuid, actualCustomName, retryContext, actualAccountIdentity, actualAccountEmail);

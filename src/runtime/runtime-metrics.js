@@ -12,7 +12,8 @@ function readSampleRate(value, fallback = 0) {
 function safeMetadata(metadata = {}) {
     const allowed = [
         'method', 'path', 'model', 'providerType', 'stream',
-        'requestBodyBytes', 'responseStatus'
+        'requestBodyBytes', 'responseStatus',
+        'geminiSelection', 'geminiRetryCount', 'geminiFallbackCount', 'geminiFinalProviderUuidHash', 'clientAborted'
     ];
     return Object.fromEntries(allowed
         .filter(name => metadata[name] !== undefined && metadata[name] !== null)
