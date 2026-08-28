@@ -141,6 +141,49 @@ describe('PotluckKeyConcurrencyLimiter', () => {
             jest.useRealTimers();
         }
     });
+
+    test('uses one distributed poller per key for multiple queued waiters', async () => {
+        jest.useFakeTimers();
+        let attempts = 0;
+        const coordination = {
+            async acquirePotluckKeyLease() {
+                if (attempts++ === 0) return { acquired: true, release: async () => true };
+                return { acquired: false, active: 1 };
+            },
+            async reservePotluckKeyQueue() {
+                return { reserved: true, reservationId: `reservation-${attempts}` };
+            },
+            async acquirePotluckKeyLeaseFromQueue() {
+                attempts += 1;
+                return { acquired: false, active: 1 };
+            },
+            async releasePotluckKeyQueueReservation() {
+                return true;
+            }
+        };
+
+        try {
+            const limiter = new PotluckKeyConcurrencyLimiter();
+            const first = await limiter.acquire('shared', { maxConcurrency: 1, queueLimit: 3, queueTimeoutMs: 5_000, coordination });
+            const waiters = [1, 2, 3].map(() => limiter.acquire('shared', {
+                maxConcurrency: 1,
+                queueLimit: 3,
+                queueTimeoutMs: 5_000,
+                coordination
+            }).catch(error => error));
+
+            await jest.advanceTimersByTimeAsync(0);
+            const attemptsAfterEnqueue = attempts;
+            await jest.advanceTimersByTimeAsync(100);
+            expect(attempts - attemptsAfterEnqueue).toBe(1);
+
+            await first.release();
+            await jest.advanceTimersByTimeAsync(5_000);
+            for (const waiter of waiters) await expect(waiter).resolves.toMatchObject({ status: 429 });
+        } finally {
+            jest.useRealTimers();
+        }
+    });
 });
 
 test('createKeyConcurrencyError returns a stable 429 contract', () => {

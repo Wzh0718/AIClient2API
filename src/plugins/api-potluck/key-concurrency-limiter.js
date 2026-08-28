@@ -23,7 +23,7 @@ export class PotluckKeyConcurrencyLimiter {
 
     _state(keyId) {
         const id = String(keyId);
-        if (!this.states.has(id)) this.states.set(id, { active: 0, waiting: 0, queue: [] });
+        if (!this.states.has(id)) this.states.set(id, { active: 0, waiting: 0, queue: [], distributedPoller: null });
         return this.states.get(id);
     }
 
@@ -130,49 +130,81 @@ export class PotluckKeyConcurrencyLimiter {
 
         state.waiting++;
         return new Promise((resolve, reject) => {
-            const waiter = { settled: false, timer: null, poller: null, resolve, reject, signal, onAbort: null };
-            const finish = (error, lease) => {
+            const waiter = { settled: false, timer: null, resolve, reject, signal, onAbort: null, reservation };
+            waiter.finish = (error, lease) => {
                 if (waiter.settled) return;
                 waiter.settled = true;
                 state.waiting = Math.max(0, state.waiting - 1);
+                const index = state.queue.indexOf(waiter);
+                if (index >= 0) state.queue.splice(index, 1);
                 clearTimeout(waiter.timer);
-                clearTimeout(waiter.poller);
                 signal?.removeEventListener?.('abort', waiter.onAbort);
                 if (reservation && typeof coordination.releasePotluckKeyQueueReservation === 'function') {
                     coordination.releasePotluckKeyQueueReservation(reservation).catch(() => {});
                 }
                 if (error) reject(error); else resolve({ keyId, shadow: false, release: lease.release });
             };
-            waiter.onAbort = () => finish(createKeyConcurrencyError(keyId, 'key_queue_cancelled'));
+            waiter.onAbort = () => waiter.finish(createKeyConcurrencyError(keyId, 'key_queue_cancelled'));
             signal?.addEventListener?.('abort', waiter.onAbort, { once: true });
             if (signal?.aborted) waiter.onAbort();
-            const startedAt = this.now();
-            let pollDelayMs = DISTRIBUTED_QUEUE_POLL_INITIAL_MS;
-            const poll = async () => {
+            waiter.timer = setTimeout(() => {
                 if (waiter.settled) return;
-                if (this.now() - startedAt >= queueTimeoutMs) {
-                    this._emit('key_429', keyId, { reason: 'key_queue_timeout', waiting: state.waiting });
-                    finish(createKeyConcurrencyError(keyId, 'key_queue_timeout', { queueTimeoutMs }));
-                    return;
-                }
-                try {
-                    const lease = await attempt();
-                    if (lease?.acquired) {
-                        finish(null, lease);
-                        return;
-                    }
-                } catch (error) {
-                    finish(error);
-                    return;
-                }
-                if (waiter.settled) return;
-                const nextDelayMs = pollDelayMs;
-                pollDelayMs = Math.min(DISTRIBUTED_QUEUE_POLL_MAX_MS, pollDelayMs * 2);
-                waiter.poller = setTimeout(poll, nextDelayMs);
-            };
-            waiter.timer = setTimeout(() => poll(), queueTimeoutMs);
-            poll();
+                this._emit('key_429', keyId, { reason: 'key_queue_timeout', waiting: state.waiting });
+                waiter.finish(createKeyConcurrencyError(keyId, 'key_queue_timeout', { queueTimeoutMs }));
+            }, queueTimeoutMs);
+            if (!waiter.settled) {
+                state.queue.push(waiter);
+                this._ensureDistributedPoller(keyId, state, coordination, maxConcurrency, queueTimeoutMs);
+            }
         });
+    }
+
+    _ensureDistributedPoller(keyId, state, coordination, maxConcurrency, queueTimeoutMs) {
+        if (state.distributedPoller) return;
+        const poller = { timer: null, delayMs: DISTRIBUTED_QUEUE_POLL_INITIAL_MS, running: false };
+        state.distributedPoller = poller;
+        const schedule = delayMs => {
+            if (state.distributedPoller !== poller || state.queue.length === 0) {
+                if (state.distributedPoller === poller) state.distributedPoller = null;
+                return;
+            }
+            poller.timer = setTimeout(poll, delayMs);
+        };
+        const poll = async () => {
+            if (poller.running || state.distributedPoller !== poller) return;
+            poller.running = true;
+            const waiter = state.queue.find(entry => !entry.settled);
+            if (!waiter) {
+                state.distributedPoller = null;
+                poller.running = false;
+                return;
+            }
+            let nextDelayMs = poller.delayMs;
+            try {
+                const lease = typeof coordination.acquirePotluckKeyLeaseFromQueue === 'function'
+                    ? await coordination.acquirePotluckKeyLeaseFromQueue(
+                        keyId,
+                        waiter.reservation,
+                        { maxConcurrency, ttlMs: Math.max(queueTimeoutMs, 120_000) }
+                    )
+                    : await coordination.acquirePotluckKeyLease(
+                        keyId,
+                        { maxConcurrency, ttlMs: Math.max(queueTimeoutMs, 120_000) }
+                    );
+                if (lease?.acquired) {
+                    waiter.finish(null, lease);
+                    poller.delayMs = DISTRIBUTED_QUEUE_POLL_INITIAL_MS;
+                } else {
+                    poller.delayMs = Math.min(DISTRIBUTED_QUEUE_POLL_MAX_MS, poller.delayMs * 2);
+                }
+            } catch (error) {
+                waiter.finish(error);
+            } finally {
+                poller.running = false;
+                schedule(nextDelayMs);
+            }
+        };
+        poll();
     }
 
     _lease(keyId, counted) {
