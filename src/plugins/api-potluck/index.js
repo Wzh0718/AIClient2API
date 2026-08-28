@@ -315,15 +315,22 @@ const apiPotluckPlugin = {
             res.setHeader?.('X-Potluck-Quota-Mode', quota.mode || 'local-only');
             if (!quota.acquired) {
                 if (quota.mode === 'local-degraded') quotaMetrics.localRejected += 1;
+                const error = {
+                    statusCode: 429,
+                    message: 'Quota exceeded for this API key',
+                    code: 'quota_exceeded',
+                    keyData: {
+                        ...validation.keyData,
+                        todayUsage: quota.admitted,
+                        quotaReserved: quota.reserved,
+                        quotaMode: quota.mode
+                    }
+                };
+                sendPotluckError(res, error);
                 return {
                     handled: true,
                     authorized: false,
-                    error: {
-                        statusCode: 429,
-                        message: 'Quota exceeded for this API key',
-                        code: 'quota_exceeded',
-                        keyData: { ...validation.keyData, todayUsage: quota.admitted, quotaReserved: quota.reserved, quotaMode: quota.mode }
-                    }
+                    error
                 };
             }
         }
