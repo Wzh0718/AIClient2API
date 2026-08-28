@@ -48,10 +48,65 @@ import {
 
 import logger from '../../utils/logger.js';
 import { emptyUsage, extractUsage, mergeUsage } from '../../utils/usage-normalizer.js';
+import requestContext from '../../utils/context.js';
 
 import { handlePotluckApiRoutes, handlePotluckUserApiRoutes } from './api-routes.js';
 
 const pendingUsage = new Map();
+const localQuotaReservations = new Map();
+let providerPoolManagerPromise = null;
+const quotaMetrics = {
+    mode: 'local-only',
+    localDegradedRequests: 0,
+    localRejected: 0,
+    coordinationErrors: 0,
+    finalizeErrors: 0
+};
+
+function getBeijingDateKey() {
+    return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().split('T')[0];
+}
+
+async function getPotluckCoordination() {
+    if (!providerPoolManagerPromise) {
+        providerPoolManagerPromise = import('../../services/service-manager.js')
+            .then(module => module.getProviderPoolManager?.() || null)
+            .catch(() => null);
+    }
+    return (await providerPoolManagerPromise) ?.coordination || null;
+}
+
+function distributedQuotaEnabled() {
+    return process.env.POTLUCK_DISTRIBUTED_QUOTA_ENABLED !== 'false';
+}
+
+function quotaFailureMode() {
+    return process.env.POTLUCK_DISTRIBUTED_QUOTA_FAILURE_MODE === 'fail-closed'
+        ? 'fail-closed'
+        : 'local-degraded';
+}
+
+function localQuotaReserve(apiKey, keyData, requestId) {
+    const limit = Number(keyData?.dailyLimit || 0);
+    if (limit <= 0) return { acquired: true, mode: 'local-unlimited', reservationId: null };
+    const dateKey = getBeijingDateKey();
+    const existing = localQuotaReservations.get(requestId);
+    if (existing) return { acquired: true, mode: 'local-degraded', reservationId: null, idempotent: true };
+    const stateKey = `${apiKey}:${dateKey}`;
+    const pending = [...localQuotaReservations.values()]
+        .filter(item => item.stateKey === stateKey).length;
+    const current = Number(keyData.todayUsage || 0);
+    if (current + pending >= limit) {
+        return { acquired: false, reason: 'quota_exceeded', mode: 'local-degraded', admitted: current, reserved: pending, limit };
+    }
+    localQuotaReservations.set(requestId, { apiKey, stateKey, dateKey });
+    return { acquired: true, mode: 'local-degraded', reservationId: null, admitted: current, reserved: pending + 1, limit };
+}
+
+function releaseLocalQuota(requestId) {
+    if (!requestId) return false;
+    return localQuotaReservations.delete(requestId);
+}
 
 function getTrackedRequestIds(hookContext = {}) {
     return [...new Set([
@@ -181,7 +236,8 @@ const apiPotluckPlugin = {
         // 验证 Key
         const validation = await validateKey(apiKey);
         
-        if (!validation.valid) {
+        const validationQuotaExceeded = !validation.valid && validation.reason === 'quota_exceeded';
+        if (!validation.valid && !validationQuotaExceeded) {
             const errorMessages = {
                 'invalid_format': 'Invalid API key format',
                 'not_found': 'API key not found',
@@ -208,14 +264,81 @@ const apiPotluckPlugin = {
             return { handled: true, authorized: false, error };
         }
 
+        if (validationQuotaExceeded && !distributedQuotaEnabled()) {
+            const error = {
+                statusCode: 429,
+                message: 'Quota exceeded for this API key',
+                code: 'quota_exceeded',
+                keyData: validation.keyData
+            };
+            sendPotluckError(res, error);
+            return { handled: true, authorized: false, error };
+        }
+
+        const requestId = requestContext.get('requestId') || req.headers?.['x-request-id'] || null;
+        let quota = { acquired: true, mode: 'local-unlimited', reservationId: null };
+        if (distributedQuotaEnabled() && validation.keyData.dailyLimit > 0) {
+            const coordination = await getPotluckCoordination();
+            if (coordination?.reservePotluckDailyQuota) {
+                try {
+                    quota = await coordination.reservePotluckDailyQuota(
+                        validation.keyData.id,
+                        validation.keyData.dailyLimit,
+                        getBeijingDateKey(),
+                        requestId || `anonymous:${Date.now()}`,
+                        {
+                            ttlMs: Number(process.env.POTLUCK_DISTRIBUTED_QUOTA_RESERVATION_TTL_MS || 24 * 60 * 60 * 1000),
+                            baseline: validation.keyData.todayUsage
+                        }
+                    );
+                    quota.mode = 'distributed-strict';
+                    quotaMetrics.mode = quota.mode;
+                } catch (quotaError) {
+                    quotaMetrics.coordinationErrors += 1;
+                    if (quotaFailureMode() === 'fail-closed') {
+                        return {
+                            handled: true,
+                            authorized: false,
+                            error: { statusCode: 503, message: 'Distributed quota coordination unavailable', code: 'quota_coordination_unavailable' }
+                        };
+                    }
+                    quota = localQuotaReserve(apiKey, validation.keyData, requestId || `anonymous:${Date.now()}`);
+                    quota.mode = 'local-degraded';
+                    quotaMetrics.mode = quota.mode;
+                    quotaMetrics.localDegradedRequests += 1;
+                    logger.warn(`[API Potluck] Distributed quota unavailable; using local degraded mode: ${quotaError.message}`);
+                }
+            } else {
+                quota = localQuotaReserve(apiKey, validation.keyData, requestId || `anonymous:${Date.now()}`);
+                quotaMetrics.mode = quota.mode;
+            }
+            res.setHeader?.('X-Potluck-Quota-Mode', quota.mode || 'local-only');
+            if (!quota.acquired) {
+                if (quota.mode === 'local-degraded') quotaMetrics.localRejected += 1;
+                return {
+                    handled: true,
+                    authorized: false,
+                    error: {
+                        statusCode: 429,
+                        message: 'Quota exceeded for this API key',
+                        code: 'quota_exceeded',
+                        keyData: { ...validation.keyData, todayUsage: quota.admitted, quotaReserved: quota.reserved, quotaMode: quota.mode }
+                    }
+                };
+            }
+        }
+
         // 认证成功，返回数据供后续使用
         logger.info(`[API Potluck Plugin] Authorized with key: ${apiKey.substring(0, 12)}...`);
+        res.setHeader?.('X-Potluck-Quota-Mode', quota.mode || 'local-only');
         return {
             handled: false,
             authorized: true,
             data: {
                 potluckApiKey: apiKey,
-                potluckKeyData: validation.keyData
+                potluckKeyData: validation.keyData,
+                potluckQuotaReservationId: quota.reservationId,
+                potluckQuotaMode: quota.mode
             }
         };
     },
@@ -250,6 +373,12 @@ const apiPotluckPlugin = {
             const potluckApiKey = hookContext.potluckApiKey || resolveKeyIdByHash(hookContext.potluckKeyHash);
             if (potluckApiKey) {
                 try {
+                    const coordination = await getPotluckCoordination();
+                    if (hookContext.potluckQuotaReservationId && coordination?.settlePotluckDailyQuota) {
+                        await coordination.settlePotluckDailyQuota(hookContext.potluckQuotaReservationId);
+                    } else {
+                        releaseLocalQuota(hookContext.requestId || hookContext._monitorRequestId);
+                    }
                     const usage = getPendingUsageForHookContext(hookContext);
 
                     // 传入提供商和模型信息，以及请求 ID 用于防重
@@ -278,8 +407,37 @@ const apiPotluckPlugin = {
             for (const requestId of trackedRequestIds) {
                 pendingUsage.delete(requestId);
             }
+        },
+
+        async onRequestCompleted(hookContext = {}) {
+            const reservationId = hookContext.potluckQuotaReservationId;
+            const requestId = hookContext.requestId || hookContext._monitorRequestId;
+            const response = hookContext.response || {};
+            const successful = Number(response.httpStatus || response.statusCode || 0) >= 200
+                && Number(response.httpStatus || response.statusCode || 0) < 400
+                && response.clientAborted !== true
+                && response.errorClass == null;
+            try {
+                const coordination = await getPotluckCoordination();
+                if (reservationId && coordination?.[successful ? 'settlePotluckDailyQuota' : 'releasePotluckDailyQuota']) {
+                    await coordination[successful ? 'settlePotluckDailyQuota' : 'releasePotluckDailyQuota'](reservationId);
+                } else if (!successful) {
+                    releaseLocalQuota(requestId);
+                }
+            } catch (error) {
+                quotaMetrics.finalizeErrors += 1;
+                logger.warn(`[API Potluck] Failed to finalize quota reservation: ${error.message}`);
+            }
         }
 
+    },
+
+    getRuntimeMetrics() {
+        return {
+            ...quotaMetrics,
+            localReservations: localQuotaReservations.size,
+            pendingUsage: pendingUsage.size
+        };
     },
 
     // 导出内部函数供外部使用（可选）

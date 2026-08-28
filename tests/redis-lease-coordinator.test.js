@@ -16,6 +16,9 @@ class InMemoryRedisExecutor {
         this.modelProbeLeases = new Map();
         this.imageCapacityLeases = new Map();
         this.geminiQueueLeases = new Map();
+        this.potluckQuotas = new Map();
+        this.potluckReservations = new Map();
+        this.potluckQuotaDedupe = new Map();
         this.scriptCalls = [];
         this.now = 0;
     }
@@ -85,6 +88,43 @@ class InMemoryRedisExecutor {
         }
         if (name === 'release-gemini-queue-slot') {
             return this.geminiQueueLeases.delete(args[0]) ? 1 : 0;
+        }
+        if (name === 'reserve-potluck-daily-quota') {
+            const [keyHash, dateKey, nowMs, ttlMs, limit, requestId, reservationId, baseline] = args;
+            const quotaKey = `${keys[0]}:potluck:quota:${dateKey}:${keyHash}`;
+            const dedupeKey = `${keys[0]}:potluck:quota-dedupe:${keyHash}:${requestId}`;
+            const existing = this.potluckQuotaDedupe.get(dedupeKey);
+            if (existing) return JSON.stringify({ acquired: true, idempotent: true, reservationId: existing });
+            const state = this.potluckQuotas.get(quotaKey) || { admitted: 0, reserved: 0 };
+            state.admitted = Math.max(state.admitted, Number(baseline || 0));
+            if (Number(limit) > 0 && state.admitted + state.reserved >= Number(limit)) {
+                return JSON.stringify({ acquired: false, reason: 'quota_exceeded', admitted: state.admitted, reserved: state.reserved, limit: Number(limit) });
+            }
+            state.reserved += 1;
+            this.potluckQuotas.set(quotaKey, state);
+            this.potluckQuotaDedupe.set(dedupeKey, reservationId);
+            this.potluckReservations.set(reservationId, { quotaKey, state, status: 'reserved' });
+            return JSON.stringify({ acquired: true, reservationId, admitted: state.admitted, reserved: state.reserved, limit: Number(limit) });
+        }
+        if (name === 'settle-potluck-daily-quota') {
+            const reservation = this.potluckReservations.get(args[0]);
+            if (!reservation || reservation.status !== 'reserved') return JSON.stringify({ settled: false, idempotent: true });
+            reservation.state.reserved = Math.max(0, reservation.state.reserved - 1);
+            reservation.state.admitted += 1;
+            reservation.status = 'settled';
+            return JSON.stringify({ settled: true, admitted: reservation.state.admitted, reserved: reservation.state.reserved });
+        }
+        if (name === 'release-potluck-daily-quota') {
+            const reservation = this.potluckReservations.get(args[0]);
+            if (!reservation || reservation.status !== 'reserved') return JSON.stringify({ released: false, idempotent: true });
+            reservation.state.reserved = Math.max(0, reservation.state.reserved - 1);
+            reservation.status = 'released';
+            return JSON.stringify({ released: true, admitted: reservation.state.admitted, reserved: reservation.state.reserved });
+        }
+        if (name === 'get-potluck-daily-quota') {
+            const [keyHash, dateKey] = args;
+            const state = this.potluckQuotas.get(`${keys[0]}:potluck:quota:${dateKey}:${keyHash}`) || { admitted: 0, reserved: 0 };
+            return JSON.stringify({ ...state });
         }
         if (name === 'acquire-provider-lease') {
             const [epoch, leaseId, ttlMs, workerId, candidatesJson, _nowMs, observedBootId, affinityKey = '', _affinityTtlMs, routedProviderKey = '', probeOwner = '', probeTtlMs = '30000'] = args;
@@ -256,6 +296,29 @@ describe('RedisLeaseCoordinator', () => {
             byteLimit: 2048,
             ttlMs: 50000
         })).resolves.toEqual(expect.objectContaining({ leaseId: expect.any(String) }));
+    });
+
+    test('enforces Potluck daily quota atomically across workers and keeps reservations idempotent', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const first = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+        const second = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w2' });
+
+        const a = await first.reservePotluckDailyQuota('maki_key', 2, '2026-08-28', 'request-a');
+        const duplicate = await second.reservePotluckDailyQuota('maki_key', 2, '2026-08-28', 'request-a');
+        const b = await second.reservePotluckDailyQuota('maki_key', 2, '2026-08-28', 'request-b');
+        const c = await first.reservePotluckDailyQuota('maki_key', 2, '2026-08-28', 'request-c');
+
+        expect(a).toEqual(expect.objectContaining({ acquired: true, reservationId: expect.any(String) }));
+        expect(duplicate.reservationId).toBe(a.reservationId);
+        expect(b).toEqual(expect.objectContaining({ acquired: true }));
+        expect(c).toEqual(expect.objectContaining({ acquired: false, reason: 'quota_exceeded' }));
+
+        await first.settlePotluckDailyQuota(a.reservationId);
+        await first.settlePotluckDailyQuota(a.reservationId);
+        expect(await second.getPotluckDailyQuota('maki_key', '2026-08-28')).toEqual(expect.objectContaining({ admitted: 1, reserved: 1 }));
+
+        const seeded = await first.reservePotluckDailyQuota('maki_key', 2, '2026-08-28', 'request-seeded', { baseline: 3 });
+        expect(seeded).toEqual(expect.objectContaining({ acquired: false, reason: 'quota_exceeded', admitted: 3 }));
     });
 
     test('rejects Gemini queue admission when the shared byte budget is exceeded', async () => {

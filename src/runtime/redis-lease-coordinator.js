@@ -166,6 +166,72 @@ redis.call('PEXPIRE', active_key, ttl_ms * 2)
 return 1
 `;
 
+const RESERVE_POTLUCK_DAILY_QUOTA_SCRIPT = `
+local quota_key = KEYS[1] .. ':potluck:quota:' .. ARGV[2] .. ':' .. ARGV[1]
+local dedupe_key = KEYS[1] .. ':potluck:quota-dedupe:' .. ARGV[1] .. ':' .. ARGV[6]
+local reservation_key = KEYS[1] .. ':potluck:reservation:' .. ARGV[7]
+local now_ms = tonumber(ARGV[3])
+local ttl_ms = math.max(1000, tonumber(ARGV[4]) or 86400000)
+local limit = tonumber(ARGV[5]) or 0
+if limit <= 0 then
+  return cjson.encode({ acquired = true, unlimited = true, reservationId = nil, admitted = 0, reserved = 0, limit = 0 })
+end
+local existing = redis.call('GET', dedupe_key)
+if existing then
+  return cjson.encode({ acquired = true, idempotent = true, reservationId = existing })
+end
+local admitted = tonumber(redis.call('HGET', quota_key, 'admitted') or '0')
+local reserved = tonumber(redis.call('HGET', quota_key, 'reserved') or '0')
+local baseline = tonumber(ARGV[8] or '0') or 0
+if baseline > admitted then
+  admitted = baseline
+  redis.call('HSET', quota_key, 'admitted', admitted)
+end
+if limit > 0 and admitted + reserved >= limit then
+  redis.call('PEXPIRE', quota_key, ttl_ms * 2)
+  return cjson.encode({ acquired = false, reason = 'quota_exceeded', admitted = admitted, reserved = reserved, limit = limit })
+end
+redis.call('HINCRBY', quota_key, 'reserved', 1)
+redis.call('HSET', reservation_key, 'keyHash', ARGV[1], 'dateKey', ARGV[2], 'status', 'reserved', 'createdAt', now_ms)
+redis.call('PEXPIRE', quota_key, ttl_ms * 2)
+redis.call('SET', dedupe_key, ARGV[7], 'PX', ttl_ms)
+redis.call('PEXPIRE', reservation_key, ttl_ms)
+return cjson.encode({ acquired = true, reservationId = ARGV[7], admitted = admitted, reserved = reserved + 1, limit = limit })
+`;
+
+const SETTLE_POTLUCK_DAILY_QUOTA_SCRIPT = `
+local reservation_key = KEYS[1] .. ':potluck:reservation:' .. ARGV[1]
+local key_hash = redis.call('HGET', reservation_key, 'keyHash')
+local date_key = redis.call('HGET', reservation_key, 'dateKey')
+local status = redis.call('HGET', reservation_key, 'status')
+if not key_hash or not date_key then return cjson.encode({ settled = false, idempotent = true }) end
+if status ~= 'reserved' then return cjson.encode({ settled = false, idempotent = true, status = status }) end
+local quota_key = KEYS[1] .. ':potluck:quota:' .. date_key .. ':' .. key_hash
+redis.call('HINCRBY', quota_key, 'reserved', -1)
+redis.call('HINCRBY', quota_key, 'admitted', 1)
+redis.call('HSET', reservation_key, 'status', 'settled')
+return cjson.encode({ settled = true, admitted = tonumber(redis.call('HGET', quota_key, 'admitted') or '0'), reserved = tonumber(redis.call('HGET', quota_key, 'reserved') or '0') })
+`;
+
+const RELEASE_POTLUCK_DAILY_QUOTA_SCRIPT = `
+local reservation_key = KEYS[1] .. ':potluck:reservation:' .. ARGV[1]
+local key_hash = redis.call('HGET', reservation_key, 'keyHash')
+local date_key = redis.call('HGET', reservation_key, 'dateKey')
+local status = redis.call('HGET', reservation_key, 'status')
+if not key_hash or not date_key then return cjson.encode({ released = false, idempotent = true }) end
+if status ~= 'reserved' then return cjson.encode({ released = false, idempotent = true, status = status }) end
+local quota_key = KEYS[1] .. ':potluck:quota:' .. date_key .. ':' .. key_hash
+local reserved = tonumber(redis.call('HGET', quota_key, 'reserved') or '0')
+redis.call('HSET', quota_key, 'reserved', math.max(0, reserved - 1))
+redis.call('HSET', reservation_key, 'status', 'released')
+return cjson.encode({ released = true, admitted = tonumber(redis.call('HGET', quota_key, 'admitted') or '0'), reserved = math.max(0, reserved - 1) })
+`;
+
+const GET_POTLUCK_DAILY_QUOTA_SCRIPT = `
+local quota_key = KEYS[1] .. ':potluck:quota:' .. ARGV[2] .. ':' .. ARGV[1]
+return cjson.encode({ admitted = tonumber(redis.call('HGET', quota_key, 'admitted') or '0'), reserved = tonumber(redis.call('HGET', quota_key, 'reserved') or '0') })
+`;
+
 const RESERVE_POTLUCK_KEY_QUEUE_SCRIPT = `
 local waiting_key = KEYS[1] .. ':potluck-key-waiting:' .. ARGV[1]
 local now_ms = tonumber(ARGV[2])
@@ -512,6 +578,14 @@ export class RedisLeaseCoordinator {
         this.activeImageLeases = new Map();
         this.activeGeminiQueueLeases = new Set();
         this.activePotluckKeyLeases = new Map();
+        this.potluckQuotaMetrics = {
+            reservations: 0,
+            rejected: 0,
+            settled: 0,
+            released: 0,
+            idempotent: 0,
+            errors: 0
+        };
         this.imageCapacityRecoveryRequired = false;
         this.imageCapacityMetrics = {
             acquired: 0,
@@ -927,6 +1001,68 @@ export class RedisLeaseCoordinator {
         ])) === 1;
     }
 
+    async reservePotluckDailyQuota(keyId, dailyLimit, dateKey, requestId, { ttlMs = 24 * 60 * 60 * 1000, baseline = 0 } = {}) {
+        const normalizedKey = String(keyId || '').trim();
+        const normalizedDate = String(dateKey || '').trim();
+        const normalizedRequestId = String(requestId || '').trim();
+        const limit = Math.max(0, Number(dailyLimit) || 0);
+        if (!normalizedKey || !normalizedDate || !normalizedRequestId) {
+            throw new TypeError('Potluck daily quota reservation requires keyId, dateKey, and requestId');
+        }
+        const effectiveTtl = Math.max(60_000, Number(ttlMs) || 24 * 60 * 60 * 1000);
+        try {
+            const result = await this._eval('reserve-potluck-daily-quota', RESERVE_POTLUCK_DAILY_QUOTA_SCRIPT, [
+                hashAffinityKey(normalizedKey), normalizedDate, String(Date.now()), String(effectiveTtl),
+                String(limit), hashAffinityKey(normalizedRequestId), randomUUID(), String(Math.max(0, Number(baseline) || 0))
+            ]);
+            const state = typeof result === 'string' ? JSON.parse(result) : result;
+            if (state?.idempotent) this.potluckQuotaMetrics.idempotent += 1;
+            if (state?.acquired === true) this.potluckQuotaMetrics.reservations += 1;
+            else this.potluckQuotaMetrics.rejected += 1;
+            return {
+                acquired: state?.acquired === true,
+                idempotent: state?.idempotent === true,
+                reason: state?.reason || null,
+                reservationId: state?.reservationId || null,
+                admitted: Number(state?.admitted || 0),
+                reserved: Number(state?.reserved || 0),
+                limit
+            };
+        } catch (error) {
+            this.potluckQuotaMetrics.errors += 1;
+            throw error;
+        }
+    }
+
+    async settlePotluckDailyQuota(reservationId) {
+        if (!reservationId) return { settled: false, idempotent: true };
+        const result = await this._eval('settle-potluck-daily-quota', SETTLE_POTLUCK_DAILY_QUOTA_SCRIPT, [String(reservationId)]);
+        const state = typeof result === 'string' ? JSON.parse(result) : result;
+        if (state?.settled === true) this.potluckQuotaMetrics.settled += 1;
+        else if (state?.idempotent) this.potluckQuotaMetrics.idempotent += 1;
+        return state || { settled: false, idempotent: true };
+    }
+
+    async releasePotluckDailyQuota(reservationId) {
+        if (!reservationId) return { released: false, idempotent: true };
+        const result = await this._eval('release-potluck-daily-quota', RELEASE_POTLUCK_DAILY_QUOTA_SCRIPT, [String(reservationId)]);
+        const state = typeof result === 'string' ? JSON.parse(result) : result;
+        if (state?.released === true) this.potluckQuotaMetrics.released += 1;
+        else if (state?.idempotent) this.potluckQuotaMetrics.idempotent += 1;
+        return state || { released: false, idempotent: true };
+    }
+
+    async getPotluckDailyQuota(keyId, dateKey) {
+        const normalizedKey = String(keyId || '').trim();
+        const normalizedDate = String(dateKey || '').trim();
+        if (!normalizedKey || !normalizedDate) return { admitted: 0, reserved: 0 };
+        const result = await this._eval('get-potluck-daily-quota', GET_POTLUCK_DAILY_QUOTA_SCRIPT, [
+            hashAffinityKey(normalizedKey), normalizedDate
+        ]);
+        const state = typeof result === 'string' ? JSON.parse(result) : result;
+        return { admitted: Number(state?.admitted || 0), reserved: Number(state?.reserved || 0) };
+    }
+
     async reservePotluckKeyQueue(keyId, { queueLimit = 0, ttlMs = this.leaseTtlMs } = {}) {
         const normalizedKey = String(keyId || '').trim();
         const limit = Math.max(0, Number(queueLimit) || 0);
@@ -1050,6 +1186,7 @@ export class RedisLeaseCoordinator {
             redisMemory: { ...this.redisMemory },
             activeLeases: this.activeLeases.size,
             activeGeminiQueueLeases: this.activeGeminiQueueLeases.size,
+            potluckQuota: { ...this.potluckQuotaMetrics },
             imageCapacity: {
                 ...this.imageCapacityMetrics,
                 localActiveLeases: this.activeImageLeases.size,

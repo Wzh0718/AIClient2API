@@ -253,6 +253,12 @@ function getRequestAuditMetrics() {
     return plugin?.getRuntimeMetrics?.() || null;
 }
 
+function getPotluckQuotaMetrics() {
+    const plugin = getPluginManager()?.getEnabledPlugins?.()
+        .find(candidate => candidate.name === 'api-potluck');
+    return plugin?.getRuntimeMetrics?.() || null;
+}
+
 function buildRuntimeMetricsSnapshot() {
     return {
         ...runtimeMetrics.snapshot(),
@@ -261,6 +267,7 @@ function buildRuntimeMetricsSnapshot() {
         pricingDiagnostics: getPricingDiagnostics(),
         temporaryRouting: getTemporaryRouteScheduleDiagnostics(),
         providerCoordination: getProviderPoolManager()?.coordination?.getStatus?.() || null,
+        potluckQuota: getPotluckQuotaMetrics(),
         requestAudit: getRequestAuditMetrics(),
         hooks: getRuntimeHookSnapshot()
     };

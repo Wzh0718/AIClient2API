@@ -83,6 +83,59 @@ describe('RuntimeHookBridge', () => {
         expect(published[0].args[0]).not.toHaveProperty('potluckApiKey');
     });
 
+    test('preserves Potluck quota reservation metadata across workers', async () => {
+        const messages = [];
+        const bridge = new RuntimeHookBridge({
+            send: message => messages.push(message),
+            durableTransport: { publish: event => messages.push(event), snapshot: () => ({}) }
+        });
+        await bridge.handle('onRequestCompleted', {
+            requestId: 'quota-bridge-1',
+            potluckApiKey: 'maki_raw_secret_value',
+            potluckQuotaReservationId: 'quota-reservation-1',
+            potluckQuotaMode: 'distributed-strict',
+            response: { statusCode: 502, completed: true }
+        });
+
+        expect(messages[0].args[0]).toMatchObject({
+            potluckQuotaReservationId: 'quota-reservation-1',
+            potluckQuotaMode: 'distributed-strict'
+        });
+        expect(JSON.stringify(messages)).not.toContain('maki_raw_secret_value');
+    });
+
+    test('preserves compact runtime diagnostics across workers without payload data', async () => {
+        const published = [];
+        const bridge = new RuntimeHookBridge({
+            send: jest.fn(),
+            durableTransport: { publish: event => published.push(event), snapshot: () => ({}) }
+        });
+        await bridge.handle('onRequestCompleted', {
+            requestId: 'runtime-bridge-1',
+            runtime: {
+                workerId: 'execution-2',
+                kind: 'model',
+                durationMs: 842,
+                outputBytes: 1234,
+                backpressureMs: 7,
+                stages: { upstreamCompleteMs: 825, complete: 842 }
+            },
+            response: { statusCode: 200, completed: true, durationMs: 842 }
+        });
+
+        expect(published[0].args[0]).toMatchObject({
+            runtime: {
+                workerId: 'execution-2',
+                kind: 'model',
+                durationMs: 842,
+                outputBytes: 1234,
+                stages: { upstreamCompleteMs: 825, complete: 842 }
+            },
+            response: { durationMs: 842 }
+        });
+        expect(JSON.stringify(published)).not.toMatch(/prompt|body|token|cookie/i);
+    });
+
     test('drain retries pending ipc events and flushes durable spool', async () => {
         const published = [];
         const transport = {

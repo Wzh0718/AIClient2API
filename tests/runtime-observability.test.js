@@ -172,6 +172,38 @@ describe('runtime observability baseline', () => {
         expect(profiles[0]).toMatchObject({ statusCode: 500, durationMs: 100 });
     });
 
+    test('returns a compact completion snapshot for every request while sampling remains selective', () => {
+        let now = 0;
+        const profiles = [];
+        const metrics = new RuntimeMetrics({
+            now: () => now,
+            eventLoopDelay: { enable: jest.fn(), reset: jest.fn(), percentile: () => 0, max: 0 },
+            sampleRate: 0,
+            random: () => 0.99,
+            onProfile: profile => profiles.push(profile)
+        });
+        const request = metrics.beginRequest({ workerId: 'execution-3', kind: 'model', metadata: { model: 'gemini-2.5-flash' } });
+        request.recordStage('upstreamCompleteMs', 81);
+        request.addOutputBytes(512);
+        request.addBackpressureMs(3);
+        now = 125;
+
+        const completion = request.end({ statusCode: 502 });
+
+        expect(completion).toMatchObject({
+            workerId: 'execution-3',
+            kind: 'model',
+            statusCode: 502,
+            durationMs: 125,
+            outputBytes: 512,
+            backpressureMs: 3,
+            stages: { upstreamCompleteMs: 81, complete: 125 },
+            metadata: { model: 'gemini-2.5-flash', responseStatus: 502 }
+        });
+        expect(profiles).toHaveLength(0);
+        expect(request.end({ statusCode: 200 })).toEqual(completion);
+    });
+
     test('diagnostic callback failures do not affect request completion', () => {
         let now = 0;
         const metrics = new RuntimeMetrics({
@@ -261,6 +293,21 @@ describe('runtime observability baseline', () => {
                     fallbacks: 0,
                     byModel: {}
                 }
+            },
+            potluckQuota: {
+                localDegradedRequests: 0,
+                localRejected: 0,
+                coordinationErrors: 0,
+                finalizeErrors: 0,
+                reservations: 0,
+                rejected: 0,
+                settled: 0,
+                released: 0,
+                idempotent: 0,
+                errors: 0,
+                localReservations: 0,
+                pendingUsage: 0,
+                byWorker: {}
             },
             requestAudit: {
                 runs: 0,

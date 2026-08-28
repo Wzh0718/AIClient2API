@@ -58,6 +58,21 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
                 byModel: {}
             }
         },
+        potluckQuota: {
+            localDegradedRequests: 0,
+            localRejected: 0,
+            coordinationErrors: 0,
+            finalizeErrors: 0,
+            reservations: 0,
+            rejected: 0,
+            settled: 0,
+            released: 0,
+            idempotent: 0,
+            errors: 0,
+            localReservations: 0,
+            pendingUsage: 0,
+            byWorker: {}
+        },
         requestAudit: {
             runs: 0,
             failures: 0,
@@ -160,6 +175,15 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
                     aggregate[field] = Math.max(aggregate[field], Number(modelSnapshot?.[field] || 0));
                 }
                 result.providerCoordination.geminiScheduling.byModel[model] = aggregate;
+            }
+        }
+        if (snapshot?.potluckQuota) {
+            result.potluckQuota.byWorker[workerId] = snapshot.potluckQuota;
+            for (const field of ['localDegradedRequests', 'localRejected', 'coordinationErrors', 'finalizeErrors', 'localReservations', 'pendingUsage']) {
+                result.potluckQuota[field] += Number(snapshot.potluckQuota[field] || 0);
+            }
+            for (const field of ['reservations', 'rejected', 'settled', 'released', 'idempotent', 'errors']) {
+                result.potluckQuota[field] += Number(snapshot.providerCoordination?.potluckQuota?.[field] || 0);
             }
         }
         if (snapshot?.requestAudit) {

@@ -67,6 +67,19 @@ function compactTemporaryModelRoute(route) {
 }
 
 function compactMetadata(context = {}) {
+    const allowedStages = new Set([
+        'providerFilterMs', 'redisLeaseMs', 'identityReadMs', 'identityPersistLockWaitMs',
+        'identityPersistIoMs', 'requestConvertMs', 'systemPromptPersistMs',
+        'upstreamFirstByteMs', 'upstreamCompleteMs', 'responseFinalizeMs', 'complete'
+    ]);
+    const runtime = context.runtime && typeof context.runtime === 'object' ? {
+        workerId: typeof context.runtime.workerId === 'string' ? context.runtime.workerId : undefined,
+        kind: context.runtime.kind === 'image' || context.runtime.kind === 'model' ? context.runtime.kind : undefined,
+        durationMs: Number.isFinite(Number(context.runtime.durationMs)) && Number(context.runtime.durationMs) >= 0 ? Number(context.runtime.durationMs) : undefined,
+        outputBytes: Number.isFinite(Number(context.runtime.outputBytes)) && Number(context.runtime.outputBytes) >= 0 ? Number(context.runtime.outputBytes) : undefined,
+        backpressureMs: Number.isFinite(Number(context.runtime.backpressureMs)) && Number(context.runtime.backpressureMs) >= 0 ? Number(context.runtime.backpressureMs) : undefined,
+        stages: context.runtime.stages && typeof context.runtime.stages === 'object' ? Object.fromEntries(Object.entries(context.runtime.stages).filter(([name, value]) => allowedStages.has(name) && Number.isFinite(Number(value)) && Number(value) >= 0).map(([name, value]) => [name, Number(value)])) : undefined
+    } : undefined;
     const metadata = {
         requestId: context.requestId || context._monitorRequestId || null,
         _monitorRequestId: context._monitorRequestId || context.requestId || null,
@@ -76,6 +89,8 @@ function compactMetadata(context = {}) {
         toProvider: context.toProvider || null,
         potluckApiKey: context.potluckApiKey || null,
         potluckKeyData: context.potluckKeyData?.name ? { name: context.potluckKeyData.name } : undefined,
+        potluckQuotaReservationId: context.potluckQuotaReservationId || null,
+        potluckQuotaMode: context.potluckQuotaMode || null,
         _codexRouting: compactCodexRouting(context._codexRouting),
         _temporaryKeyModelRouteResult: compactTemporaryModelRoute(context._temporaryKeyModelRouteResult),
         originalRequestBody: context.originalRequestBody?.model
@@ -99,9 +114,10 @@ function compactMetadata(context = {}) {
             completed: context.response.completed,
             clientAborted: context.response.clientAborted,
             hasImageResult: context.response.hasImageResult,
-            durationMs: context.response.durationMs,
+            durationMs: Number.isFinite(Number(context.response.durationMs)) && Number(context.response.durationMs) >= 0 ? Number(context.response.durationMs) : undefined,
             errorCode: context.response.errorCode
         } : undefined,
+        runtime,
         errorClass: context.errorClass || null
     };
 
