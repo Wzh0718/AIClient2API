@@ -13,6 +13,21 @@ import Database from 'better-sqlite3';
 import { buildAveragePricingProfile, DEFAULT_CONVERSION_MODEL, PRICING_VERSION, estimateUsageCost, normalizeConversionModel } from './cost-estimator.js';
 import { buildDailyRowsFromSqliteRows } from '../../../scripts/usage-ledger/daily-usage-ledger.mjs';
 
+const LEDGER_READ_CONCURRENCY = 4;
+
+async function mapWithConcurrency(items, limit, mapper) {
+    const results = new Array(items.length);
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+        while (nextIndex < items.length) {
+            const index = nextIndex++;
+            results[index] = await mapper(items[index], index);
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
+
 function toNumber(value) {
     const num = Number(value);
     return Number.isFinite(num) ? num : 0;
@@ -247,14 +262,15 @@ export function createLedgerRangeAggregator({
     };
 }
 
-async function addFileRows(aggregator, filePath) {
+async function readFileRows(filePath) {
+    const rows = [];
     const input = fs.createReadStream(filePath, { encoding: 'utf8' });
     const lines = readline.createInterface({ input, crlfDelay: Infinity });
     try {
         for await (const line of lines) {
             if (!line.trim()) continue;
             try {
-                aggregator.addRow(JSON.parse(line));
+                rows.push(JSON.parse(line));
             } catch {
                 // Ignore corrupted partial lines.
             }
@@ -263,6 +279,7 @@ async function addFileRows(aggregator, filePath) {
         lines.close();
         input.destroy();
     }
+    return rows;
 }
 
 export function readSqliteRowsForDates(databasePath, dates, store) {
@@ -310,15 +327,9 @@ export async function readLedgerRangeStats({
     includeKeySummaries = false,
     includeKeyModels = false,
     keyDailyLimit = 35,
-    extraRows = []
+    extraRows = [],
+    keySummaryRows = []
 } = {}) {
-    const aggregator = createLedgerRangeAggregator({
-        conversionModel,
-        keyHashToId,
-        includeKeySummaries,
-        includeKeyModels,
-        keyDailyLimit
-    });
     const availableDates = [];
     const missingDates = [];
     const todayKey = getBeijingDateKey(now);
@@ -329,38 +340,73 @@ export async function readLedgerRangeStats({
         extraRowsByDate.get(row.date).push(row);
     }
 
-    for (const date of dates) {
+    const fileResults = await mapWithConcurrency(dates, LEDGER_READ_CONCURRENCY, async date => {
         // 当天账本可能是凌晨 write 的静态快照，分布面板始终以实时 usageHistory 为准。
         if (date === todayKey) {
             const liveRows = extraRowsByDate.get(date) || [];
             if (liveRows.length > 0) {
-                liveRows.forEach(row => aggregator.addRow(row));
-                availableDates.push(date);
+                return { date, rows: liveRows, available: true };
             } else {
-                missingDates.push(date);
+                return { date, rows: [], available: false };
             }
-            continue;
         }
         const filePath = path.join(ledgerDailyDir, `usage-${date}.jsonl`);
         if (!fs.existsSync(filePath)) {
             const liveRows = extraRowsByDate.get(date) || [];
             if (liveRows.length > 0) {
-                liveRows.forEach(row => aggregator.addRow(row));
-                availableDates.push(date);
+                return { date, rows: liveRows, available: true };
             } else {
-                missingDates.push(date);
+                return { date, rows: [], available: false };
             }
-            continue;
         }
-        await addFileRows(aggregator, filePath);
-        availableDates.push(date);
+        return { date, rows: await readFileRows(filePath), available: true };
+    });
+    const preaggregateDates = new Set((keySummaryRows || []).map(row => row?.date).filter(Boolean));
+    const ledgerDatesWithRows = fileResults
+        .filter(result => result.available && result.rows.length > 0)
+        .map(result => result.date);
+    const useKeyPreaggregate = includeKeySummaries
+        && Array.isArray(keySummaryRows)
+        && keySummaryRows.length > 0
+        && ledgerDatesWithRows.every(date => preaggregateDates.has(date));
+    const aggregator = createLedgerRangeAggregator({
+        conversionModel,
+        keyHashToId,
+        includeKeySummaries: includeKeySummaries && !useKeyPreaggregate,
+        includeKeyModels,
+        keyDailyLimit
+    });
+    for (const result of fileResults) {
+        if (result.available) {
+            const date = result.date;
+            result.rows.forEach(row => aggregator.addRow(row));
+            availableDates.push(date);
+        } else {
+            const date = result.date;
+            missingDates.push(date);
+        }
     }
 
-    return {
+    const result = {
         availableDates,
         missingDates,
         ...aggregator.result()
     };
+    if (useKeyPreaggregate) {
+        const keyAggregator = createLedgerRangeAggregator({
+            conversionModel,
+            keyHashToId,
+            includeKeySummaries: true,
+            includeKeyModels,
+            keyDailyLimit
+        });
+        for (const row of keySummaryRows) keyAggregator.addRow(row);
+        result.keySummaries = keyAggregator.result().keySummaries;
+        result.keySummarySource = 'sqlite-preaggregated';
+    } else if (includeKeySummaries) {
+        result.keySummarySource = 'ledger-scan';
+    }
+    return result;
 }
 
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;

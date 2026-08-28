@@ -2995,7 +2995,8 @@
         function renderProviderModelDistribution(elementId, providerModels, accounts = {}) {
             const container = document.getElementById(elementId);
             providerModelViewState = { elementId, providerModels, accounts };
-            const providers = orderProviderAccountTabs(buildProviderModelDistribution(providerModels, accounts));
+            const providers = orderProviderAccountTabs(buildProviderModelDistribution(providerModels, accounts))
+                .filter(provider => usageCount(provider.summary) > 0 || usageTokens(provider.summary) > 0);
 
             if (providers.length === 0) {
                 container.innerHTML = '<div class="detail-empty">当前范围暂无模型数据</div>';

@@ -283,6 +283,35 @@ test('aggregator returns lightweight current-key summaries through hash aliases'
   assert.equal(JSON.stringify(result.keySummaries).includes('sha256:'), false);
 });
 
+test('readLedgerRangeStats uses supplied SQLite key rows without rescanning ledger rows for keys', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-range-'));
+  try {
+    const dailyDir = path.join(tmpDir, 'daily');
+    fs.mkdirSync(dailyDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dailyDir, 'usage-2026-01-01.jsonl'),
+      JSON.stringify(row({ date: '2026-01-01', keyHash: 'sha256:ledger', totalTokens: 100 })) + '\n'
+    );
+
+    const result = await readLedgerRangeStats({
+      ledgerDailyDir: dailyDir,
+      dates: ['2026-01-01'],
+      keyHashToId: new Map([
+        ['sha256:ledger', 'maki_current'],
+        ['sha256:sqlite', 'maki_current'],
+      ]),
+      includeKeySummaries: true,
+      keySummaryRows: [row({ date: '2026-01-01', keyHash: 'sha256:sqlite', totalTokens: 50 })],
+    });
+
+    assert.equal(result.summary.totalTokens, 100);
+    assert.equal(result.keySummaries.maki_current.summary.totalTokens, 50);
+    assert.equal(result.keySummarySource, 'sqlite-preaggregated');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('resolveRangeDates total uses ledger directory contents plus today', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-range-'));
   try {

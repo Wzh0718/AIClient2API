@@ -33,6 +33,24 @@ describe('API Potluck ledger range stats surface', () => {
         expect(source).not.toContain('keyPrefixToId');
     });
 
+    test('ledger range stats reads dates in parallel and accepts SQLite key preaggregates', () => {
+        const source = loadSource('src/plugins/api-potluck/ledger-range-stats.js');
+        expect(source).toContain('const LEDGER_READ_CONCURRENCY = 4;');
+        expect(source).toContain('mapWithConcurrency(dates, LEDGER_READ_CONCURRENCY, async date =>');
+        expect(source).toContain('keySummaryRows');
+        expect(source).toContain("result.keySummarySource = 'sqlite-preaggregated'");
+    });
+
+    test('range-stats route queries SQLite once for range key summaries', () => {
+        const source = loadSource('src/plugins/api-potluck/api-routes.js');
+        expect(source).toContain('const sqliteRows = readSqliteRowsForDates(sqlitePath, includeKeySummaries ? dates : missingCandidates, store);');
+        expect(source).toContain('keySummaryRows = sqliteRows;');
+        expect(source).toContain('keySummaryRows');
+        expect(source).toContain('performance.now()');
+        expect(source).toContain('sqliteMs=');
+        expect(source).toContain('aggregationMs=');
+    });
+
     test('admin dashboard prefers ledger range stats without verbose data-source title', () => {
         const source = loadSource('static/potluck.html');
 

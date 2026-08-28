@@ -313,4 +313,14 @@ describe('API Potluck admin range and key detail UI source', () => {
         expect(source).toContain('rollupProviderCostFromAccounts(provider)');
         expect(source).not.toContain("provider.summary?.cost ? ` · <span class=\"cost-inline\">${formatUsd(provider.summary.cost.actualUsd)}</span>`");
     });
+
+    test('admin model provider tabs hide providers with no calls and no tokens', () => {
+        const source = loadPotluckSource();
+        const renderStart = source.indexOf('function renderProviderModelDistribution(');
+        const renderEnd = source.indexOf('function renderDistribution(', renderStart);
+        const renderBlock = source.slice(renderStart, renderEnd);
+
+        expect(renderBlock).toContain('const providers = orderProviderAccountTabs(buildProviderModelDistribution(providerModels, accounts))');
+        expect(renderBlock).toContain('.filter(provider => usageCount(provider.summary) > 0 || usageTokens(provider.summary) > 0);');
+    });
 });

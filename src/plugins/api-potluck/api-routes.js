@@ -856,6 +856,7 @@ function buildLedgerKeyHashLookup(targetKeyId = null) {
 }
 
 async function loadLedgerRangeStatsForRange(range, conversionModel, options = {}) {
+    const startedAt = performance.now();
     const ledgerDailyDir = path.join(process.cwd(), 'configs', 'permanent-usage-ledger', 'daily');
     const dates = resolveRangeDates(range, {
         ledgerDailyDir,
@@ -865,6 +866,8 @@ async function loadLedgerRangeStatsForRange(range, conversionModel, options = {}
     const includeKeySummaries = Boolean(options.includeKeySummaries || options.targetKeyId);
     const keyHashToId = includeKeySummaries ? buildLedgerKeyHashLookup(options.targetKeyId) : null;
     let extraRows = [];
+    let keySummaryRows = [];
+    const sqliteStartedAt = performance.now();
     try {
         const metadataPath = path.join(process.cwd(), 'configs', 'api-potluck-keys.json');
         const sqlitePath = process.env.USAGE_EVENT_DB_PATH
@@ -873,10 +876,14 @@ async function loadLedgerRangeStatsForRange(range, conversionModel, options = {}
         const ledgerDateSet = new Set(listLedgerDates(ledgerDailyDir));
         const today = getBeijingDateKey();
         const missingCandidates = dates.filter(date => date === today || !ledgerDateSet.has(date));
-        extraRows = readSqliteRowsForDates(sqlitePath, missingCandidates, store);
+        const sqliteRows = readSqliteRowsForDates(sqlitePath, includeKeySummaries ? dates : missingCandidates, store);
+        extraRows = sqliteRows.filter(row => missingCandidates.includes(row.date));
+        keySummaryRows = sqliteRows;
     } catch {
         extraRows = [];
     }
+    const sqliteMs = Math.round(performance.now() - sqliteStartedAt);
+    const statsStartedAt = performance.now();
     const stats = await readLedgerRangeStats({
         ledgerDailyDir,
         dates,
@@ -885,11 +892,12 @@ async function loadLedgerRangeStatsForRange(range, conversionModel, options = {}
         includeKeySummaries,
         includeKeyModels: Boolean(options.targetKeyId),
         keyDailyLimit: options.targetKeyId ? Number.POSITIVE_INFINITY : 35,
-        extraRows
+        extraRows,
+        keySummaryRows
     });
     const ledgerDates = listLedgerDates(ledgerDailyDir);
     const today = getBeijingDateKey();
-    return {
+    const result = {
         range,
         from: dates[0] || today,
         to: dates[dates.length - 1] || today,
@@ -901,6 +909,8 @@ async function loadLedgerRangeStatsForRange(range, conversionModel, options = {}
         source: 'ledger',
         ...stats
     };
+    logger.info(`[API Potluck] range-stats range=${range} dates=${dates.length} includeKeys=${includeKeySummaries} keySource=${stats.keySummarySource || 'ledger-scan'} elapsedMs=${Math.round(performance.now() - startedAt)} sqliteMs=${sqliteMs} aggregationMs=${Math.round(performance.now() - statsStartedAt)}`);
+    return result;
 }
 
 function readReconciliationLatest() {
