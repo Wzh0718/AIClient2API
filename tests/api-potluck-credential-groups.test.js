@@ -176,6 +176,28 @@ afterEach(() => {
 });
 
 describe('Potluck Codex credential group management API', () => {
+    test('returns only routing options for the route editor', async () => {
+        setCredentialPool([makeCredential(1, { customName: 'Primary' })]);
+        setKeyCatalog([{
+            id: RAW_KEY,
+            keyId: RAW_KEY,
+            name: 'Automation Key',
+            usageHistory: { '2026-08-14': { summary: { totalTokens: 999 } } }
+        }]);
+        const response = await callRoute('GET', '/api/potluck/credential-groups/options');
+
+        expect(response.statusCode).toBe(200);
+        expect(response.body.data.revision).toEqual(expect.any(Number));
+        expect(response.body.data.groups).toEqual(expect.any(Array));
+        expect(response.body.data.credentials).toEqual([{
+            credentialRef: expect.any(String),
+            accountEmail: '',
+            customName: 'Primary'
+        }]);
+        expect(response.body.data).not.toHaveProperty('keys');
+        expect(response.body.data).not.toHaveProperty('usageHistory');
+    });
+
     test('requires administrator authentication', async () => {
         const response = await callRoute('GET', '/api/potluck/credential-groups', null, null);
 

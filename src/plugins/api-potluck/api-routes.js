@@ -644,6 +644,22 @@ function buildPublicCredentialGroupView(currentConfig, credentials, keys, now = 
     };
 }
 
+function buildCredentialGroupRoutingOptions(currentConfig, credentials) {
+    const providerEmailIndex = loadProviderEmailIndex();
+    return {
+        revision: Number(currentConfig?.revision || 0),
+        groups: (currentConfig?.groups || []).map(group => ({
+            id: String(group?.id || ''),
+            name: String(group?.name || group?.id || '')
+        })),
+        credentials: (credentials || []).map(credential => ({
+            credentialRef: getCredentialRef(credential.providerType, credential.uuid),
+            accountEmail: providerEmailIndex.get(`${credential.providerType}:${credential.uuid}`) || '',
+            customName: sanitizeProviderName(credential.customName)
+        }))
+    };
+}
+
 function buildPublicSuggestion(suggestion, credentials, keys) {
     const keyById = new Map((keys || []).map(key => [String(key?.keyId || key?.id || ''), key]));
     return {
@@ -1174,6 +1190,16 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                     : costOptions;
             const stats = enrichPotluckStatsAccountEmails(shapeStatsByDetail(await getCachedStats(statsOptions), detail));
             sendJson(res, 200, { success: true, data: stats });
+            return true;
+        }
+
+        // GET /api/potluck/credential-groups/options - 路由编辑弹窗所需的最小选项
+        if (method === 'GET' && path === '/api/potluck/credential-groups/options') {
+            const context = await loadCredentialGroupContext();
+            sendJson(res, 200, {
+                success: true,
+                data: buildCredentialGroupRoutingOptions(context.currentConfig, context.credentials)
+            });
             return true;
         }
 

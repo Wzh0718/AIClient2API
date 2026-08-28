@@ -2341,6 +2341,8 @@
                 applyFilterAndSort();
                 // 先等 ledger 区间统计就绪再渲染分布，避免 live 兜底与 ledger 两套数据闪烁
                 await refreshLedgerRangeStats(currentUsageRange, { force: true });
+                // 首次加载也要渲染日历；切换时间范围时 setUsageRange 会再次触发这里。
+                renderCalendar(currentStats?.usageHistory || {});
                 return true;
             } catch (error) {
                 showToast('加载失败', 'error');
@@ -3687,7 +3689,7 @@
             document.getElementById('queueLimit').value = Number(currentKey?.queueLimit || 0);
             document.getElementById('queueTimeoutSeconds').value = Math.max(1, Math.round(Number(currentKey?.queueTimeoutMs || 300000) / 1000));
             try {
-                const result = await apiRequest(`${API_BASE}/credential-groups`);
+                const result = await apiRequest(`${API_BASE}/credential-groups/options`);
                 if (!result?.success) {
                     showToast(result?.error?.message || '凭据列表加载失败', 'error');
                     return;

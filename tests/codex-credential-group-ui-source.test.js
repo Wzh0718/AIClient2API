@@ -59,6 +59,12 @@ describe('Codex credential-group UI source', () => {
         expect(providerManager).not.toContain("'/api/potluck/credential-groups");
     });
 
+    test('route editor loads only the lightweight routing options endpoint', () => {
+        const potluck = readSource('static/potluck.html');
+        expect(potluck).toContain('credential-groups/options');
+        expect(potluck).not.toContain('apiRequest(`${API_BASE}/credential-groups`);');
+    });
+
     test('does not render unavailable demand as a fake zero-dollar amount', () => {
         expect(providerManager).toContain('predictedDemandUsdAvailable');
         expect(providerManager).toContain('暂无价格');
