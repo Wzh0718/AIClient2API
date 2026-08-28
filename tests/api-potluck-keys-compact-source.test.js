@@ -2,6 +2,13 @@ import fs from 'fs';
 import path from 'path';
 
 describe('api potluck keys list compact source', () => {
+    test('key search includes the visible masked key as well as name and hashed reference', () => {
+        const html = fs.readFileSync(path.join(process.cwd(), 'static/potluck.html'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(html).toContain("const maskedKey = String(k.maskedKey || '').toLowerCase();");
+        expect(html).toContain('maskedKey.includes(searchTerm)');
+    });
+
     test('admin keys list strips heavy per-day details while keeping summaries', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'src/plugins/api-potluck/api-routes.js'), 'utf8').replace(/\r\n/g, '\n');
 

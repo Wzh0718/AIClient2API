@@ -508,10 +508,28 @@ class PluginManager {
                 
                 if (pathMatch) {
                     try {
-                        const handled = await this.executePluginOperation(plugin, `route:${route.path}`, () => route.handler(method, path, req, res, config));
+                        const handled = await this.executePluginOperation(
+                            plugin,
+                            `route:${route.path}`,
+                            () => route.handler(method, path, req, res, config),
+                            route.operationTimeoutMs
+                        );
                         if (handled) return true;
                     } catch (error) {
                         this.recordPluginError(plugin, `route:${route.path}`, error);
+                        if (error?.code === 'PLUGIN_OPERATION_TIMEOUT') {
+                            if (!res.headersSent && !res.writableEnded) {
+                                res.writeHead(504, { 'Content-Type': 'application/json; charset=utf-8' });
+                                res.end(JSON.stringify({
+                                    success: false,
+                                    error: {
+                                        message: '插件路由处理超时，请稍后重试',
+                                        code: 'PLUGIN_ROUTE_TIMEOUT'
+                                    }
+                                }));
+                            }
+                            return true;
+                        }
                     }
                 }
             }
@@ -693,7 +711,9 @@ class PluginManager {
         let timeoutId;
         const timeoutPromise = new Promise((_, reject) => {
             timeoutId = setTimeout(() => {
-                reject(new Error(`Plugin operation timed out after ${timeoutMs}ms`));
+                const error = new Error(`Plugin operation timed out after ${timeoutMs}ms`);
+                error.code = 'PLUGIN_OPERATION_TIMEOUT';
+                reject(error);
             }, timeoutMs);
             if (timeoutId.unref) timeoutId.unref();
         });

@@ -26,6 +26,7 @@ AGENTS.md
 src/plugins-user/
 
 # Local plans, runtime audit data, and generated outputs
+docker-data/
 .plans/archive/
 configs/request-audit-analysis/
 configs/retry-audit/

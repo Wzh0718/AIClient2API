@@ -57,8 +57,10 @@ const credentialGroupPreviews = new Map();
  * 发送 JSON 响应
  */
 function sendJson(res, statusCode, data) {
+    if (res.headersSent || res.writableEnded || res.destroyed) return false;
     res.writeHead(statusCode, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(data));
+    return true;
 }
 
 function compactUserCost(cost = {}) {

@@ -3225,7 +3225,14 @@
             const sortValue = document.getElementById('sortSelect').value;
             let filtered = allKeys;
             if (searchTerm) {
-                filtered = allKeys.filter(k => k.name.toLowerCase().includes(searchTerm) || k.id.toLowerCase().includes(searchTerm));
+                filtered = allKeys.filter(k => {
+                    const name = String(k.name || '').toLowerCase();
+                    const maskedKey = String(k.maskedKey || '').toLowerCase();
+                    const keyRef = String(k.id || '').toLowerCase();
+                    return name.includes(searchTerm)
+                        || maskedKey.includes(searchTerm)
+                        || keyRef.includes(searchTerm);
+                });
             }
             const [field, order] = sortValue.split('-');
             filtered.sort((a, b) => {

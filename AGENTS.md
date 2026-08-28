@@ -16,6 +16,8 @@
 
 - Build traceable images with `scripts/ops/build-image.sh`; verify the `yyn.base_commit` label before rollout.
 - Use `scripts/ops/blue-green-deploy.sh` for dry-run, protected candidate snapshot, health checks, and Nginx upstream preview. It is a lightweight candidate-preflight tool, not automatic active-active blue-green.
+- A candidate container is only an intermediate verification step. When the user explicitly requests updating the local or production container, the workflow must continue through the formal container cutover and verify that the active container runs the requested commit; stopping after candidate startup/health checks is incomplete. Stop at the candidate only when the user explicitly requests validation, preflight, or a candidate-only smoke test.
+- For local updates, preserve the normal local service port and replace or switch the named primary container after candidate verification. For production updates, complete the approved Nginx/upstream handoff, edge-auth/operational adjustments, active-container verification, and rollback-state retention.
 - Candidate `prepare` requires a reachable `REDIS_URL` and explicitly enables multi-worker mode; never validate a production candidate in fallback single-worker mode.
 - Production uses a single-writer handoff: the control worker writes provider configuration, execution workers receive revisioned `provider_config_sync`, and stale provider-state events are rejected.
 - Before traffic switch, verify `/runtime/health` shows complete worker topology and provider config convergence with `pendingWorkerCount=0`.
