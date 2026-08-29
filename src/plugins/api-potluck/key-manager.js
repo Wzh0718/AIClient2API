@@ -120,6 +120,17 @@ export function setKeyStoreSyncPublisher(publisher, options = {}) {
     }
 }
 
+function normalizeEdgeAuthRpmLimit(value) {
+    if (value === undefined || value === null || value === '' || Number(value) === 0) return null;
+    const limit = Number(value);
+    return Number.isInteger(limit) && limit > 0 ? limit : null;
+}
+
+function isValidEdgeAuthRpmLimit(value) {
+    return value === undefined || value === null || value === '' || value === 0
+        || (Number.isInteger(Number(value)) && Number(value) > 0);
+}
+
 export function getKeyRoutingRevision() {
     return keyConfigSyncRevision;
 }
@@ -138,6 +149,7 @@ function keyConfigSnapshot(keyData) {
         queueLimit: Math.max(0, toNumber(keyData.queueLimit)),
         queueTimeoutMs: Math.max(1, toNumber(keyData.queueTimeoutMs) || 300000),
         concurrencyMode: keyData.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
+        edgeAuthRpmLimit: normalizeEdgeAuthRpmLimit(keyData.edgeAuthRpmLimit),
         routingMode: keyData.routingMode || 'pool',
         primaryGroupId: keyData.routingMode === 'auto' ? (keyData.primaryGroupId || null) : null,
         fixedCredential: keyData.routingMode === 'fixed' && keyData.fixedCredential ? { ...keyData.fixedCredential } : null,
@@ -198,6 +210,7 @@ function normalizeKeyConfigRecord(record) {
             queueLimit: Math.max(0, toNumber(record.queueLimit)),
             queueTimeoutMs: Math.max(1, toNumber(record.queueTimeoutMs) || 300000),
             concurrencyMode: record.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
+            edgeAuthRpmLimit: normalizeEdgeAuthRpmLimit(record.edgeAuthRpmLimit),
             ...normalizeKeyRouting(record, { strict: true })
         };
     } catch {
@@ -252,6 +265,7 @@ export function applyKeyStoreSyncEvent(event = {}) {
                 queueLimit: record.queueLimit,
                 queueTimeoutMs: record.queueTimeoutMs,
                 concurrencyMode: record.concurrencyMode,
+                edgeAuthRpmLimit: record.edgeAuthRpmLimit,
                 routingMode: record.routingMode,
                 primaryGroupId: record.primaryGroupId,
                 fixedCredential: record.fixedCredential,
@@ -266,6 +280,7 @@ export function applyKeyStoreSyncEvent(event = {}) {
                 queueLimit: record.queueLimit,
                 queueTimeoutMs: record.queueTimeoutMs,
                 concurrencyMode: record.concurrencyMode,
+                edgeAuthRpmLimit: record.edgeAuthRpmLimit,
                 todayUsage: 0,
                 totalUsage: 0,
                 lastResetDate: getTodayDateString(),
@@ -535,6 +550,7 @@ function normalizeKeyData(keyData = {}) {
         queueLimit: Math.max(0, toNumber(keyData.queueLimit)),
         queueTimeoutMs: Math.max(1, toNumber(keyData.queueTimeoutMs) || 300000),
         concurrencyMode: keyData.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
+        edgeAuthRpmLimit: normalizeEdgeAuthRpmLimit(keyData.edgeAuthRpmLimit),
         todayUsage: toNumber(keyData.todayUsage),
         totalUsage: toNumber(keyData.totalUsage),
         todayPromptTokens: toNumber(keyData.todayPromptTokens),
@@ -2283,9 +2299,11 @@ export async function updateKeyConcurrency(keyId, options = {}) {
     const concurrencyLimit = Number(options.concurrencyLimit);
     const queueLimit = Number(options.queueLimit);
     const queueTimeoutMs = Number(options.queueTimeoutMs);
+    const edgeAuthRpmLimit = normalizeEdgeAuthRpmLimit(options.edgeAuthRpmLimit);
     if (!Number.isInteger(concurrencyLimit) || concurrencyLimit < 0 ||
         !Number.isInteger(queueLimit) || queueLimit < 0 ||
         !Number.isInteger(queueTimeoutMs) || queueTimeoutMs < 1 ||
+        !isValidEdgeAuthRpmLimit(options.edgeAuthRpmLimit) ||
         !['shadow', 'enforce'].includes(options.concurrencyMode || 'shadow')) {
         throw createInvalidKeyRoutingError('并发配置无效');
     }
@@ -2293,7 +2311,8 @@ export async function updateKeyConcurrency(keyId, options = {}) {
         concurrencyLimit,
         queueLimit,
         queueTimeoutMs,
-        concurrencyMode: options.concurrencyMode || 'shadow'
+        concurrencyMode: options.concurrencyMode || 'shadow',
+        edgeAuthRpmLimit
     });
     const targetVersion = markDirty();
     const result = await buildManagementMutationResult(targetVersion, keyData);

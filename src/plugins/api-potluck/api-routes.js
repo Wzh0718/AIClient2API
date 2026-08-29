@@ -104,7 +104,7 @@ const LIST_KEY_FIELDS = [
     'todayReasoningTokens', 'todayTotalTokens', 'todayCachedTokens', 'totalUsage', 'totalPromptTokens',
     'totalCompletionTokens', 'totalReasoningTokens', 'totalTokens', 'totalCachedTokens', 'lastResetDate',
     'lastUsedAt', 'qps', 'tps', 'rpm', 'maxQps', 'maxTps', 'maxRpm', 'routingMode', 'primaryGroupId',
-    'manualLock', 'concurrencyLimit', 'queueLimit', 'queueTimeoutMs', 'concurrencyMode', 'maskedKey',
+    'manualLock', 'concurrencyLimit', 'queueLimit', 'queueTimeoutMs', 'concurrencyMode', 'edgeAuthRpmLimit', 'maskedKey',
     'weeklyUsage', 'weeklyPromptTokens', 'weeklyCompletionTokens', 'weeklyReasoningTokens',
     'weeklyTotalTokens', 'weeklyCachedTokens', 'todayCacheHitRatio', 'weeklyCacheHitRatio',
     'totalCacheHitRatio', 'cost'
@@ -266,6 +266,7 @@ function compactKeyManagementMutationData(keyData = {}) {
         queueLimit: Number(keyData.queueLimit || 0),
         queueTimeoutMs: Number(keyData.queueTimeoutMs || 300000),
         concurrencyMode: keyData.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
+        edgeAuthRpmLimit: Number(keyData.edgeAuthRpmLimit || 0) || null,
         configSyncEpoch: keyData.configSyncEpoch || null,
         configSyncRevision: keyData.configSyncRevision || null,
         routingConfigRevision: keyData.routingConfigRevision || null

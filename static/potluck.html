@@ -1641,6 +1641,22 @@
                     </div>
                     <div class="pool-concurrency-mode-note" id="concurrencyModeNote" role="status"></div>
                 </div>
+                <div class="pool-concurrency-section" id="edgeAuthSection">
+                    <div class="pool-concurrency-heading">
+                        <div>
+                            <div class="pool-concurrency-title"><i class="fas fa-shield-halved" aria-hidden="true"></i> Edge RPM 入口保护</div>
+                            <div class="pool-concurrency-help">适用于所有 active Key；不改变 Node 并发和排队语义。</div>
+                        </div>
+                    </div>
+                    <div class="pool-concurrency-grid">
+                        <div class="form-group">
+                            <label for="edgeAuthRpmLimit">Edge RPM 入口上限</label>
+                            <input id="edgeAuthRpmLimit" class="sort-select" type="number" min="0" step="1" inputmode="numeric" placeholder="0 = 使用默认大阈值">
+                            <small class="pool-concurrency-field-help">0 表示使用默认大阈值；独立于 Node 并发/队列。</small>
+                        </div>
+                    </div>
+                    <div class="pool-concurrency-mode-note" id="edgeAuthRpmNote" role="status">Edge RPM 是独立入口上限，可能早于 Node 限制生效；提高 Node 并发不会自动提高 Edge RPM。</div>
+                </div>
                 <button id="saveRoutingButton" type="button" class="btn btn-primary btn-block" onclick="updateRouting()" aria-busy="false">
                     <i class="fas fa-save"></i> <span id="saveRoutingButtonLabel">保存路由</span>
                 </button>
@@ -3713,6 +3729,8 @@
             note.textContent = mode === 'enforce'
                 ? '达到并发上限后进入短队列；队列满或超过最大等待时间才返回 429。'
                 : 'Shadow 只记录理论并发、排队长度和等待时间，不会拦截请求。';
+            const edgeNote = document.getElementById('edgeAuthRpmNote');
+            if (edgeNote) edgeNote.textContent = 'Edge RPM 是独立入口上限，可能早于 Node 限制生效；提高 Node 并发不会自动提高 Edge RPM。';
         }
 
         function readPoolConcurrencyForm() {
@@ -3730,11 +3748,14 @@
             if (queueLimit === null) return null;
             const queueTimeoutSeconds = readInteger('queueTimeoutSeconds', '最大排队等待', 1);
             if (queueTimeoutSeconds === null) return null;
+            const edgeAuthRpmLimit = readInteger('edgeAuthRpmLimit', 'Edge RPM', 0);
+            if (edgeAuthRpmLimit === null) return null;
             return {
                 concurrencyLimit,
                 queueLimit,
                 queueTimeoutMs: queueTimeoutSeconds * 1000,
-                concurrencyMode: document.getElementById('concurrencyMode')?.value === 'enforce' ? 'enforce' : 'shadow'
+                concurrencyMode: document.getElementById('concurrencyMode')?.value === 'enforce' ? 'enforce' : 'shadow',
+                edgeAuthRpmLimit
             };
         }
 
@@ -3749,6 +3770,7 @@
             document.getElementById('concurrencyLimit').value = Number(currentKey?.concurrencyLimit || 0);
             document.getElementById('queueLimit').value = Number(currentKey?.queueLimit || 0);
             document.getElementById('queueTimeoutSeconds').value = Math.max(1, Math.round(Number(currentKey?.queueTimeoutMs || 300000) / 1000));
+            document.getElementById('edgeAuthRpmLimit').value = Number(currentKey?.edgeAuthRpmLimit || 0);
             try {
                 const result = await apiRequest(`${API_BASE}/credential-groups/options`);
                 if (!result?.success) {

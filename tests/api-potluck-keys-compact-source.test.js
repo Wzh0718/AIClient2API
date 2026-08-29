@@ -2,6 +2,17 @@ import fs from 'fs';
 import path from 'path';
 
 describe('api potluck keys list compact source', () => {
+    test('exposes edge RPM alongside Node concurrency and warns that limits are independent', () => {
+        const html = fs.readFileSync(path.join(process.cwd(), 'static/potluck.html'), 'utf8').replace(/\r\n/g, '\n');
+        const source = fs.readFileSync(path.join(process.cwd(), 'src/plugins/api-potluck/key-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(html).toContain('id="edgeAuthRpmLimit"');
+        expect(html).toContain('edgeAuthRpmLimit');
+        expect(html).toContain('Edge RPM');
+        expect(html).toContain('Edge RPM 是独立入口上限');
+        expect(source).toContain('edgeAuthRpmLimit');
+    });
+
     test('key search includes the visible masked key as well as name and hashed reference', () => {
         const html = fs.readFileSync(path.join(process.cwd(), 'static/potluck.html'), 'utf8').replace(/\r\n/g, '\n');
 
