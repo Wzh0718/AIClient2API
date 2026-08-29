@@ -14,7 +14,7 @@ export function hashKeyId(keyId) {
     return crypto.createHash('sha256').update(String(keyId)).digest('hex').slice(0, 32);
 }
 
-export function extractApiKey(headers = {}) {
+export function extractApiKey(headers = {}, originalUri = '') {
     const authorization = headers.authorization || headers.Authorization;
     if (typeof authorization === 'string' && /^Bearer\s+\S+$/i.test(authorization.trim())) {
         return authorization.trim().replace(/^Bearer\s+/i, '');
@@ -26,6 +26,15 @@ export function extractApiKey(headers = {}) {
     for (const name of ['x-edge-query-key', 'x-edge-query-api-key']) {
         const value = headers[name] || headers[name.toLowerCase()];
         if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    if (typeof originalUri === 'string' && originalUri) {
+        try {
+            const parsed = new URL(originalUri, 'http://edge-auth.invalid');
+            for (const name of ['key', 'api_key']) {
+                const value = parsed.searchParams.get(name);
+                if (value && value.trim()) return value.trim();
+            }
+        } catch {}
     }
     return null;
 }
@@ -138,7 +147,7 @@ export class EdgeAuthService {
     }
 
     async authorize({ headers = {}, clientIp = 'unknown' } = {}) {
-        const apiKey = extractApiKey(headers);
+        const apiKey = extractApiKey(headers, headers['x-edge-original-uri'] || headers['X-Edge-Original-URI']);
         if (!apiKey) return { allowed: false, statusCode: 401, reason: 'missing_key' };
         if (!apiKey.startsWith(KEY_PREFIX)) return { allowed: false, statusCode: 401, reason: 'invalid_format' };
 

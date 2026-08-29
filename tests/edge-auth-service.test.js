@@ -92,6 +92,12 @@ describe('edge auth service', () => {
         expect(extractApiKey({ authorization: 'Basic abc' })).toBeNull();
     });
 
+    test('extracts legacy query API keys from the original request URI', () => {
+        expect(extractApiKey({}, '/gemini-antigravity/v1beta/models/foo:generateContent?key=maki_query')).toBe('maki_query');
+        expect(extractApiKey({}, '/v1/chat/completions?api_key=maki_api_query')).toBe('maki_api_query');
+        expect(extractApiKey({}, '/v1/models?key=')).toBeNull();
+    });
+
     test('rejects missing, unknown, and disabled keys before admission', async () => {
         const redis = new FakeRedis();
         const service = new EdgeAuthService({ redis, ipEnforce: false });
