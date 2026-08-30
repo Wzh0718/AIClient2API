@@ -2,6 +2,13 @@ import fs from 'fs';
 import path from 'path';
 
 describe('api potluck keys list compact source', () => {
+    test('invalidates the cached overview after successful management mutations', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'src/plugins/api-potluck/api-routes.js'), 'utf8').replace(/\r\n/g, '\n');
+        const mutationHandler = source.match(/function sendManagementMutationResponse\([\s\S]*?\n}\n/);
+
+        expect(mutationHandler?.[0]).toContain('clearStatsCache();');
+    });
+
     test('exposes edge RPM alongside Node concurrency and warns that limits are independent', () => {
         const html = fs.readFileSync(path.join(process.cwd(), 'static/potluck.html'), 'utf8').replace(/\r\n/g, '\n');
         const source = fs.readFileSync(path.join(process.cwd(), 'src/plugins/api-potluck/key-manager.js'), 'utf8').replace(/\r\n/g, '\n');

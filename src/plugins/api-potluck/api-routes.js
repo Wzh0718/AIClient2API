@@ -243,6 +243,7 @@ function sendManagementMutationResponse(res, {
     if (responseData && typeof responseData === 'object') {
         delete responseData.persistencePending;
     }
+    clearStatsCache();
     sendJson(res, persistencePending ? 202 : successStatusCode, {
         success: true,
         persistencePending,
