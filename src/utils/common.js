@@ -2572,7 +2572,7 @@ export async function handleModelListRequest(req, res, service, endpointType, CO
         if (CONFIG.MODEL_PROVIDER === MODEL_PROVIDER.AUTO && providerPoolManager) {
             logger.info(`[ModelList] Aggregating models for 'auto' mode...`);
             clientModelList = await getCachedModelList(
-                `auto:${endpointType}`,
+                `auto:${endpointType}:${CONFIG.providerConfigRevision || CONFIG.configRevision || ''}`,
                 () => providerPoolManager.getAllAvailableModels(endpointType),
                 { ttlMs: Number(CONFIG.MODEL_LIST_CACHE_TTL_MS || 5000) }
             );
@@ -2602,7 +2602,7 @@ export async function handleModelListRequest(req, res, service, endpointType, CO
 
             // 1. Get the model list in the backend's native format.
             const nativeModelList = await getCachedModelList(
-                `${toProvider}:${endpointType}`,
+                `${toProvider}:${endpointType}:${CONFIG.uuid || CONFIG.providerUuid || ''}:${CONFIG.providerConfigRevision || CONFIG.configRevision || ''}`,
                 () => resolvedService.listModels(),
                 { ttlMs: Number(CONFIG.MODEL_LIST_CACHE_TTL_MS || 5000) }
             );

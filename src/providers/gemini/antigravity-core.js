@@ -1008,6 +1008,8 @@ export class AntigravityApiService {
         this.initializationPromise = null;
         this.initializationFailure = null;
         this.initializationFailureUntil = 0;
+        this.modelProbeCache = null;
+        this.modelProbePromise = null;
 
         this.config = config;
         this.host = config.HOST;
@@ -1202,7 +1204,7 @@ export class AntigravityApiService {
         // 仅执行基础的凭证加载
         await this.loadCredentials();
 
-        this.projectId = await this.discoverProjectAndModels();
+        this.projectId = await this.discoverProjectAndModels(false);
 
         this.isInitialized = true;
         logger.info(`[Antigravity] Initialization complete. Project ID: ${this.projectId}`);
@@ -1253,6 +1255,7 @@ export class AntigravityApiService {
                     logger.info('[Antigravity Auth] Token expiring soon or force refresh requested. Refreshing token...');
                     const { credentials: newCredentials } = await this.authClient.refreshAccessToken();
                     this.authClient.setCredentials(newCredentials);
+                    this.invalidateModelProbeCache();
                     await this._saveCredentialsToFile(credPath, newCredentials);
                     logger.info(`[Antigravity Auth] Token refreshed and saved to ${credPath} successfully.`);
 
@@ -1265,6 +1268,7 @@ export class AntigravityApiService {
                     logger.info(`[Antigravity Auth] No access token or refresh token. Starting new authentication flow...`);
                     const newTokens = await this.getNewToken(credPath);
                     this.authClient.setCredentials(newTokens);
+                    this.invalidateModelProbeCache();
                     logger.info('[Antigravity Auth] New token obtained and loaded into memory.');
                     
                     // 认证成功，重置状态
@@ -1354,7 +1358,7 @@ export class AntigravityApiService {
         }
     }
 
-    async discoverProjectAndModels() {
+    async discoverProjectAndModels(fetchModels = true) {
         const configuredProjectId = this.projectId;
         const entitlementStartedAt = Date.now();
         logger.info(configuredProjectId
@@ -1418,13 +1422,13 @@ export class AntigravityApiService {
                 this.projectId = loadResponse.cloudaicompanionProject;
 
                 // 获取可用模型
-                await this.fetchAvailableModels();
+                if (fetchModels) await this.fetchAvailableModels();
                 return loadResponse.cloudaicompanionProject;
             }
 
             if (configuredProjectId) {
                 this.projectId = configuredProjectId;
-                await this.fetchAvailableModels();
+                if (fetchModels) await this.fetchAvailableModels();
                 return configuredProjectId;
             }
 
@@ -1460,7 +1464,7 @@ export class AntigravityApiService {
             logger.info(`[Antigravity] Onboarded and discovered Project ID: ${discoveredProjectId}`);
             this.projectId = discoveredProjectId;
             // 获取可用模型
-            await this.fetchAvailableModels();
+            if (fetchModels) await this.fetchAvailableModels();
             return discoveredProjectId;
         } catch (error) {
             logger.info(`[Gemini Diagnostics] ${JSON.stringify({
@@ -1476,7 +1480,7 @@ export class AntigravityApiService {
             if (configuredProjectId) {
                 logger.warn(`[Antigravity] Entitlement probe failed; continuing with configured Project ID: ${configuredProjectId}`);
                 this.projectId = configuredProjectId;
-                await this.fetchAvailableModels();
+                if (fetchModels) await this.fetchAvailableModels();
                 return configuredProjectId;
             }
             logger.info('[Antigravity] Falling back to generated Project ID as last resort...');
@@ -1484,12 +1488,51 @@ export class AntigravityApiService {
             logger.info(`[Antigravity] Generated fallback Project ID: ${fallbackProjectId}`);
             this.projectId = fallbackProjectId;
             // 获取可用模型
-            await this.fetchAvailableModels();
+            if (fetchModels) await this.fetchAvailableModels();
             return fallbackProjectId;
         }
     }
 
+    _getModelProbeCacheIdentity() {
+        const token = this.authClient?.credentials?.access_token || '';
+        const tokenHash = crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 16);
+        const configRevision = this.config?.providerConfigRevision || this.config?.configRevision || '';
+        return [this.uuid || '', this.projectId || '', configRevision, tokenHash, (this.baseURLs || []).join('|')].join(':');
+    }
+
+    _getModelProbeCacheTtlMs() {
+        const configured = Number(this.config?.MODEL_LIST_CACHE_TTL_MS ?? 300000);
+        return Math.min(Math.max(1000, Number.isFinite(configured) ? configured : 300000), 900000);
+    }
+
+    invalidateModelProbeCache() {
+        this.modelProbeCache = null;
+    }
+
     async fetchAvailableModels() {
+        const identity = this._getModelProbeCacheIdentity();
+        const now = Date.now();
+        if (this.modelProbeCache?.identity === identity && this.modelProbeCache.expiresAt > now) {
+            this.availableModels = [...this.modelProbeCache.models];
+            return;
+        }
+        if (this.modelProbePromise) return this.modelProbePromise;
+
+        this.modelProbePromise = this._fetchAvailableModelsOnce()
+            .then(() => {
+                this.modelProbeCache = {
+                    identity,
+                    models: [...this.availableModels],
+                    expiresAt: Date.now() + this._getModelProbeCacheTtlMs()
+                };
+            })
+            .finally(() => {
+                this.modelProbePromise = null;
+            });
+        return this.modelProbePromise;
+    }
+
+    async _fetchAvailableModelsOnce() {
         const modelListStartedAt = Date.now();
         logger.info('[Antigravity] Fetching available models...');
 
@@ -1553,6 +1596,8 @@ export class AntigravityApiService {
 
     async listModels() {
         if (!this.isInitialized) await this.initialize();
+
+        if (!this.availableModels.length) await this.fetchAvailableModels();
 
         const now = Math.floor(Date.now() / 1000);
         const formattedModels = this.availableModels.map(modelId => {

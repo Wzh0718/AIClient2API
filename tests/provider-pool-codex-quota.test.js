@@ -587,6 +587,50 @@ describe('provider pool Codex token quota', () => {
         expect(selected).toBeNull();
     });
 
+    test('memoizes an exhausted Codex 5.3 pool for the short snapshot TTL', async () => {
+        writeCodexUsageCache([
+            {
+                uuid: 'aaa-codex-over', success: true,
+                usage: { summary: { plan: 'Pro' }, items: [
+                    { id: 'primary_window', percent: 20, unit: 'percent' },
+                    { id: 'secondary_window', percent: 20, unit: 'percent' },
+                    { id: 'additional_gpt_5_3_codex_spark_primary_window', percent: 91, unit: 'percent' },
+                    { id: 'additional_gpt_5_3_codex_spark_secondary_window', percent: 91, unit: 'percent' }
+                ] }
+            },
+            {
+                uuid: 'zzz-codex-ok', success: true,
+                usage: { summary: { plan: 'Plus' }, items: [
+                    { id: 'primary_window', percent: 20, unit: 'percent' },
+                    { id: 'secondary_window', percent: 20, unit: 'percent' },
+                    { id: 'additional_gpt_5_3_codex_spark_primary_window', percent: 91, unit: 'percent' },
+                    { id: 'additional_gpt_5_3_codex_spark_secondary_window', percent: 91, unit: 'percent' }
+                ] }
+            }
+        ]);
+
+        const manager = createQuotaPoolManager();
+        await expect(manager.selectProvider('openai-codex-oauth', 'gpt-5.3-codex-spark')).rejects.toMatchObject({ status: 429 });
+        const firstSnapshot = manager._codexPoolExhaustedSnapshots.get('openai-codex-oauth:codex53');
+        expect(firstSnapshot).toBeDefined();
+
+        await expect(manager.selectProvider('openai-codex-oauth', 'gpt-5.3-codex-spark')).rejects.toMatchObject({ status: 429 });
+        expect(manager._codexPoolExhaustedSnapshots.get('openai-codex-oauth:codex53')).toBe(firstSnapshot);
+    });
+
+    test('does not persist unchanged quota or cooldown state repeatedly', () => {
+        const manager = createQuotaPoolManager();
+        const provider = manager.providerStatus['openai-codex-oauth'][0].config;
+        jest.spyOn(manager, '_debouncedSave').mockImplementation(() => {});
+
+        manager.markCodexQuotaBucketUnhealthy('openai-codex-oauth', provider, 'codex53', 'exhausted', '2026-09-01T00:00:00.000Z');
+        manager.markCodexQuotaBucketUnhealthy('openai-codex-oauth', provider, 'codex53', 'exhausted', '2026-09-01T00:00:00.000Z');
+        manager.markCodexRateLimitCooldown('openai-codex-oauth', provider, 'codex53', '429', '2026-09-01T00:00:00.000Z');
+        manager.markCodexRateLimitCooldown('openai-codex-oauth', provider, 'codex53', '429', '2026-09-01T00:00:00.000Z');
+
+        expect(manager._debouncedSave).toHaveBeenCalledTimes(2);
+    });
+
     test('falls back to GPT-5.4 Mini when Codex 5.3 Spark has no selectable provider', async () => {
         writeCodexUsageCache([
             { uuid: 'aaa-codex-over', success: true, usage: { summary: { plan: 'Pro' }, items: [] } },

@@ -628,6 +628,7 @@ export class ProviderPoolManager {
         this._selectionLocks = {};
         this._isSelecting = {}; // 同步标志位锁
         this._codexStickyHotStats = new Map();
+        this._codexPoolExhaustedSnapshots = new Map();
         this._providerSelectionLoadStats = new Map();
         this._poolKeySchedulers = new Map();
         this._geminiElasticQueue = {
@@ -2719,6 +2720,47 @@ export class ProviderPoolManager {
     }
 
     _filterCodexProvidersByTokenQuota(providerType, providers, requestedModel = null, selectionDiagnostics = null) {
+        const bucket = resolveCodexQuotaBucket(
+            requestedModel,
+            toStringArray(this.globalConfig?.CODEX_53_QUOTA_MODEL_PATTERNS || this.globalConfig?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS)
+        );
+        const snapshotKey = `${providerType}:${bucket}`;
+        const getStateFingerprint = () => providers.map(provider => {
+            const config = provider.config || {};
+            const quota = config.codexQuotaHealth?.[bucket] || {};
+            const cooldown = config.codexRateLimitCooldown?.[bucket] || {};
+            return [
+                config.uuid || provider.uuid || '',
+                config.isHealthy,
+                config.isDisabled,
+                config.needsRefresh,
+                quota.isHealthy,
+                quota.scheduledRecoveryTime || '',
+                quota.updatedAt || '',
+                cooldown.isCoolingDown,
+                cooldown.scheduledRecoveryTime || ''
+            ].join('|');
+        }).sort().join('||');
+        const stateFingerprint = getStateFingerprint();
+        const cachedExhaustion = this._codexPoolExhaustedSnapshots.get(snapshotKey);
+        const snapshotTtlMs = Math.min(Math.max(500, Number(this.globalConfig?.CODEX_POOL_SNAPSHOT_TTL_MS ?? 3000) || 3000), 15000);
+        if (cachedExhaustion
+            && cachedExhaustion.expiresAt > Date.now()
+            && cachedExhaustion.providerConfigRevision === this.providerConfigRevision
+            && cachedExhaustion.stateFingerprint === stateFingerprint) {
+            const error = new Error(cachedExhaustion.message);
+            error.status = 429;
+            error.code = 429;
+            error.filterReasons = { ...cachedExhaustion.filterReasons };
+            if (selectionDiagnostics) {
+                selectionDiagnostics.filterReasons = {
+                    ...(selectionDiagnostics.filterReasons || {}),
+                    ...cachedExhaustion.filterReasons
+                };
+            }
+            throw error;
+        }
+
         let limitedCount = 0;
         const allowed = [];
         const filterReasons = {};
@@ -2727,10 +2769,6 @@ export class ProviderPoolManager {
         };
         let updatedLastKnownPlan = false;
         const usageCache = readFreshUsageCacheSync();
-        const bucket = resolveCodexQuotaBucket(
-            requestedModel,
-            toStringArray(this.globalConfig?.CODEX_53_QUOTA_MODEL_PATTERNS || this.globalConfig?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS)
-        );
         const now = Date.now();
 
         for (const provider of providers) {
@@ -2805,8 +2843,17 @@ export class ProviderPoolManager {
             error.status = 429;
             error.code = 429;
             error.filterReasons = filterReasons;
+            this._codexPoolExhaustedSnapshots.set(snapshotKey, {
+                expiresAt: Date.now() + snapshotTtlMs,
+                providerConfigRevision: this.providerConfigRevision,
+                stateFingerprint: getStateFingerprint(),
+                message,
+                filterReasons: { ...filterReasons }
+            });
             throw error;
         }
+
+        this._codexPoolExhaustedSnapshots.delete(snapshotKey);
 
         if (updatedLastKnownPlan) {
             this._debouncedSave(providerType);
@@ -4103,12 +4150,19 @@ export class ProviderPoolManager {
             }
             provider.config.codexQuotaHealth = normalizedQuotaHealth;
         }
+        const recoveryIso = recoveryTime ? new Date(recoveryTime).toISOString() : null;
+        const existingBucket = provider.config.codexQuotaHealth[bucket];
+        if (existingBucket?.isHealthy === false
+            && (existingBucket.lastErrorMessage || null) === (errorMessage || null)
+            && (existingBucket.scheduledRecoveryTime || null) === recoveryIso) {
+            return;
+        }
         provider.config.codexQuotaHealth[bucket] = {
             ...(provider.config.codexQuotaHealth[bucket] || {}),
             isHealthy: false,
             lastErrorTime: new Date().toISOString(),
             lastErrorMessage: errorMessage || null,
-            scheduledRecoveryTime: recoveryTime ? new Date(recoveryTime).toISOString() : null,
+            scheduledRecoveryTime: recoveryIso,
             updatedAt: new Date().toISOString()
         };
         provider.config.lastUsed = new Date().toISOString();
@@ -4137,12 +4191,19 @@ export class ProviderPoolManager {
             }
             provider.config.codexRateLimitCooldown = normalizedCooldownState;
         }
+        const recoveryIso = recoveryTime ? new Date(recoveryTime).toISOString() : null;
+        const existingBucket = provider.config.codexRateLimitCooldown[bucket];
+        if (existingBucket?.isCoolingDown === true
+            && (existingBucket.lastErrorMessage || null) === (errorMessage || null)
+            && (existingBucket.scheduledRecoveryTime || null) === recoveryIso) {
+            return;
+        }
         provider.config.codexRateLimitCooldown[bucket] = {
             ...(provider.config.codexRateLimitCooldown[bucket] || {}),
             isCoolingDown: true,
             lastErrorTime: new Date().toISOString(),
             lastErrorMessage: errorMessage || null,
-            scheduledRecoveryTime: recoveryTime ? new Date(recoveryTime).toISOString() : null,
+            scheduledRecoveryTime: recoveryIso,
             source: 'upstream_429'
         };
         provider.config.lastUsed = new Date().toISOString();

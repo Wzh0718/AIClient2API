@@ -160,6 +160,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         CODEX_RATE_LIMIT_RETRY_DELAY_MS: 800,
         CODEX_RATE_LIMIT_RETRY_MAX_DELAY_MS: 30000,
         CODEX_RETRY_MAX_DURATION_MS: 300000,
+        CODEX_POOL_SNAPSHOT_TTL_MS: 3000,
         MODEL_LIST_CACHE_TTL_MS: 300000,
         API_POTLUCK_PERSIST_INTERVAL: 30_000,
         API_POTLUCK_MAX_DIRTY_AGE: 60_000,

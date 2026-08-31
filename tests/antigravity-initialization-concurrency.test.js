@@ -26,6 +26,60 @@ const createService = () => {
 };
 
 describe('Antigravity initialization lifecycle', () => {
+    test('caches provider model probes and re-probes after token identity changes', async () => {
+        const service = createService();
+        service.baseURLs = ['https://example.test'];
+        service.projectId = 'project-1';
+        service.config = { MODEL_LIST_CACHE_TTL_MS: 60000 };
+        service.authClient = {
+            credentials: { access_token: 'token-a' },
+            request: jest.fn().mockResolvedValue({ data: { models: { 'gemini-3.1-flash-image': {} } } })
+        };
+
+        await service.fetchAvailableModels();
+        await service.fetchAvailableModels();
+        expect(service.authClient.request).toHaveBeenCalledTimes(1);
+
+        service.authClient.credentials.access_token = 'token-b';
+        await service.fetchAvailableModels();
+        expect(service.authClient.request).toHaveBeenCalledTimes(2);
+    });
+
+    test('coalesces concurrent provider model probes', async () => {
+        const service = createService();
+        service.baseURLs = ['https://example.test'];
+        service.projectId = 'project-1';
+        service.config = { MODEL_LIST_CACHE_TTL_MS: 60000 };
+        let release;
+        service.authClient = {
+            credentials: { access_token: 'token-a' },
+            request: jest.fn(() => new Promise(resolve => {
+                release = () => resolve({ data: { models: { 'gemini-3.1-flash-image': {} } } });
+            }))
+        };
+
+        const first = service.fetchAvailableModels();
+        const second = service.fetchAvailableModels();
+        await Promise.resolve();
+        expect(service.authClient.request).toHaveBeenCalledTimes(1);
+        release();
+        await Promise.all([first, second]);
+    });
+
+    test('does not probe models during provider initialization', async () => {
+        const service = createService();
+        service.loadCredentials = jest.fn(async () => {});
+        service.discoverProjectAndModels = jest.fn(async fetchModels => {
+            expect(fetchModels).toBe(false);
+            return 'configured-project';
+        });
+        service.fetchAvailableModels = jest.fn(async () => {});
+
+        await service._initializeOnce();
+        expect(service.fetchAvailableModels).not.toHaveBeenCalled();
+        expect(service.isInitialized).toBe(true);
+    });
+
     test('shares one initialization promise across concurrent callers', async () => {
         const service = createService();
         let resolveDiscovery;
