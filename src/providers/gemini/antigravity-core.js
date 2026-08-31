@@ -1358,7 +1358,105 @@ export class AntigravityApiService {
         }
     }
 
+    _getEntitlementCacheIdentity() {
+        const token = this.authClient?.credentials?.access_token || '';
+        const tokenHash = crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 16);
+        const revision = this.config?.providerConfigRevision || this.config?.configRevision || '';
+        return [this.uuid || '', this.projectId || '', revision, tokenHash, (this.baseURLs || []).join('|')].join(':');
+    }
+
+    _getEntitlementCacheTtlMs() {
+        const configured = Number(this.config?.ANTIGRAVITY_ENTITLEMENT_CACHE_TTL_MS ?? 300000);
+        return Math.min(Math.max(5000, Number.isFinite(configured) ? configured : 300000), 900000);
+    }
+
+    async _readSharedEntitlementSnapshot(identity) {
+        const coordination = getProviderPoolManager()?.coordination;
+        if (!coordination?.getRuntimeSnapshot) return null;
+        try {
+            const snapshot = await coordination.getRuntimeSnapshot(`antigravity-entitlement:${identity}`);
+            if (!snapshot || snapshot.identity !== identity || snapshot.expiresAt <= Date.now()) return null;
+            return snapshot;
+        } catch {
+            return null;
+        }
+    }
+
+    async _writeSharedEntitlementSnapshot(identity, value) {
+        const coordination = getProviderPoolManager()?.coordination;
+        if (!coordination?.setRuntimeSnapshot) return;
+        try {
+            const ttlMs = this._getEntitlementCacheTtlMs();
+            await coordination.setRuntimeSnapshot(`antigravity-entitlement:${identity}`, {
+                ...value,
+                identity,
+                expiresAt: Date.now() + ttlMs,
+                ttlMs
+            }, { ttlMs });
+        } catch {
+            // Shared cache is best effort; the local initialization result remains authoritative.
+        }
+    }
+
     async discoverProjectAndModels(fetchModels = true) {
+        const identity = this._getEntitlementCacheIdentity();
+        const cached = await this._readSharedEntitlementSnapshot(identity);
+        if (cached?.projectId) {
+            this.projectId = cached.projectId;
+            this.tierId = cached.tierId || this.tierId;
+            this.accountEmail = cached.accountEmail || this.accountEmail;
+            logger.info(`[Gemini Diagnostics] ${JSON.stringify({
+                event: 'provider_entitlement_probe',
+                providerUuidHash: hashDiagnosticIdentifier(this.uuid),
+                workerId: process.env.RUNTIME_WORKER_ID || 'standalone',
+                durationMs: 0,
+                success: true,
+                cached: true,
+                cacheScope: 'shared',
+                deduplicated: true,
+                configuredProject: Boolean(this.projectId)
+            })}`);
+            if (fetchModels && !this.availableModels.length) await this.fetchAvailableModels();
+            return this.projectId;
+        }
+
+        const coordination = getProviderPoolManager()?.coordination;
+        const scope = `antigravity-entitlement:${identity}`;
+        let lockOwner = null;
+        if (coordination?.acquireRuntimeSnapshotLock) {
+            try { lockOwner = await coordination.acquireRuntimeSnapshotLock(scope, { ttlMs: 15_000 }); } catch {}
+            if (!lockOwner) {
+                for (let attempt = 0; attempt < 5; attempt += 1) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    const waited = await this._readSharedEntitlementSnapshot(identity);
+                    if (waited?.projectId) {
+                        this.projectId = waited.projectId;
+                        this.tierId = waited.tierId || this.tierId;
+                        this.accountEmail = waited.accountEmail || this.accountEmail;
+                        logger.info(`[Gemini Diagnostics] ${JSON.stringify({ event: 'provider_entitlement_probe', providerUuidHash: hashDiagnosticIdentifier(this.uuid), workerId: process.env.RUNTIME_WORKER_ID || 'standalone', durationMs: 0, success: true, cached: true, cacheScope: 'shared', deduplicated: true, configuredProject: Boolean(this.projectId) })}`);
+                        if (fetchModels && !this.availableModels.length) await this.fetchAvailableModels();
+                        return this.projectId;
+                    }
+                }
+            }
+        }
+
+        try {
+            const result = await this._discoverProjectAndModelsOnce(fetchModels);
+            await this._writeSharedEntitlementSnapshot(identity, {
+                projectId: result,
+                tierId: this.tierId || null,
+                accountEmail: this.accountEmail || null
+            });
+            return result;
+        } finally {
+            if (lockOwner && coordination?.releaseRuntimeSnapshotLock) {
+                coordination.releaseRuntimeSnapshotLock(scope, lockOwner).catch(() => {});
+            }
+        }
+    }
+
+    async _discoverProjectAndModelsOnce(fetchModels = true) {
         const configuredProjectId = this.projectId;
         const entitlementStartedAt = Date.now();
         logger.info(configuredProjectId
@@ -1386,6 +1484,8 @@ export class AntigravityApiService {
                 durationMs: Date.now() - entitlementStartedAt,
                 success: true,
                 cached: false,
+                cacheScope: 'upstream',
+                deduplicated: false,
                 configuredProject: Boolean(configuredProjectId)
             })}`);
             
@@ -1474,6 +1574,8 @@ export class AntigravityApiService {
                 durationMs: Date.now() - entitlementStartedAt,
                 success: false,
                 cached: false,
+                cacheScope: 'upstream',
+                deduplicated: false,
                 errorClass: classifyProviderInitializationError(error)
             })}`);
             logger.error('[Antigravity] Failed to discover Project ID:', error.response?.data || error.message);

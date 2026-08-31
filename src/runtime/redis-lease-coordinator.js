@@ -446,6 +446,34 @@ if redis.call('GET', key) ~= ARGV[2] then return 0 end
 return redis.call('DEL', key)
 `;
 
+const GET_RUNTIME_SNAPSHOT_SCRIPT = `
+local key = KEYS[1] .. ':runtime-snapshot:' .. ARGV[1]
+return redis.call('GET', key)
+`;
+
+const SET_RUNTIME_SNAPSHOT_SCRIPT = `
+local key = KEYS[1] .. ':runtime-snapshot:' .. ARGV[1]
+redis.call('SET', key, ARGV[2], 'PX', tonumber(ARGV[3]))
+return 1
+`;
+
+const DELETE_RUNTIME_SNAPSHOT_SCRIPT = `
+local key = KEYS[1] .. ':runtime-snapshot:' .. ARGV[1]
+return redis.call('DEL', key)
+`;
+
+const ACQUIRE_RUNTIME_SNAPSHOT_LOCK_SCRIPT = `
+local key = KEYS[1] .. ':runtime-snapshot-lock:' .. ARGV[1]
+local acquired = redis.call('SET', key, ARGV[2], 'PX', tonumber(ARGV[3]), 'NX')
+return acquired and ARGV[2] or nil
+`;
+
+const RELEASE_RUNTIME_SNAPSHOT_LOCK_SCRIPT = `
+local key = KEYS[1] .. ':runtime-snapshot-lock:' .. ARGV[1]
+if redis.call('GET', key) ~= ARGV[2] then return 0 end
+return redis.call('DEL', key)
+`;
+
 const ACQUIRE_IMAGE_CAPACITY_SCRIPT = `
 local leases_key = KEYS[1] .. ':image-capacity:leases'
 local expiry_key = KEYS[1] .. ':image-capacity:expiry'
@@ -956,6 +984,59 @@ export class RedisLeaseCoordinator {
         this.renewTimers.delete(leaseId);
         this.activeLeases.delete(leaseId);
         return Number(await this._eval('release-provider-lease', RELEASE_SCRIPT, [leaseId])) === 1;
+    }
+
+    async getRuntimeSnapshot(scope) {
+        const normalizedScope = String(scope || '').trim();
+        if (!normalizedScope) return null;
+        const result = await this._eval('get-runtime-snapshot', GET_RUNTIME_SNAPSHOT_SCRIPT, [
+            hashAffinityKey(normalizedScope)
+        ]);
+        if (!result) return null;
+        try {
+            return JSON.parse(result);
+        } catch {
+            return null;
+        }
+    }
+
+    async setRuntimeSnapshot(scope, value, { ttlMs = 3000 } = {}) {
+        const normalizedScope = String(scope || '').trim();
+        if (!normalizedScope) return false;
+        const safeTtlMs = Math.max(500, Math.min(15_000, Number(ttlMs) || 3000));
+        await this._eval('set-runtime-snapshot', SET_RUNTIME_SNAPSHOT_SCRIPT, [
+            hashAffinityKey(normalizedScope),
+            JSON.stringify(value || {}),
+            String(safeTtlMs)
+        ]);
+        return true;
+    }
+
+    async deleteRuntimeSnapshot(scope) {
+        const normalizedScope = String(scope || '').trim();
+        if (!normalizedScope) return false;
+        return Number(await this._eval('delete-runtime-snapshot', DELETE_RUNTIME_SNAPSHOT_SCRIPT, [
+            hashAffinityKey(normalizedScope)
+        ])) === 1;
+    }
+
+    async acquireRuntimeSnapshotLock(scope, { ttlMs = 1500 } = {}) {
+        const normalizedScope = String(scope || '').trim();
+        if (!normalizedScope) return null;
+        const owner = `${this.workerId}:${randomUUID()}`;
+        const safeTtlMs = Math.max(500, Math.min(15_000, Number(ttlMs) || 1500));
+        const result = await this._eval('acquire-runtime-snapshot-lock', ACQUIRE_RUNTIME_SNAPSHOT_LOCK_SCRIPT, [
+            hashAffinityKey(normalizedScope), owner, String(safeTtlMs)
+        ]);
+        return result ? owner : null;
+    }
+
+    async releaseRuntimeSnapshotLock(scope, owner) {
+        const normalizedScope = String(scope || '').trim();
+        if (!normalizedScope || !owner) return false;
+        return Number(await this._eval('release-runtime-snapshot-lock', RELEASE_RUNTIME_SNAPSHOT_LOCK_SCRIPT, [
+            hashAffinityKey(normalizedScope), String(owner)
+        ])) === 1;
     }
 
     async acquirePotluckKeyLease(keyId, { maxConcurrency = 0, ttlMs = this.leaseTtlMs } = {}) {

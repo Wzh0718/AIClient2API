@@ -629,6 +629,7 @@ export class ProviderPoolManager {
         this._isSelecting = {}; // 同步标志位锁
         this._codexStickyHotStats = new Map();
         this._codexPoolExhaustedSnapshots = new Map();
+        this._codexPoolSnapshotLocks = new Map();
         this._providerSelectionLoadStats = new Map();
         this._poolKeySchedulers = new Map();
         this._geminiElasticQueue = {
@@ -1759,6 +1760,64 @@ export class ProviderPoolManager {
         return candidates;
     }
 
+    _getCodexPoolSnapshotScope(providerType, bucket) {
+        return `codex-pool:${providerType}:${bucket}:${this.providerConfigRevision}`;
+    }
+
+    _getCodexPoolStateFingerprint(providers, bucket) {
+        return providers.map(provider => {
+            const config = provider.config || {};
+            const quota = config.codexQuotaHealth?.[bucket] || {};
+            const cooldown = config.codexRateLimitCooldown?.[bucket] || {};
+            return [
+                config.uuid || provider.uuid || '',
+                config.isHealthy === true,
+                config.isDisabled === true,
+                config.needsRefresh === true,
+                quota.isHealthy === false,
+                quota.scheduledRecoveryTime || '',
+                cooldown.isCoolingDown === true,
+                cooldown.scheduledRecoveryTime || ''
+            ].join('|');
+        }).sort().join('||');
+    }
+
+    async _hydrateCodexPoolSnapshot(providerType, providers, requestedModel) {
+        if (!this.coordination?.getRuntimeSnapshot || !providers?.length) return;
+        const bucket = resolveCodexQuotaBucket(
+            requestedModel,
+            toStringArray(this.globalConfig?.CODEX_53_QUOTA_MODEL_PATTERNS || this.globalConfig?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS)
+        );
+        const scope = this._getCodexPoolSnapshotScope(providerType, bucket);
+        try {
+            const snapshot = await this.coordination.getRuntimeSnapshot(scope);
+            if (!snapshot || snapshot.providerConfigRevision !== this.providerConfigRevision) {
+                if (this.coordination.acquireRuntimeSnapshotLock) {
+                    const owner = await this.coordination.acquireRuntimeSnapshotLock(scope, { ttlMs: 1500 });
+                    if (owner) this._codexPoolSnapshotLocks.set(`${providerType}:${bucket}`, { scope, owner });
+                    else {
+                        for (let attempt = 0; attempt < 3; attempt += 1) {
+                            await new Promise(resolve => setTimeout(resolve, 50));
+                            const waited = await this.coordination.getRuntimeSnapshot(scope);
+                            if (waited && waited.providerConfigRevision === this.providerConfigRevision) {
+                                this._codexPoolExhaustedSnapshots.set(`${providerType}:${bucket}`, { ...waited, expiresAt: Date.now() + Math.max(500, Number(waited.ttlMs) || 3000) });
+                                return;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+            const localKey = `${providerType}:${bucket}`;
+            this._codexPoolExhaustedSnapshots.set(localKey, {
+                ...snapshot,
+                expiresAt: Date.now() + Math.max(500, Number(snapshot.ttlMs) || 3000)
+            });
+        } catch {
+            // Shared coordination is best effort; local filtering remains authoritative.
+        }
+    }
+
     _hasAcquireCapacity(providerStatus, options = {}) {
         const config = providerStatus.config;
         const state = providerStatus.state;
@@ -1841,6 +1900,8 @@ export class ProviderPoolManager {
         const candidates = [];
         for (const candidateType of mixedPool.candidateProviders) {
             try {
+                const candidateProviders = this.providerStatus[candidateType] || [];
+                await this._hydrateCodexPoolSnapshot(candidateType, candidateProviders, requestedModel);
                 const providers = this._getHealthyProvidersForType(candidateType, requestedModel, options);
                 candidates.push(...providers);
             } catch (error) {
@@ -1874,6 +1935,8 @@ export class ProviderPoolManager {
         const candidates = [];
         for (const candidateType of mixedPool.candidateProviders) {
             try {
+                const candidateProviders = this.providerStatus[candidateType] || [];
+                await this._hydrateCodexPoolSnapshot(candidateType, candidateProviders, requestedModel);
                 const providers = this._getHealthyProvidersForType(candidateType, requestedModel, options)
                     .filter(provider => this._hasAcquireCapacity(provider, options));
                 candidates.push(...providers);
@@ -2257,6 +2320,7 @@ export class ProviderPoolManager {
      */
     async acquireSlot(providerType, requestedModel = null, options = {}) {
         if (this.coordination) {
+            await this._hydrateCodexPoolSnapshot(providerType, this.providerStatus[providerType] || [], requestedModel);
             const healthyProviders = this._getHealthyProvidersForType(providerType, requestedModel, options);
             const ordered = this._orderCoordinatedCandidates(
                 healthyProviders,
@@ -2595,6 +2659,7 @@ export class ProviderPoolManager {
         }
 
         if (isCodexProviderType(providerType)) {
+            await this._hydrateCodexPoolSnapshot(providerType, this.providerStatus[providerType] || availableAndHealthyProviders, requestedModel);
             availableAndHealthyProviders = this._filterCodexProvidersByTokenQuota(providerType, availableAndHealthyProviders, requestedModel, selectionDiagnostics);
         }
         if (isAntigravityProviderType(providerType)) {
@@ -2725,29 +2790,14 @@ export class ProviderPoolManager {
             toStringArray(this.globalConfig?.CODEX_53_QUOTA_MODEL_PATTERNS || this.globalConfig?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS)
         );
         const snapshotKey = `${providerType}:${bucket}`;
-        const getStateFingerprint = () => providers.map(provider => {
-            const config = provider.config || {};
-            const quota = config.codexQuotaHealth?.[bucket] || {};
-            const cooldown = config.codexRateLimitCooldown?.[bucket] || {};
-            return [
-                config.uuid || provider.uuid || '',
-                config.isHealthy,
-                config.isDisabled,
-                config.needsRefresh,
-                quota.isHealthy,
-                quota.scheduledRecoveryTime || '',
-                quota.updatedAt || '',
-                cooldown.isCoolingDown,
-                cooldown.scheduledRecoveryTime || ''
-            ].join('|');
-        }).sort().join('||');
+        const getStateFingerprint = () => this._getCodexPoolStateFingerprint(this.providerStatus[providerType] || providers, bucket);
         const stateFingerprint = getStateFingerprint();
         const cachedExhaustion = this._codexPoolExhaustedSnapshots.get(snapshotKey);
         const snapshotTtlMs = Math.min(Math.max(500, Number(this.globalConfig?.CODEX_POOL_SNAPSHOT_TTL_MS ?? 3000) || 3000), 15000);
         if (cachedExhaustion
             && cachedExhaustion.expiresAt > Date.now()
             && cachedExhaustion.providerConfigRevision === this.providerConfigRevision
-            && cachedExhaustion.stateFingerprint === stateFingerprint) {
+            ) {
             const error = new Error(cachedExhaustion.message);
             error.status = 429;
             error.code = 429;
@@ -2850,10 +2900,33 @@ export class ProviderPoolManager {
                 message,
                 filterReasons: { ...filterReasons }
             });
+            const lock = this._codexPoolSnapshotLocks.get(snapshotKey);
+            if (this.coordination?.setRuntimeSnapshot) {
+                Promise.resolve(this.coordination.setRuntimeSnapshot(this._getCodexPoolSnapshotScope(providerType, bucket), {
+                    providerConfigRevision: this.providerConfigRevision,
+                    stateFingerprint: getStateFingerprint(),
+                    message,
+                    filterReasons: { ...filterReasons },
+                    exhausted: true,
+                    ttlMs: snapshotTtlMs
+                }, { ttlMs: snapshotTtlMs })).catch(() => {});
+            }
+            if (lock && this.coordination?.releaseRuntimeSnapshotLock) {
+                Promise.resolve(this.coordination.releaseRuntimeSnapshotLock(lock.scope, lock.owner)).catch(() => {});
+                this._codexPoolSnapshotLocks.delete(snapshotKey);
+            }
             throw error;
         }
 
         this._codexPoolExhaustedSnapshots.delete(snapshotKey);
+        const lock = this._codexPoolSnapshotLocks.get(snapshotKey);
+        if (lock && this.coordination?.deleteRuntimeSnapshot) {
+            Promise.resolve(this.coordination.deleteRuntimeSnapshot(lock.scope)).catch(() => {});
+        }
+        if (lock && this.coordination?.releaseRuntimeSnapshotLock) {
+            Promise.resolve(this.coordination.releaseRuntimeSnapshotLock(lock.scope, lock.owner)).catch(() => {});
+            this._codexPoolSnapshotLocks.delete(snapshotKey);
+        }
 
         if (updatedLastKnownPlan) {
             this._debouncedSave(providerType);
