@@ -531,6 +531,19 @@ export function isCodex53QuotaExhaustionError(error) {
     return false;
 }
 
+function getCodexQuotaFilterTtlMs(globalConfig = {}, unavailable = false) {
+    const configured = unavailable
+        ? globalConfig.CODEX_UNAVAILABLE_CACHE_TTL_MS ?? globalConfig.codexUnavailableCacheTtlMs
+        : globalConfig.CODEX_QUOTA_FILTER_CACHE_TTL_MS ?? globalConfig.codexQuotaFilterCacheTtlMs;
+    const fallback = unavailable ? 60_000 : 30_000;
+    const value = Number(configured ?? fallback);
+    return Math.min(Math.max(Number.isFinite(value) ? value : fallback, 500), 300_000);
+}
+
+function getCodexUsageCacheVersion(usageCache) {
+    return usageCache?.timestamp || 'none';
+}
+
 export function getCodex53QuotaFallbackModel(globalConfig = {}) {
     return globalConfig?.codex53QuotaFallbackModel ||
         globalConfig?.CODEX_53_QUOTA_FALLBACK_MODEL ||
@@ -630,6 +643,15 @@ export class ProviderPoolManager {
         this._codexStickyHotStats = new Map();
         this._codexPoolExhaustedSnapshots = new Map();
         this._codexPoolSnapshotLocks = new Map();
+        this._codexQuotaFilterSnapshots = new Map();
+        this._codexQuotaFilterMetrics = {
+            calls: 0,
+            cacheHits: 0,
+            cacheMisses: 0,
+            providersScanned: 0,
+            unavailableProviders: 0,
+            crossWorkerReuse: 0
+        };
         this._providerSelectionLoadStats = new Map();
         this._poolKeySchedulers = new Map();
         this._geminiElasticQueue = {
@@ -1774,6 +1796,10 @@ export class ProviderPoolManager {
                 config.isHealthy === true,
                 config.isDisabled === true,
                 config.needsRefresh === true,
+                config.codexGeneralMax5hPercent ?? '',
+                config.codexGeneralMaxWeeklyPercent ?? '',
+                config.codex53Max5hPercent ?? '',
+                config.codex53MaxWeeklyPercent ?? '',
                 quota.isHealthy === false,
                 quota.scheduledRecoveryTime || '',
                 cooldown.isCoolingDown === true,
@@ -1800,7 +1826,7 @@ export class ProviderPoolManager {
                             await new Promise(resolve => setTimeout(resolve, 50));
                             const waited = await this.coordination.getRuntimeSnapshot(scope);
                             if (waited && waited.providerConfigRevision === this.providerConfigRevision) {
-                                this._codexPoolExhaustedSnapshots.set(`${providerType}:${bucket}`, { ...waited, expiresAt: Date.now() + Math.max(500, Number(waited.ttlMs) || 3000) });
+                                this._applySharedCodexPoolSnapshot(providerType, bucket, providers, waited);
                                 return;
                             }
                         }
@@ -1808,14 +1834,30 @@ export class ProviderPoolManager {
                 }
                 return;
             }
-            const localKey = `${providerType}:${bucket}`;
-            this._codexPoolExhaustedSnapshots.set(localKey, {
-                ...snapshot,
-                expiresAt: Date.now() + Math.max(500, Number(snapshot.ttlMs) || 3000)
-            });
+            this._applySharedCodexPoolSnapshot(providerType, bucket, providers, snapshot);
         } catch {
             // Shared coordination is best effort; local filtering remains authoritative.
         }
+    }
+
+    _applySharedCodexPoolSnapshot(providerType, bucket, providers, snapshot) {
+        const ttlMs = Math.max(500, Number(snapshot.ttlMs) || getCodexQuotaFilterTtlMs(this.globalConfig, Number(snapshot.unavailableCount || 0) > 0));
+        if (snapshot.exhausted) {
+            this._codexPoolExhaustedSnapshots.set(`${providerType}:${bucket}`, {
+                ...snapshot,
+                expiresAt: Date.now() + ttlMs
+            });
+            return;
+        }
+        const expectedFingerprint = this._getCodexPoolStateFingerprint(providers, bucket);
+        if (snapshot.stateFingerprint && snapshot.stateFingerprint !== expectedFingerprint) return;
+        this._codexQuotaFilterSnapshots.set(`${providerType}:${bucket}:*`, {
+            ...snapshot,
+            allowedProviderUuids: Array.isArray(snapshot.allowedProviderUuids) ? snapshot.allowedProviderUuids : [],
+            expiresAt: Date.now() + ttlMs,
+            crossWorkerReuse: true,
+            shared: true
+        });
     }
 
     _hasAcquireCapacity(providerStatus, options = {}) {
@@ -2812,6 +2854,7 @@ export class ProviderPoolManager {
         }
 
         let limitedCount = 0;
+        let unavailableCount = 0;
         const allowed = [];
         const filterReasons = {};
         const recordFilterReason = (reason) => {
@@ -2820,6 +2863,40 @@ export class ProviderPoolManager {
         let updatedLastKnownPlan = false;
         const usageCache = readFreshUsageCacheSync();
         const now = Date.now();
+        const candidateUuids = providers.map(provider => provider.config?.uuid || provider.uuid || '').sort();
+        const usageCacheVersion = getCodexUsageCacheVersion(usageCache);
+        const filterCacheKey = `${providerType}:${bucket}:${candidateUuids.join(',')}`;
+        const stateFingerprintBefore = getStateFingerprint();
+        const localCachedFilter = this._codexQuotaFilterSnapshots.get(filterCacheKey);
+        const sharedCachedFilter = this._codexQuotaFilterSnapshots.get(`${providerType}:${bucket}:*`);
+        const cachedFilter = localCachedFilter || sharedCachedFilter;
+        const cachedStateMatches = cachedFilter && (
+            cachedFilter.stateFingerprint === stateFingerprintBefore
+            || (cachedFilter.shared === true
+                && cachedFilter.stateFingerprint === this._getCodexPoolStateFingerprint(
+                    this.providerStatus[providerType] || providers,
+                    bucket
+                ))
+        );
+        this._codexQuotaFilterMetrics.calls += 1;
+        if (cachedFilter
+            && cachedFilter.expiresAt > now
+            && cachedFilter.providerConfigRevision === this.providerConfigRevision
+            && cachedStateMatches
+            && cachedFilter.usageCacheVersion === usageCacheVersion
+        ) {
+            this._codexQuotaFilterMetrics.cacheHits += 1;
+            this._codexQuotaFilterMetrics.crossWorkerReuse += cachedFilter.crossWorkerReuse ? 1 : 0;
+            if (selectionDiagnostics) {
+                selectionDiagnostics.filterReasons = {
+                    ...(selectionDiagnostics.filterReasons || {}),
+                    ...cachedFilter.filterReasons
+                };
+            }
+            const allowedUuids = new Set(cachedFilter.allowedProviderUuids);
+            return providers.filter(provider => allowedUuids.has(provider.config?.uuid || provider.uuid || ''));
+        }
+        this._codexQuotaFilterMetrics.cacheMisses += 1;
 
         for (const provider of providers) {
             const state = getCodexRateLimitCooldownState(provider.config, bucket);
@@ -2859,6 +2936,7 @@ export class ProviderPoolManager {
                 continue;
             } else {
                 if (quotaStatus.reason) {
+                    unavailableCount += 1;
                     this._log('warn', `Codex quota check for ${this._getDisplayName(provider.config)}: ${quotaStatus.reason}`);
                 }
                 this.markCodexQuotaBucketHealthy(providerType, provider.config, bucket);
@@ -2879,6 +2957,10 @@ export class ProviderPoolManager {
             allowed.push(provider);
         }
 
+        const finalStateFingerprint = getStateFingerprint();
+        const filterTtlMs = getCodexQuotaFilterTtlMs(this.globalConfig, unavailableCount > 0);
+        this._codexQuotaFilterMetrics.providersScanned += providers.length;
+        this._codexQuotaFilterMetrics.unavailableProviders += unavailableCount;
         if (allowed.length === 0 && providers.length > 0 && limitedCount > 0) {
             if (updatedLastKnownPlan) {
                 this._debouncedSave(providerType);
@@ -2917,6 +2999,31 @@ export class ProviderPoolManager {
             }
             throw error;
         }
+
+        this._codexQuotaFilterSnapshots.set(filterCacheKey, {
+            allowedProviderUuids: allowed.map(provider => provider.config?.uuid || provider.uuid || ''),
+            filterReasons: { ...filterReasons },
+            unavailableCount,
+            computedAt: now,
+            expiresAt: now + filterTtlMs,
+            stateFingerprint: finalStateFingerprint,
+            usageCacheVersion,
+            providerConfigRevision: this.providerConfigRevision,
+            crossWorkerReuse: false
+        });
+        if (this.coordination?.setRuntimeSnapshot) {
+            Promise.resolve(this.coordination.setRuntimeSnapshot(this._getCodexPoolSnapshotScope(providerType, bucket), {
+                providerConfigRevision: this.providerConfigRevision,
+                stateFingerprint: finalStateFingerprint,
+                allowedProviderUuids: allowed.map(provider => provider.config?.uuid || provider.uuid || ''),
+                filterReasons: { ...filterReasons },
+                unavailableCount,
+                exhausted: false,
+                ttlMs: filterTtlMs,
+                usageCacheVersion
+            }, { ttlMs: filterTtlMs })).catch(() => {});
+        }
+        this._log('debug', `Codex quota snapshot computed: providerType=${providerType} bucket=${bucket} providers=${providers.length} unavailable=${unavailableCount} ttlMs=${filterTtlMs}`);
 
         this._codexPoolExhaustedSnapshots.delete(snapshotKey);
         const lock = this._codexPoolSnapshotLocks.get(snapshotKey);
@@ -3083,6 +3190,29 @@ export class ProviderPoolManager {
         return this._getAntigravityElasticRoutingConfig().enabled
             && isAntigravityProviderType(providerType)
             && Object.prototype.hasOwnProperty.call(ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS, normalizeAntigravityQuotaModel(requestedModel));
+    }
+
+    getCodexQuotaFilterMetrics() {
+        const calls = Number(this._codexQuotaFilterMetrics?.calls || 0);
+        const cacheHits = Number(this._codexQuotaFilterMetrics?.cacheHits || 0);
+        const snapshots = [...this._codexQuotaFilterSnapshots.values()];
+        const now = Date.now();
+        const snapshotAgeMs = snapshots.length > 0
+            ? Math.max(0, now - Math.max(...snapshots.map(snapshot => Number(snapshot.computedAt) || now)))
+            : 0;
+        return {
+            ...this._codexQuotaFilterMetrics,
+            cacheHitRatio: calls > 0 ? cacheHits / calls : 0,
+            activeSnapshots: this._codexQuotaFilterSnapshots.size,
+            snapshotAgeMs,
+            codexQuotaFilterCalls: calls,
+            codexQuotaFilterCacheHits: cacheHits,
+            codexQuotaFilterCacheMisses: Number(this._codexQuotaFilterMetrics?.cacheMisses || 0),
+            codexQuotaProvidersScanned: Number(this._codexQuotaFilterMetrics?.providersScanned || 0),
+            codexQuotaUnavailableProviders: Number(this._codexQuotaFilterMetrics?.unavailableProviders || 0),
+            codexQuotaSnapshotAgeMs: snapshotAgeMs,
+            codexQuotaCrossWorkerReuse: Number(this._codexQuotaFilterMetrics?.crossWorkerReuse || 0)
+        };
     }
 
     async _selectGeminiWithModelFallback(providerType, requestedModel, options, select) {

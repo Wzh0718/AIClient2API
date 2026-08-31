@@ -93,6 +93,165 @@ afterEach(() => {
 });
 
 describe('provider pool Codex token quota', () => {
+    test('reuses a quota filter snapshot for repeated selection state', () => {
+        const usageTimestamp = new Date().toISOString();
+        writeCodexUsageCache([
+            {
+                uuid: 'aaa-codex-over',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 10, unit: 'percent' },
+                        { id: 'secondary_window', percent: 20, unit: 'percent' }
+                    ]
+                }
+            },
+            {
+                uuid: 'zzz-codex-ok',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 15, unit: 'percent' },
+                        { id: 'secondary_window', percent: 25, unit: 'percent' }
+                    ]
+                }
+            }
+        ], usageTimestamp);
+
+        const manager = createQuotaPoolManager();
+        const providers = manager.providerStatus['openai-codex-oauth'];
+
+        const first = manager._filterCodexProvidersByTokenQuota('openai-codex-oauth', providers, 'gpt-5.5');
+        const firstScanned = manager._codexQuotaFilterMetrics.providersScanned;
+        const second = manager._filterCodexProvidersByTokenQuota('openai-codex-oauth', providers, 'gpt-5.5');
+
+        expect(second.map(provider => provider.uuid)).toEqual(first.map(provider => provider.uuid));
+        expect(manager._codexQuotaFilterMetrics.cacheHits).toBe(1);
+        expect(manager._codexQuotaFilterMetrics.providersScanned).toBe(firstScanned);
+        expect(manager.getCodexQuotaFilterMetrics()).toMatchObject({
+            codexQuotaFilterCalls: 2,
+            codexQuotaFilterCacheHits: 1,
+            codexQuotaFilterCacheMisses: 1,
+            codexQuotaProvidersScanned: 2
+        });
+    });
+
+    test('recomputes a quota filter snapshot after provider state changes', () => {
+        writeCodexUsageCache([
+            {
+                uuid: 'aaa-codex-over',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 10, unit: 'percent' },
+                        { id: 'secondary_window', percent: 20, unit: 'percent' }
+                    ]
+                }
+            },
+            {
+                uuid: 'zzz-codex-ok',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 15, unit: 'percent' },
+                        { id: 'secondary_window', percent: 25, unit: 'percent' }
+                    ]
+                }
+            }
+        ]);
+
+        const manager = createQuotaPoolManager();
+        const providers = manager.providerStatus['openai-codex-oauth'];
+        manager._filterCodexProvidersByTokenQuota('openai-codex-oauth', providers, 'gpt-5.5');
+        const firstMisses = manager._codexQuotaFilterMetrics.cacheMisses;
+        providers[0].config.codexRateLimitCooldown = {
+            general: {
+                isCoolingDown: true,
+                scheduledRecoveryTime: '2099-01-01T00:00:00.000Z'
+            }
+        };
+
+        const allowed = manager._filterCodexProvidersByTokenQuota('openai-codex-oauth', providers, 'gpt-5.5');
+
+        expect(allowed.map(provider => provider.uuid)).toEqual(['zzz-codex-ok']);
+        expect(manager._codexQuotaFilterMetrics.cacheMisses).toBe(firstMisses + 1);
+    });
+
+    test('uses the longer unavailable TTL when usage windows are missing', () => {
+        writeCodexUsageCache([
+            {
+                uuid: 'aaa-codex-over',
+                success: true,
+                usage: { summary: { plan: 'Plus' }, items: [] }
+            },
+            {
+                uuid: 'zzz-codex-ok',
+                success: true,
+                usage: { summary: { plan: 'Plus' }, items: [] }
+            }
+        ]);
+
+        const manager = createQuotaPoolManager();
+        const providers = manager.providerStatus['openai-codex-oauth'];
+        manager._filterCodexProvidersByTokenQuota('openai-codex-oauth', providers, 'gpt-5.5');
+        const snapshot = [...manager._codexQuotaFilterSnapshots.values()][0];
+
+        expect(snapshot.unavailableCount).toBe(2);
+        expect(snapshot.expiresAt - snapshot.computedAt).toBe(60_000);
+    });
+
+    test('hydrates a regular quota snapshot from shared runtime coordination', async () => {
+        const usageTimestamp = new Date().toISOString();
+        writeCodexUsageCache([
+            {
+                uuid: 'aaa-codex-over',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 10, unit: 'percent' },
+                        { id: 'secondary_window', percent: 20, unit: 'percent' }
+                    ]
+                }
+            },
+            {
+                uuid: 'zzz-codex-ok',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 15, unit: 'percent' },
+                        { id: 'secondary_window', percent: 25, unit: 'percent' }
+                    ]
+                }
+            }
+        ], usageTimestamp);
+
+        const manager = createQuotaPoolManager();
+        const providers = manager.providerStatus['openai-codex-oauth'];
+        const bucket = 'general';
+        const snapshot = {
+            providerConfigRevision: manager.providerConfigRevision,
+            stateFingerprint: manager._getCodexPoolStateFingerprint(providers, bucket),
+            allowedProviderUuids: ['aaa-codex-over', 'zzz-codex-ok'],
+            filterReasons: {},
+            unavailableCount: 0,
+            exhausted: false,
+            ttlMs: 30_000,
+            usageCacheVersion: usageTimestamp
+        };
+
+        manager._applySharedCodexPoolSnapshot('openai-codex-oauth', bucket, providers, snapshot);
+        const allowed = manager._filterCodexProvidersByTokenQuota('openai-codex-oauth', providers, 'gpt-5.5');
+
+        expect(allowed.map(provider => provider.uuid)).toEqual(['aaa-codex-over', 'zzz-codex-ok']);
+        expect(manager._codexQuotaFilterMetrics.crossWorkerReuse).toBe(1);
+    });
+
     test('fresh usage cache recovery re-enables a provider stuck in a future quota cooldown', async () => {
         writeCodexUsageCache([
             {

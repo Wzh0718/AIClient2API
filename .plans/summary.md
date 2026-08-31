@@ -38,3 +38,5 @@ next: 评估新增项目级 `scripts/ops/reliable-build-image.sh`（或增强现
 [ops-memory | 2026-08-27-local-cutover-speed] 使用现有健康镜像完成一次真实本地更新流程：候选容器健康预检约 7 秒，停旧/重建同名容器/health/runtime 验证总计约 46.2 秒；新容器 healthy、`/health=200`、`/runtime/health=200`、重启次数 0，旧容器保留为时间戳备份。该耗时不包含镜像冷构建。
 [ops-memory | 2026-08-28-candidate-is-not-cutover]
 明确要求“更新本地/生产容器”时，候选容器启动与健康检查只是中间预检，不能作为最终完成条件；必须继续切换正式容器/正式 upstream，并验证 active container 的镜像 commit。只有用户明确要求“只验证/只预检/候选 smoke”时才允许停在候选。此前将本地更新误停在候选容器，原因是把生产 blue-green 安全规则过度套用到本地；以后按本地与生产分别执行最终切换。
+[step-9 | 2026-08-31T18:06:00+08:00] ✓ 完成 Codex quota filter 本地/共享快照、分层 TTL、运行时指标与回归测试
+keep: 不缓存最终 provider 选择；仅缓存 quota 过滤结果，保留既有额度、冷却、权重和 fallback 语义。

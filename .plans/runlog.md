@@ -139,3 +139,11 @@ DECISION: 复用现有 BigObjectCapacity、RuntimeMetrics 与分块响应机制�
 产物：docs/2026-08-17-codex-quota-fingerprint-diagnosis.md、docs/plans/2026-08-17-codex-usage-ceiling-snapshot-plan.md。
 DECISION: 本轮只写诊断和观测计划，不改指纹默认、不改生产配置；观测计划另开是因为已确认部分号隐含周限塌缩，现有 usage cache 留不住历史。
 验证：对照 prod-sync 2026-08-11、e2e 2026-08-14、live 2026-08-17 三份 usage-cache，以及 provider_pools / credential-groups；未跑 Jest，因为没有改代码。
+## Step 9 - START - 2026-08-31T18:05:00+08:00
+执行用户批准的 Codex quota filter 缓存优化计划：先补回归测试，再实现本地/共享快照、分层 TTL 与运行时指标。
+
+## Step 9 - DONE - 2026-08-31T18:06:00+08:00
+产物：src/providers/provider-pool-manager.js、src/services/api-server.js、tests/provider-pool-codex-quota.test.js。
+关键决策：本地快照按候选 UUID、bucket、状态指纹和 usage timestamp 复用；共享快照作为跨 worker best-effort hydration；不缓存最终 provider 选择。
+验证：5 个相关 Jest suite、65 个测试通过；Node 语法检查和 git diff --check 通过；全量 Jest 运行超过 90 秒无输出后停止，未计为通过。
+边界修正：全池耗尽时不写普通空候选快照，继续保持 exhausted snapshot 的 429/fallback 语义。

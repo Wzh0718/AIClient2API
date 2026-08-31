@@ -267,6 +267,7 @@ function buildRuntimeMetricsSnapshot() {
         pricingDiagnostics: getPricingDiagnostics(),
         temporaryRouting: getTemporaryRouteScheduleDiagnostics(),
         providerCoordination: getProviderPoolManager()?.coordination?.getStatus?.() || null,
+        codexQuotaFilter: getProviderPoolManager()?.getCodexQuotaFilterMetrics?.() || null,
         potluckQuota: getPotluckQuotaMetrics(),
         requestAudit: getRequestAuditMetrics(),
         hooks: getRuntimeHookSnapshot()
