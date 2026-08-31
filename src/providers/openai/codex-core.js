@@ -28,6 +28,7 @@ import { recordCodexFingerprintAudit } from './codex-fingerprint-audit.js';
 import { codexPromptCacheObservability } from './codex-prompt-cache-observability.js';
 import requestContext from '../../utils/context.js';
 import { performance } from 'node:perf_hooks';
+import { getCodexRetryDelayMs, shouldRetryCodex429 } from './codex-retry-policy.js';
 
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
 const fastModels = baseModels.map(m => `${m}-fast`);
@@ -457,6 +458,7 @@ export class CodexApiService {
         const headers = this.buildHeaders(body.prompt_cache_key, true, fingerprintState);
 
         let overloadRetryCount = 0;
+        let rateLimitRetryCount = 0;
         let rejectedFieldRetryCount = 0;
         while (true) {
             try {
@@ -505,6 +507,17 @@ export class CodexApiService {
                     if (delayMs > 0) {
                         await new Promise(resolve => setTimeout(resolve, delayMs));
                     }
+                    continue;
+                }
+
+                if (shouldRetryCodex429(error, { attempts: rateLimitRetryCount, maxAttempts: 1 })) {
+                    rateLimitRetryCount += 1;
+                    const delayMs = getCodexRetryDelayMs(error, {
+                        fallbackMs: Number(this.config.CODEX_RATE_LIMIT_RETRY_DELAY_MS ?? 800),
+                        maxDelayMs: Number(this.config.CODEX_RATE_LIMIT_RETRY_MAX_DELAY_MS ?? 30000)
+                    });
+                    logger.warn(`[Codex] Upstream rate limited; retrying same credential once after ${delayMs}ms`);
+                    if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
                     continue;
                 }
 
@@ -568,6 +581,7 @@ export class CodexApiService {
         const headers = this.buildHeaders(body.prompt_cache_key, true, fingerprintState);
 
         let overloadRetryCount = 0;
+        let rateLimitRetryCount = 0;
         let rejectedFieldRetryCount = 0;
         while (true) {
             const bufferedPrelude = [];
@@ -650,6 +664,17 @@ export class CodexApiService {
                     if (delayMs > 0) {
                         await new Promise(resolve => setTimeout(resolve, delayMs));
                     }
+                    continue;
+                }
+
+                if (!hasVisibleOutput && shouldRetryCodex429(error, { attempts: rateLimitRetryCount, maxAttempts: 1 })) {
+                    rateLimitRetryCount += 1;
+                    const delayMs = getCodexRetryDelayMs(error, {
+                        fallbackMs: Number(this.config.CODEX_RATE_LIMIT_RETRY_DELAY_MS ?? 800),
+                        maxDelayMs: Number(this.config.CODEX_RATE_LIMIT_RETRY_MAX_DELAY_MS ?? 30000)
+                    });
+                    logger.warn(`[Codex] Upstream rate limited stream; retrying same credential once after ${delayMs}ms`);
+                    if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
                     continue;
                 }
 

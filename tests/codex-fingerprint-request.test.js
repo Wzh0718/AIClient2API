@@ -95,6 +95,21 @@ describe('Codex OAuth fingerprint request integration', () => {
         }
     });
 
+    test('retries one upstream 429 on the same credential using Retry-After', async () => {
+        axios.request
+            .mockRejectedValueOnce({ response: { status: 429, headers: { 'retry-after': '0' }, data: {} } })
+            .mockResolvedValueOnce(completedResponse());
+        const service = createService({ CODEX_RATE_LIMIT_RETRY_DELAY_MS: 0 });
+        try {
+            await expect(service.generateContent('gpt-5.4-mini', requestBody())).resolves.toMatchObject({
+                type: 'response.completed'
+            });
+            expect(axios.request).toHaveBeenCalledTimes(2);
+        } finally {
+            service.stopCacheCleanup();
+        }
+    });
+
     test('retries once after an explicit indexed namespace field rejection', async () => {
         axios.request
             .mockRejectedValueOnce({

@@ -37,6 +37,8 @@ import {
     buildGeminiCleanupDiagnostic,
     classifyProviderInitializationError
 } from './gemini-diagnostics.js';
+import { getCachedModelList } from '../services/model-list-cache.js';
+import { hasCodexRetryBudget } from '../providers/openai/codex-retry-policy.js';
 
 function isGeminiDiagnosticsProvider(providerType) {
     return providerType === MODEL_PROVIDER.GEMINI_CLI || providerType === MODEL_PROVIDER.ANTIGRAVITY;
@@ -927,7 +929,11 @@ export function applyProviderRateLimitCooldown({
         );
         if (bucket) {
             logger.info(`${loggerPrefix} Applying Codex ${bucket} rate-limit cooldown for ${providerType} (${providerUuid}) until ${rateLimitRecoveryTime.toISOString()}`);
-            providerPoolManager.markCodexRateLimitCooldown(providerType, { uuid: providerUuid }, bucket, '429 Too Many Requests - short cooldown', rateLimitRecoveryTime);
+            try {
+                providerPoolManager.markCodexRateLimitCooldown(providerType, { uuid: providerUuid }, bucket, '429 Too Many Requests - short cooldown', rateLimitRecoveryTime);
+            } catch (cooldownError) {
+                logger.warn(`${loggerPrefix} Failed to persist Codex rate-limit cooldown; preserving upstream 429: ${cooldownError?.message || cooldownError}`);
+            }
             return true;
         }
     }
@@ -1935,7 +1941,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         
         // 凭证已被标记为不健康后，尝试切换到新凭证重试
         // 不再依赖状态码判断，只要凭证被标记不健康且可以重试，就尝试切换
-        if (credentialMarkedUnhealthy && currentRetry < maxRetries && providerPoolManager && CONFIG) {
+        if (credentialMarkedUnhealthy && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
             const isCodexTransient = isCodexTransientCredentialError(error);
             const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity;
             if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
@@ -2308,7 +2314,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         
         // 凭证已被标记为不健康后，尝试切换到新凭证重试
         // 不再依赖状态码判断，只要凭证被标记不健康且可以重试，就尝试切换
-        if (credentialMarkedUnhealthy && currentRetry < maxRetries && providerPoolManager && CONFIG) {
+        if (credentialMarkedUnhealthy && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
             const isCodexTransient = isCodexTransientCredentialError(error);
             const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity;
             if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
@@ -2565,7 +2571,11 @@ export async function handleModelListRequest(req, res, service, endpointType, CO
         // --- 核心逻辑: auto 路由模式下的模型聚合 ---
         if (CONFIG.MODEL_PROVIDER === MODEL_PROVIDER.AUTO && providerPoolManager) {
             logger.info(`[ModelList] Aggregating models for 'auto' mode...`);
-            clientModelList = await providerPoolManager.getAllAvailableModels(endpointType);
+            clientModelList = await getCachedModelList(
+                `auto:${endpointType}`,
+                () => providerPoolManager.getAllAvailableModels(endpointType),
+                { ttlMs: Number(CONFIG.MODEL_LIST_CACHE_TTL_MS || 5000) }
+            );
         } else {
             // --- 单提供商逻辑 ---
             const toProvider = CONFIG.MODEL_PROVIDER;
@@ -2591,7 +2601,11 @@ export async function handleModelListRequest(req, res, service, endpointType, CO
             }
 
             // 1. Get the model list in the backend's native format.
-            const nativeModelList = await resolvedService.listModels();
+            const nativeModelList = await getCachedModelList(
+                `${toProvider}:${endpointType}`,
+                () => resolvedService.listModels(),
+                { ttlMs: Number(CONFIG.MODEL_LIST_CACHE_TTL_MS || 5000) }
+            );
 
             // 2. Convert the model list to the client's expected format, if necessary.
             clientModelList = nativeModelList;
@@ -2948,6 +2962,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     const retryContext = {
         CONFIG,
         _startedAt: performance.now(),
+        retryStartedAt: Date.now(),
         currentRetry: 0,
         maxRetries: credentialSwitchMaxRetries,
         clientRequestedModel,

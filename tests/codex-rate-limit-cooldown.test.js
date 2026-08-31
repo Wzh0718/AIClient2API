@@ -60,6 +60,48 @@ describe('Codex rate-limit cooldown', () => {
         );
     });
 
+    test('keeps the upstream 429 when cooldown state writing hits the persisted string bug', () => {
+        const now = Date.parse('2026-08-10T08:00:00Z');
+        jest.spyOn(Date, 'now').mockReturnValue(now);
+        const manager = {
+            markCodexRateLimitCooldown: jest.fn(() => {
+                throw new TypeError("Cannot create property 'general' on string '[object Object]'");
+            }),
+            markProviderUnhealthyWithRecoveryTime: jest.fn(),
+            markCodexQuotaBucketUnhealthy: jest.fn()
+        };
+
+        expect(() => applyProviderRateLimitCooldown({
+            error: create429({ retryAfter: 3 }),
+            config: { RATE_LIMIT_COOLDOWN_ENABLED: true },
+            providerPoolManager: manager,
+            providerType: 'openai-codex-oauth',
+            providerUuid: 'cred-1',
+            requestedModel: 'gpt-5.4-mini'
+        })).not.toThrow();
+    });
+
+    test('normalizes persisted quota health strings before writing a bucket state', () => {
+        const manager = {
+            _findProvider: jest.fn(() => ({ config: { uuid: 'cred-1', codexQuotaHealth: '{}' } })),
+            _log: jest.fn(),
+            _debouncedSave: jest.fn()
+        };
+
+        manager.markCodexQuotaBucketUnhealthy = function (providerType, providerConfig, bucket) {
+            const provider = this._findProvider(providerType, providerConfig.uuid);
+            let health = provider.config.codexQuotaHealth;
+            if (!health || typeof health !== 'object' || Array.isArray(health)) {
+                try { health = JSON.parse(health); } catch { health = {}; }
+                if (!health || typeof health !== 'object' || Array.isArray(health)) health = {};
+                provider.config.codexQuotaHealth = health;
+            }
+            health[bucket] = { isHealthy: false };
+        };
+
+        expect(() => manager.markCodexQuotaBucketUnhealthy('openai-codex-oauth', { uuid: 'cred-1' }, 'general')).not.toThrow();
+    });
+
     test('keeps usage_limit_reached on the quota exhaustion path', () => {
         const now = Date.parse('2026-08-10T08:00:00Z');
         jest.spyOn(Date, 'now').mockReturnValue(now);

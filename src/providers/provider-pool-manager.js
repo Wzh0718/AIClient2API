@@ -4090,7 +4090,19 @@ export class ProviderPoolManager {
         const provider = this._findProvider(providerType, providerConfig.uuid);
         if (!provider) return;
 
-        provider.config.codexQuotaHealth = provider.config.codexQuotaHealth || {};
+        const persistedQuotaHealth = provider.config.codexQuotaHealth;
+        if (!persistedQuotaHealth || typeof persistedQuotaHealth !== 'object' || Array.isArray(persistedQuotaHealth)) {
+            let normalizedQuotaHealth = {};
+            if (typeof persistedQuotaHealth === 'string') {
+                try {
+                    const parsed = JSON.parse(persistedQuotaHealth);
+                    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) normalizedQuotaHealth = parsed;
+                } catch {
+                    this._log('warn', `Invalid persisted Codex quota health state for ${this._getDisplayName(provider.config)}; resetting state`);
+                }
+            }
+            provider.config.codexQuotaHealth = normalizedQuotaHealth;
+        }
         provider.config.codexQuotaHealth[bucket] = {
             ...(provider.config.codexQuotaHealth[bucket] || {}),
             isHealthy: false,
@@ -4110,7 +4122,21 @@ export class ProviderPoolManager {
         const provider = this._findProvider(providerType, providerConfig.uuid);
         if (!provider) return;
 
-        provider.config.codexRateLimitCooldown = provider.config.codexRateLimitCooldown || {};
+        const persistedCooldownState = provider.config.codexRateLimitCooldown;
+        if (!persistedCooldownState || typeof persistedCooldownState !== 'object' || Array.isArray(persistedCooldownState)) {
+            let normalizedCooldownState = {};
+            if (typeof persistedCooldownState === 'string') {
+                try {
+                    const parsed = JSON.parse(persistedCooldownState);
+                    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                        normalizedCooldownState = parsed;
+                    }
+                } catch {
+                    this._log('warn', `Invalid persisted Codex rate-limit cooldown state for ${this._getDisplayName(provider.config)}; resetting state`);
+                }
+            }
+            provider.config.codexRateLimitCooldown = normalizedCooldownState;
+        }
         provider.config.codexRateLimitCooldown[bucket] = {
             ...(provider.config.codexRateLimitCooldown[bucket] || {}),
             isCoolingDown: true,
