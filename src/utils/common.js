@@ -268,13 +268,20 @@ function normalizeAntigravityCapacityExhaustion(error, providerType, requestedMo
     }
 
     error.isAntigravityModelCapacity = true;
-    error.status = 429;
-    error.statusCode = 429;
-    error.code = 429;
-    error.quotaScope = 'model';
-    error.quotaKey = requestedModel || error.quotaKey;
+    error.status = 503;
+    error.statusCode = 503;
+    error.code = 'MODEL_CAPACITY_UNAVAILABLE';
+    error.retryable = true;
+    error.shouldSwitchCredential = true;
+    error.capacityScope = 'model';
+    error.capacityKey = requestedModel || error.capacityKey;
     error.response = error.response || {};
-    error.response.status = 429;
+    error.response.status = 503;
+    if (!error.nextRecoveryTime) {
+        const cooldownMs = Math.min(60_000, Math.max(5_000, Number(error.capacityCooldownMs || 15_000)));
+        error.nextRecoveryTime = new Date(Date.now() + cooldownMs).toISOString();
+        error.retryAfterSeconds = Math.ceil(cooldownMs / 1000);
+    }
     return true;
 }
 
@@ -848,6 +855,18 @@ export function applyProviderRateLimitCooldown({
     // this one explicit upstream condition before the generic 429 handling below;
     // unrelated 503 errors must retain their normal server-error semantics.
     normalizeAntigravityCapacityExhaustion(error, providerType, requestedModel);
+
+    if (
+        providerType === MODEL_PROVIDER.ANTIGRAVITY &&
+        error.isAntigravityModelCapacity === true &&
+        providerPoolManager &&
+        providerUuid &&
+        typeof providerPoolManager.markAntigravityModelCapacityUnavailable === 'function'
+    ) {
+        const recoveryTime = new Date(error.nextRecoveryTime || (Date.now() + 15_000));
+        providerPoolManager.markAntigravityModelCapacityUnavailable(providerType, { uuid: providerUuid }, requestedModel, recoveryTime);
+        return true;
+    }
 
     if (
         providerType === MODEL_PROVIDER.ANTIGRAVITY &&

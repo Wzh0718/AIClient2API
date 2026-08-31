@@ -241,6 +241,28 @@ describe('Antigravity model quota cooldown', () => {
         );
     });
 
+    test('preserves 503 capacity semantics while marking the credential retryable', () => {
+        const providerPoolManager = { markAntigravityModelQuotaUnhealthy: jest.fn() };
+        const error = createCapacityCodeError();
+
+        const applied = applyProviderRateLimitCooldown({
+            error,
+            config: { RATE_LIMIT_COOLDOWN_MS: 30000 },
+            providerPoolManager,
+            providerType: 'gemini-antigravity',
+            providerUuid: 'provider-pro-1',
+            requestedModel: 'gemini-3.1-flash-lite'
+        });
+
+        expect(applied).toBe(true);
+        expect(error.status).toBe(503);
+        expect(error.response.status).toBe(503);
+        expect(error.code).toBe('MODEL_CAPACITY_UNAVAILABLE');
+        expect(error.shouldSwitchCredential).toBe(true);
+        expect(error.isAntigravityModelCapacity).toBe(true);
+        expect(providerPoolManager.markAntigravityModelQuotaUnhealthy).not.toHaveBeenCalled();
+    });
+
     test('marks only the exact Antigravity model as cooling down', () => {
         const now = Date.parse('2026-08-10T08:00:00Z');
         jest.spyOn(Date, 'now').mockReturnValue(now);
