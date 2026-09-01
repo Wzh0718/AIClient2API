@@ -148,6 +148,28 @@ describe('provider pool Antigravity quota health', () => {
         });
     });
 
+    test('marks an exact model unavailable for upstream capacity without changing provider health', () => {
+        const target = provider('provider-capacity');
+        const manager = createManager([target]);
+        const recoveryTime = new Date(Date.now() + 30000);
+
+        manager.markAntigravityModelCapacityUnavailable(
+            'gemini-antigravity',
+            target,
+            'gemini-3.1-flash-lite',
+            recoveryTime,
+            'MODEL_CAPACITY_EXHAUSTED'
+        );
+
+        expect(target.isHealthy).toBe(true);
+        expect(target.antigravityQuotaHealth.models['gemini-3.1-flash-lite']).toMatchObject({
+            isHealthy: false,
+            lastErrorMessage: 'MODEL_CAPACITY_EXHAUSTED',
+            scheduledRecoveryTime: recoveryTime.toISOString(),
+            source: 'upstream_capacity'
+        });
+    });
+
     test('keeps Gemini providers schedulable when official 5h or weekly usage reaches 100 percent', async () => {
         writeUsageCache([
             paidUsage('aaa-gemini-over', [

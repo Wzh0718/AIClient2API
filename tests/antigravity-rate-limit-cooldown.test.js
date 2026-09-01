@@ -98,6 +98,7 @@ describe('Antigravity model quota cooldown', () => {
             serviceConfig: {}
         });
         const providerPoolManager = {
+            markAntigravityModelCapacityUnavailable: jest.fn(),
             markAntigravityModelQuotaUnhealthy: jest.fn(),
             markProviderUnhealthyWithRecoveryTime: jest.fn(),
             markProviderUnhealthy: jest.fn(),
@@ -137,11 +138,10 @@ describe('Antigravity model quota cooldown', () => {
         expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
         expect(providerPoolManager.markProviderUnhealthyImmediately).not.toHaveBeenCalled();
         expect(providerPoolManager.markProviderUnhealthyWithRecoveryTime).not.toHaveBeenCalled();
-        expect(providerPoolManager.markAntigravityModelQuotaUnhealthy).toHaveBeenCalledWith(
+        expect(providerPoolManager.markAntigravityModelCapacityUnavailable).toHaveBeenCalledWith(
             'gemini-antigravity',
             { uuid: 'provider-ultra-1' },
             'gemini-3.1-flash-image',
-            '429 Too Many Requests - model cooldown',
             expect.any(Date)
         );
         expect(res.body).toContain('antigravity-capacity-retry-success');
@@ -152,6 +152,7 @@ describe('Antigravity model quota cooldown', () => {
         const firstService = { generateContent: jest.fn().mockRejectedValue(createCapacityError()) };
         mockGetApiServiceWithFallback.mockRejectedValueOnce(new Error('No healthy provider found in pool'));
         const providerPoolManager = {
+            markAntigravityModelCapacityUnavailable: jest.fn(),
             markAntigravityModelQuotaUnhealthy: jest.fn(),
             markProviderUnhealthyWithRecoveryTime: jest.fn(),
             markProviderUnhealthy: jest.fn(),
@@ -176,10 +177,10 @@ describe('Antigravity model quota cooldown', () => {
             { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 1 }, maxRetries: 1 }
         );
 
-        expect(res.statusCode).toBe(429);
+        expect(res.statusCode).toBe(503);
         expect(JSON.parse(res.body).error).toMatchObject({
-            code: 429,
-            status: 'RESOURCE_EXHAUSTED'
+            code: 503,
+            status: 'INTERNAL'
         });
         expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
     });
@@ -195,7 +196,10 @@ describe('Antigravity model quota cooldown', () => {
         jest.spyOn(Date, 'now').mockReturnValue(now);
         const error = createQuotaError({ resetDelay: '2m' });
         error.response.headers = { 'retry-after': '30' };
-        const providerPoolManager = { markAntigravityModelQuotaUnhealthy: jest.fn() };
+        const providerPoolManager = {
+            markAntigravityModelQuotaUnhealthy: jest.fn(),
+            markAntigravityModelCapacityUnavailable: jest.fn()
+        };
 
         applyProviderRateLimitCooldown({
             error,
@@ -215,9 +219,12 @@ describe('Antigravity model quota cooldown', () => {
         );
     });
 
-    test('treats explicit model capacity exhaustion as a model cooldown while preserving 429 semantics', () => {
+    test('treats explicit model capacity exhaustion as a model cooldown while preserving 503 semantics', () => {
         jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-08-10T08:00:00Z'));
-        const providerPoolManager = { markAntigravityModelQuotaUnhealthy: jest.fn() };
+        const providerPoolManager = {
+            markAntigravityModelQuotaUnhealthy: jest.fn(),
+            markAntigravityModelCapacityUnavailable: jest.fn()
+        };
         const error = createCapacityCodeError();
 
         const applied = applyProviderRateLimitCooldown({
@@ -230,19 +237,21 @@ describe('Antigravity model quota cooldown', () => {
         });
 
         expect(applied).toBe(true);
-        expect(error.status).toBe(429);
+        expect(error.status).toBe(503);
         expect(error.isAntigravityModelCapacity).toBe(true);
-        expect(providerPoolManager.markAntigravityModelQuotaUnhealthy).toHaveBeenCalledWith(
+        expect(providerPoolManager.markAntigravityModelCapacityUnavailable).toHaveBeenCalledWith(
             'gemini-antigravity',
             { uuid: 'provider-pro-1' },
             'gemini-3.1-flash-lite',
-            '429 Too Many Requests - model cooldown',
             expect.any(Date)
         );
     });
 
     test('preserves 503 capacity semantics while marking the credential retryable', () => {
-        const providerPoolManager = { markAntigravityModelQuotaUnhealthy: jest.fn() };
+        const providerPoolManager = {
+            markAntigravityModelQuotaUnhealthy: jest.fn(),
+            markAntigravityModelCapacityUnavailable: jest.fn()
+        };
         const error = createCapacityCodeError();
 
         const applied = applyProviderRateLimitCooldown({
@@ -260,7 +269,12 @@ describe('Antigravity model quota cooldown', () => {
         expect(error.code).toBe('MODEL_CAPACITY_UNAVAILABLE');
         expect(error.shouldSwitchCredential).toBe(true);
         expect(error.isAntigravityModelCapacity).toBe(true);
-        expect(providerPoolManager.markAntigravityModelQuotaUnhealthy).not.toHaveBeenCalled();
+        expect(providerPoolManager.markAntigravityModelCapacityUnavailable).toHaveBeenCalledWith(
+            'gemini-antigravity',
+            { uuid: 'provider-pro-1' },
+            'gemini-3.1-flash-lite',
+            expect.any(Date)
+        );
     });
 
     test('marks only the exact Antigravity model as cooling down', () => {
