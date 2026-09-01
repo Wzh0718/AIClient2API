@@ -224,6 +224,24 @@ function compactKeyForList(key) {
     return result;
 }
 
+function compactFixedCredential(fixedCredential) {
+    if (!fixedCredential?.uuid) return fixedCredential || null;
+    return {
+        providerType: fixedCredential.providerType || 'openai-codex-oauth',
+        credentialRef: getCredentialRef(
+            fixedCredential.providerType || 'openai-codex-oauth',
+            fixedCredential.uuid
+        )
+    };
+}
+
+function sanitizeKeyManagementData(keyData = {}) {
+    const keyRef = hashSecret(keyData.id);
+    const result = { ...keyData, id: keyRef, keyRef };
+    result.fixedCredential = compactFixedCredential(result.fixedCredential);
+    return result;
+}
+
 function formatDailyLimitMessage(dailyLimit) {
     return dailyLimit === 0 ? '不限量' : dailyLimit;
 }
@@ -253,15 +271,17 @@ function sendManagementMutationResponse(res, {
 }
 
 function compactKeyManagementMutationData(keyData = {}) {
+    const keyRef = hashSecret(keyData.id);
     return {
-        id: keyData.id || null,
+        id: keyRef,
+        keyRef,
         name: keyData.name || '',
         enabled: keyData.enabled !== false,
         dailyLimit: Number(keyData.dailyLimit || 0),
         lastResetDate: keyData.lastResetDate || null,
         routingMode: keyData.routingMode || 'pool',
         primaryGroupId: keyData.primaryGroupId || null,
-        fixedCredential: keyData.fixedCredential ? { ...keyData.fixedCredential } : null,
+        fixedCredential: compactFixedCredential(keyData.fixedCredential),
         manualLock: keyData.manualLock === true,
         concurrencyLimit: Number(keyData.concurrencyLimit || 0),
         queueLimit: Number(keyData.queueLimit || 0),
@@ -899,6 +919,11 @@ async function loadLedgerRangeStatsForRange(range, conversionModel, options = {}
         extraRows,
         keySummaryRows
     });
+    if (stats.keySummaries) {
+        stats.keySummaries = Object.fromEntries(
+            Object.entries(stats.keySummaries).map(([keyId, summary]) => [hashSecret(keyId), summary])
+        );
+    }
     const ledgerDates = listLedgerDates(ledgerDailyDir);
     const today = getBeijingDateKey();
     const result = {
@@ -1350,7 +1375,7 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                     success: true,
                     data: {
                         ...data,
-                        keySummary: data.keySummaries?.[keyId] || null,
+                        keySummary: data.keySummaries?.[hashSecret(keyId)] || null,
                         keySummaries: undefined
                     }
                 });
@@ -1364,7 +1389,7 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                     sendJson(res, 404, { success: false, error: { message: '未找到 Key' } });
                     return true;
                 }
-                sendJson(res, 200, { success: true, data: keyData });
+                sendJson(res, 200, { success: true, data: sanitizeKeyManagementData(keyData) });
                 return true;
             }
 
@@ -1377,7 +1402,8 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 }
                 sendManagementMutationResponse(res, {
                     result: deleted,
-                    message: 'Key 删除成功'
+                    message: 'Key 删除成功',
+                    data: compactKeyManagementMutationData(deleted)
                 });
                 return true;
             }
@@ -1542,8 +1568,8 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                     result,
                     message: 'Key 重新生成成功',
                     data: {
-                        oldKey: result.oldKey,
-                        newKey: result.newKey,
+                        oldKeyRef: hashSecret(result.oldKey),
+                        newKeyRef: hashSecret(result.newKey),
                         keyData: compactKeyManagementMutationData(result.keyData)
                     }
                 });

@@ -65,4 +65,17 @@ describe('API Potluck ledger range stats surface', () => {
         expect(source).toContain('from=${encodeURIComponent(currentCustomRange.from)}');
         expect(source).toContain('to=${encodeURIComponent(currentCustomRange.to)}');
     });
+
+    test('uses sanitized key references consistently for range summaries and local full-key search', () => {
+        const source = loadSource('src/plugins/api-potluck/api-routes.js');
+        const html = loadSource('static/potluck.html');
+
+        expect(source).toContain('keySummaries');
+        expect(source).toContain('hashSecret(keyId)');
+        expect(source).toContain('keySummary: data.keySummaries?.[hashSecret(keyId)] || null');
+        expect(html).toContain('ledgerData?.keySummaries?.[key?.keyRef || key?.id]');
+        expect(html).toContain('crypto.subtle.digest');
+        expect(html).toContain('SHA-256');
+        expect(html).toContain('filterRequestSerial');
+    });
 });
