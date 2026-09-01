@@ -650,7 +650,10 @@ export class ProviderPoolManager {
             cacheMisses: 0,
             providersScanned: 0,
             unavailableProviders: 0,
-            crossWorkerReuse: 0
+            crossWorkerReuse: 0,
+            fastPathHits: 0,
+            fastPathMisses: 0,
+            fastPathFallbackFailures: 0
         };
         this._providerSelectionLoadStats = new Map();
         this._poolKeySchedulers = new Map();
@@ -1784,6 +1787,31 @@ export class ProviderPoolManager {
 
     _getCodexPoolSnapshotScope(providerType, bucket) {
         return `codex-pool:${providerType}:${bucket}:${this.providerConfigRevision}`;
+    }
+
+    async _getCodex53ExhaustedFastPath(providerType, requestedModel) {
+        if (providerType !== 'openai-codex-oauth' || requestedModel !== 'gpt-5.3-codex-spark') return null;
+        const providers = this.providerStatus[providerType] || [];
+        if (!providers.length) return null;
+        await this._hydrateCodexPoolSnapshot(providerType, providers, requestedModel);
+        const snapshotKey = `${providerType}:codex53`;
+        const snapshot = this._codexPoolExhaustedSnapshots.get(snapshotKey);
+        const usageCache = readFreshUsageCacheSync();
+        const usageCacheVersion = getCodexUsageCacheVersion(usageCache);
+        const now = Date.now();
+        const stateFingerprint = this._getCodexPoolStateFingerprint(providers, 'codex53');
+        const valid = snapshot
+            && snapshot.exhausted === true
+            && snapshot.expiresAt > now
+            && snapshot.providerConfigRevision === this.providerConfigRevision
+            && snapshot.stateFingerprint === stateFingerprint
+            && (snapshot.usageCacheVersion || 'none') === usageCacheVersion;
+        if (!valid) {
+            this._codexQuotaFilterMetrics.fastPathMisses += 1;
+            return null;
+        }
+        this._codexQuotaFilterMetrics.fastPathHits += 1;
+        return snapshot;
     }
 
     _getCodexPoolStateFingerprint(providers, bucket) {
@@ -2976,11 +3004,13 @@ export class ProviderPoolManager {
             error.code = 429;
             error.filterReasons = filterReasons;
             this._codexPoolExhaustedSnapshots.set(snapshotKey, {
+                exhausted: true,
                 expiresAt: Date.now() + snapshotTtlMs,
                 providerConfigRevision: this.providerConfigRevision,
                 stateFingerprint: getStateFingerprint(),
                 message,
-                filterReasons: { ...filterReasons }
+                filterReasons: { ...filterReasons },
+                usageCacheVersion
             });
             const lock = this._codexPoolSnapshotLocks.get(snapshotKey);
             if (this.coordination?.setRuntimeSnapshot) {
@@ -2990,7 +3020,8 @@ export class ProviderPoolManager {
                     message,
                     filterReasons: { ...filterReasons },
                     exhausted: true,
-                    ttlMs: snapshotTtlMs
+                    ttlMs: snapshotTtlMs,
+                    usageCacheVersion
                 }, { ttlMs: snapshotTtlMs })).catch(() => {});
             }
             if (lock && this.coordination?.releaseRuntimeSnapshotLock) {
@@ -3739,6 +3770,23 @@ export class ProviderPoolManager {
             return mixedSelection;
         }
 
+        const exhaustedFastPath = await this._getCodex53ExhaustedFastPath(providerType, requestedModel);
+        if (exhaustedFastPath) {
+            const targetModel = getCodex53QuotaFallbackModel(this.globalConfig);
+            const selectedConfig = await this.selectProvider(providerType, targetModel, options);
+            if (selectedConfig) {
+                this._log('info', `Fast path activated (Codex 5.3 quota): ${providerType} (${requestedModel}) -> ${providerType} (${targetModel}) (snapshot exhausted)`);
+                return {
+                    config: selectedConfig,
+                    actualProviderType: providerType,
+                    isFallback: true,
+                    actualModel: targetModel,
+                    modelFallbackReason: 'CODEX53_POOL_EXHAUSTED'
+                };
+            }
+            this._codexQuotaFilterMetrics.fastPathFallbackFailures += 1;
+        }
+
         // ==========================
         // 优先级 1: Provider Fallback Chain (同协议/兼容协议的回退)
         // ==========================
@@ -4328,6 +4376,56 @@ export class ProviderPoolManager {
                 retryAfterMs,
                 reason: errorMessage || 'upstream_429'
             }).catch(error => this._log('warn', `Failed to publish Antigravity cooldown: ${error.message}`));
+        }
+        this._debouncedSave(providerType);
+    }
+
+    markAntigravityModelCapacityUnavailable(providerType, providerConfig, modelName, recoveryTime = null, errorMessage = 'MODEL_CAPACITY_EXHAUSTED') {
+        if (!providerConfig?.uuid || !isAntigravityProviderType(providerType)) return;
+        const provider = this._findProvider(providerType, providerConfig.uuid);
+        if (!provider) return;
+
+        const canonicalModel = normalizeAntigravityQuotaModel(modelName);
+        if (!canonicalModel) return;
+        provider.config.antigravityQuotaHealth = provider.config.antigravityQuotaHealth || {};
+        provider.config.antigravityQuotaHealth.families = provider.config.antigravityQuotaHealth.families || {};
+        provider.config.antigravityQuotaHealth.models = provider.config.antigravityQuotaHealth.models || {};
+        const existing = provider.config.antigravityQuotaHealth.models[canonicalModel];
+        if (typeof recoveryTime === 'string' && errorMessage instanceof Date) {
+            [recoveryTime, errorMessage] = [errorMessage, recoveryTime];
+        }
+        const recoveryDate = recoveryTime ? new Date(recoveryTime) : null;
+        const requestedRecoveryMs = recoveryDate && Number.isFinite(recoveryDate.getTime())
+            ? recoveryDate.getTime()
+            : NaN;
+        const existingRecoveryMs = Date.parse(existing?.scheduledRecoveryTime || '');
+        const recoveryMs = Number.isFinite(existingRecoveryMs) && Number.isFinite(requestedRecoveryMs)
+            ? Math.max(existingRecoveryMs, requestedRecoveryMs)
+            : (Number.isFinite(requestedRecoveryMs) ? requestedRecoveryMs : existingRecoveryMs);
+        const now = new Date().toISOString();
+        const nextState = {
+            isHealthy: false,
+            lastErrorTime: now,
+            lastErrorMessage: errorMessage,
+            scheduledRecoveryTime: Number.isFinite(recoveryMs) ? new Date(recoveryMs).toISOString() : null,
+            source: 'upstream_capacity'
+        };
+        if (existing
+            && existing.isHealthy === nextState.isHealthy
+            && (existing.lastErrorMessage || null) === nextState.lastErrorMessage
+            && (existing.scheduledRecoveryTime || null) === nextState.scheduledRecoveryTime
+            && existing.source === nextState.source) {
+            return;
+        }
+        provider.config.antigravityQuotaHealth.models[canonicalModel] = nextState;
+        provider.config.lastUsed = now;
+        this._log('warn', `Marked Antigravity model ${canonicalModel} as capacity cooling down for ${this._getDisplayName(provider.config)} until ${nextState.scheduledRecoveryTime || 'manual recovery'}`);
+        if (this.coordination?.setProviderModelCooldown) {
+            const retryAfterMs = Number.isFinite(recoveryMs) ? Math.max(1000, recoveryMs - Date.now()) : 15_000;
+            this.coordination.setProviderModelCooldown(providerType, provider.config.uuid, canonicalModel, {
+                retryAfterMs,
+                reason: errorMessage
+            }).catch(error => this._log('warn', `Failed to publish Antigravity capacity cooldown: ${error.message}`));
         }
         this._debouncedSave(providerType);
     }

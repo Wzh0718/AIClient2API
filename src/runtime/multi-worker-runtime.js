@@ -12,6 +12,30 @@ function addMapValues(target, source = {}) {
     for (const [key, value] of Object.entries(source)) target[key] = (target[key] || 0) + Number(value || 0);
 }
 
+const CODEX_QUOTA_METRIC_FIELDS = [
+    'codexQuotaFilterCalls',
+    'codexQuotaFilterCacheHits',
+    'codexQuotaFilterCacheMisses',
+    'codexQuotaProvidersScanned',
+    'codexQuotaUnavailableProviders',
+    'codexQuotaCrossWorkerReuse',
+    'codexQuotaSnapshotAgeMs',
+    'activeSnapshots',
+    'fastPathHits',
+    'fastPathMisses',
+    'fastPathFallbackFailures',
+    'snapshotAgeMs',
+    'cacheHitRatio'
+];
+
+function sanitizeCodexQuotaMetrics(snapshot = {}) {
+    const sanitized = {};
+    for (const field of CODEX_QUOTA_METRIC_FIELDS) {
+        if (snapshot[field] !== undefined) sanitized[field] = Number(snapshot[field]) || 0;
+    }
+    return sanitized;
+}
+
 export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
     const result = {
         requests: { total: 0, success: 0, failed: 0, byWorker: {}, byKind: {} },
@@ -57,6 +81,21 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
                 fallbacks: 0,
                 byModel: {}
             }
+        },
+        codexQuotaFilter: {
+            codexQuotaFilterCalls: 0,
+            codexQuotaFilterCacheHits: 0,
+            codexQuotaFilterCacheMisses: 0,
+            codexQuotaProvidersScanned: 0,
+            codexQuotaUnavailableProviders: 0,
+            codexQuotaCrossWorkerReuse: 0,
+            codexQuotaSnapshotAgeMs: 0,
+            activeSnapshots: 0,
+            fastPathHits: 0,
+            fastPathMisses: 0,
+            fastPathFallbackFailures: 0,
+            cacheHitRatio: 0,
+            byWorker: {}
         },
         potluckQuota: {
             localDegradedRequests: 0,
@@ -177,6 +216,29 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
                 result.providerCoordination.geminiScheduling.byModel[model] = aggregate;
             }
         }
+        if (snapshot?.codexQuotaFilter) {
+            const quota = snapshot.codexQuotaFilter;
+            const sanitizedQuota = sanitizeCodexQuotaMetrics(quota);
+            result.codexQuotaFilter.byWorker[workerId] = sanitizedQuota;
+            for (const field of [
+                'codexQuotaFilterCalls',
+                'codexQuotaFilterCacheHits',
+                'codexQuotaFilterCacheMisses',
+                'codexQuotaProvidersScanned',
+                'codexQuotaUnavailableProviders',
+                'codexQuotaCrossWorkerReuse',
+                'activeSnapshots',
+                'fastPathHits',
+                'fastPathMisses',
+                'fastPathFallbackFailures'
+            ]) {
+                result.codexQuotaFilter[field] += Number(sanitizedQuota[field] || 0);
+            }
+            result.codexQuotaFilter.codexQuotaSnapshotAgeMs = Math.max(
+                result.codexQuotaFilter.codexQuotaSnapshotAgeMs,
+                Number(sanitizedQuota.codexQuotaSnapshotAgeMs ?? sanitizedQuota.snapshotAgeMs ?? 0)
+            );
+        }
         if (snapshot?.potluckQuota) {
             result.potluckQuota.byWorker[workerId] = snapshot.potluckQuota;
             for (const field of ['localDegradedRequests', 'localRejected', 'coordinationErrors', 'finalizeErrors', 'localReservations', 'pendingUsage']) {
@@ -204,6 +266,10 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
     }
     result.temporaryRouting.missingCalendarYears = [...new Set(result.temporaryRouting.missingCalendarYears)]
         .sort((a, b) => a - b);
+    const quotaCalls = result.codexQuotaFilter.codexQuotaFilterCalls;
+    result.codexQuotaFilter.cacheHitRatio = quotaCalls > 0
+        ? result.codexQuotaFilter.codexQuotaFilterCacheHits / quotaCalls
+        : 0;
     return result;
 }
 

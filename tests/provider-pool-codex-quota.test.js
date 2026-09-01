@@ -60,7 +60,8 @@ function createQuotaPoolManager(overrides = {}) {
         logLevel: 'error',
         saveDebounceTime: 60 * 60 * 1000,
         globalConfig: {
-            PROVIDER_POOLS_FILE_PATH: 'configs/provider_pools.test.json'
+            PROVIDER_POOLS_FILE_PATH: 'configs/provider_pools.test.json',
+            CODEX_POOL_SNAPSHOT_TTL_MS: 30_000
         }
     });
     managers.push(manager);
@@ -775,6 +776,41 @@ describe('provider pool Codex token quota', () => {
 
         await expect(manager.selectProvider('openai-codex-oauth', 'gpt-5.3-codex-spark')).rejects.toMatchObject({ status: 429 });
         expect(manager._codexPoolExhaustedSnapshots.get('openai-codex-oauth:codex53')).toBe(firstSnapshot);
+    });
+
+    test('uses an exhausted snapshot fast path for repeated Spark fallback without rescanning Codex 5.3 providers', async () => {
+        writeCodexUsageCache([
+            { uuid: 'aaa-codex-over', success: true, usage: { summary: { plan: 'Pro' }, items: [
+                { id: 'primary_window', percent: 20, unit: 'percent' },
+                { id: 'secondary_window', percent: 20, unit: 'percent' },
+                { id: 'additional_gpt_5_3_codex_spark_primary_window', percent: 91, unit: 'percent' },
+                { id: 'additional_gpt_5_3_codex_spark_secondary_window', percent: 91, unit: 'percent' }
+            ] } },
+            { uuid: 'zzz-codex-ok', success: true, usage: { summary: { plan: 'Plus' }, items: [
+                { id: 'primary_window', percent: 20, unit: 'percent' },
+                { id: 'secondary_window', percent: 20, unit: 'percent' },
+                { id: 'additional_gpt_5_3_codex_spark_primary_window', percent: 91, unit: 'percent' },
+                { id: 'additional_gpt_5_3_codex_spark_secondary_window', percent: 91, unit: 'percent' }
+            ] } }
+        ]);
+        const manager = createQuotaPoolManager();
+        const filterSpy = jest.spyOn(manager, '_filterCodexProvidersByTokenQuota');
+
+        await expect(manager.selectProvider('openai-codex-oauth', 'gpt-5.3-codex-spark')).rejects.toMatchObject({ status: 429 });
+        const scannedAfterFirst = manager._codexQuotaFilterMetrics.providersScanned;
+        const selected = await manager.selectProviderWithFallback('openai-codex-oauth', 'gpt-5.3-codex-spark');
+
+        expect(manager._codexQuotaFilterMetrics).toMatchObject({ fastPathHits: 1, fastPathMisses: 0 });
+        expect(selected).toMatchObject({
+            actualProviderType: 'openai-codex-oauth',
+            actualModel: 'gpt-5.4-mini',
+            isFallback: true,
+            modelFallbackReason: 'CODEX53_POOL_EXHAUSTED'
+        });
+        expect(manager._codexQuotaFilterMetrics.providersScanned).toBe(scannedAfterFirst + 2);
+        expect(filterSpy).toHaveBeenCalledTimes(2);
+        expect(filterSpy.mock.calls[1][2]).toBe('gpt-5.4-mini');
+        expect(manager.getCodexQuotaFilterMetrics()).toMatchObject({ fastPathHits: 1, fastPathMisses: 0 });
     });
 
     test('does not persist unchanged quota or cooldown state repeatedly', () => {
