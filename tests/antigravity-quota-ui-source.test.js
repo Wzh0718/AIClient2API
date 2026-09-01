@@ -6,6 +6,34 @@ function readSource(relativePath) {
 }
 
 describe('Antigravity quota UI source', () => {
+    test('advertises the verified 22-model Antigravity display set', async () => {
+        const { PROVIDER_MODELS } = await import('../src/providers/provider-models.js');
+        expect(PROVIDER_MODELS['gemini-antigravity']).toEqual([
+            'gemini-2.5-flash',
+            'gemini-2.5-flash-lite',
+            'gemini-2.5-flash-thinking',
+            'gemini-3-flash',
+            'gemini-3.1-flash-image',
+            'gemini-3.1-flash-lite',
+            'gemini-3.1-pro-high',
+            'gemini-3.1-pro-low',
+            'gemini-3.5-flash-extra-low',
+            'gemini-3.5-flash-medium',
+            'gemini-3.6-flash',
+            'gemini-3.6-flash-high',
+            'gemini-3.6-flash-low',
+            'gemini-3.7-flash',
+            'gemini-3.7-flash-high',
+            'gemini-3.7-flash-low',
+            'gemini-claude-opus-4-6-thinking',
+            'gemini-claude-sonnet-4-6',
+            'claude-opus-4-6-thinking',
+            'claude-sonnet-4-6',
+            'gemini-pro-agent',
+            'gpt-oss-120b-medium',
+        ]);
+    });
+
     test('provider editor exposes four family quota thresholds', () => {
         const source = readSource('static/app/utils.js');
         const start = source.indexOf("'gemini-antigravity': [");
