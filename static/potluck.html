@@ -1737,10 +1737,19 @@
         const ACTUAL_VALUE_MODE = 'actual';
         let currentConversionModel = ACTUAL_VALUE_MODE;
         let currentDetailKeyId = null;
+        let filterRequestSerial = 0;
+        let filterDebounceTimer = null;
         let systemConfig = { defaultDailyLimit: 500 };
         const API_BASE = '/api/potluck';
 
         function getToken() { return localStorage.getItem('authToken'); }
+        async function hashSearchKey(value) {
+            if (!window.crypto?.subtle || !value) return null;
+            const bytes = new TextEncoder().encode(value);
+            const digest = await window.crypto.subtle.digest('SHA-256', bytes);
+            const hex = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+            return `sha256:${hex.slice(0, 16)}`;
+        }
         function formatNumber(num) { return new Intl.NumberFormat('zh-CN').format(Number(num || 0)); }
         function formatCompactNumber(value, units) {
             const number = Number(value || 0);
@@ -2604,7 +2613,7 @@
 
         function buildKeyRangeSummaryFromLedger(key, range = currentUsageRange) {
             const ledgerData = getLedgerRangeStatsFor(range);
-            const source = ledgerData?.keySummaries?.[key?.id];
+            const source = ledgerData?.keySummaries?.[key?.keyRef || key?.id];
             if (!source) return null;
 
             const summary = createUsageSummaryBucket();
@@ -3236,18 +3245,22 @@
             }
         }
 
-        function applyFilterAndSort() {
+        async function applyFilterAndSort() {
+            const requestSerial = ++filterRequestSerial;
             const searchTerm = document.getElementById('searchBox').value.toLowerCase().trim();
             const sortValue = document.getElementById('sortSelect').value;
             let filtered = allKeys;
             if (searchTerm) {
+                const searchKeyRef = await hashSearchKey(searchTerm);
+                if (requestSerial !== filterRequestSerial) return;
                 filtered = allKeys.filter(k => {
                     const name = String(k.name || '').toLowerCase();
                     const maskedKey = String(k.maskedKey || '').toLowerCase();
-                    const keyRef = String(k.id || '').toLowerCase();
+                    const keyRef = String(k.keyRef || k.id || '').toLowerCase();
                     return name.includes(searchTerm)
                         || maskedKey.includes(searchTerm)
-                        || keyRef.includes(searchTerm);
+                        || keyRef.includes(searchTerm)
+                        || keyRef === String(searchKeyRef || '').toLowerCase();
                 });
             }
             const [field, order] = sortValue.split('-');
@@ -3271,6 +3284,11 @@
                 return 0;
             });
             renderKeys(filtered);
+        }
+
+        function scheduleFilterAndSort() {
+            clearTimeout(filterDebounceTimer);
+            filterDebounceTimer = setTimeout(() => { void applyFilterAndSort(); }, 120);
         }
 
         function formatTime(isoStr) {
@@ -3444,7 +3462,9 @@
             if (!validateDailyLimit(dailyLimit)) return;
             const result = await apiRequest(`${API_BASE}/keys`, { method: 'POST', body: JSON.stringify({ name, dailyLimit }) });
             if (result && result.success) {
-                currentNewKey = result.data.id;
+                const detailResult = await apiRequest(`${API_BASE}/keys/${encodeURIComponent(result.data.id)}/detail`);
+                currentNewKey = detailResult?.success ? detailResult.data?.secret : '';
+                if (!currentNewKey) { showToast('Key 已创建，但完整 Key 获取失败', 'error'); return; }
                 document.getElementById('newKeyDisplay').textContent = currentNewKey;
                 closeModal('createModal');
                 openModal('showKeyModal');
@@ -3915,7 +3935,7 @@
         
         // 事件绑定
         document.getElementById('createKeyBtn').addEventListener('click', showCreateModal);
-        document.getElementById('searchBox').addEventListener('input', applyFilterAndSort);
+        document.getElementById('searchBox').addEventListener('input', scheduleFilterAndSort);
         document.getElementById('sortSelect').addEventListener('change', applyFilterAndSort);
         document.getElementById('conversionModelSelect')?.addEventListener('change', (event) => setConversionModel(event.target.value));
         document.getElementById('themeToggle')?.addEventListener('click', () => {

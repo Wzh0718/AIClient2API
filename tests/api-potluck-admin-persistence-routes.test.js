@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { Readable } from 'stream';
 
 const mockUpdateKeyName = jest.fn();
+const PUBLIC_KEY_ID = `sha256:${crypto.createHash('sha256').update('key-1').digest('hex').slice(0, 16)}`;
 
 jest.mock('../src/plugins/api-potluck/key-manager.js', () => ({
     createKey: jest.fn(),
@@ -98,7 +100,7 @@ describe('api potluck administration persistence responses', () => {
             success: true,
             persistencePending: true,
             data: {
-                id: 'key-1',
+                id: PUBLIC_KEY_ID,
                 name: 'Updated Name'
             }
         });
@@ -121,7 +123,7 @@ describe('api potluck administration persistence responses', () => {
             persistencePending: false,
             message: '名称更新成功',
             data: {
-                id: 'key-1',
+                id: PUBLIC_KEY_ID,
                 name: 'Updated Name'
             }
         });

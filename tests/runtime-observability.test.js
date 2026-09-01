@@ -13,6 +13,66 @@ import requestContext from '../src/utils/context.js';
 import { getRequestBody } from '../src/utils/common.js';
 
 describe('runtime observability baseline', () => {
+    test('aggregates per-worker Codex quota filter metrics without sensitive fields', () => {
+        const snapshots = new Map([
+            ['execution-1', {
+                codexQuotaFilter: {
+                    codexQuotaFilterCalls: 10,
+                    codexQuotaFilterCacheHits: 9,
+                    codexQuotaFilterCacheMisses: 1,
+                    codexQuotaProvidersScanned: 14,
+                    codexQuotaUnavailableProviders: 2,
+                    codexQuotaCrossWorkerReuse: 3,
+                    codexQuotaSnapshotAgeMs: 100,
+                    activeSnapshots: 1,
+                    fastPathHits: 4,
+                    fastPathMisses: 6,
+                    fastPathFallbackFailures: 1,
+                    snapshotAgeMs: 100,
+                    cacheHitRatio: 0.9,
+                    secretToken: 'must-not-leak'
+                }
+            }],
+            ['execution-2', {
+                codexQuotaFilter: {
+                    codexQuotaFilterCalls: 5,
+                    codexQuotaFilterCacheHits: 2,
+                    codexQuotaFilterCacheMisses: 3,
+                    codexQuotaProvidersScanned: 7,
+                    codexQuotaUnavailableProviders: 1,
+                    codexQuotaCrossWorkerReuse: 1,
+                    codexQuotaSnapshotAgeMs: 250,
+                    activeSnapshots: 2,
+                    fastPathHits: 1,
+                    fastPathMisses: 4,
+                    fastPathFallbackFailures: 0,
+                    snapshotAgeMs: 250
+                }
+            }]
+        ]);
+
+        const quota = aggregateWorkerMetrics(snapshots).codexQuotaFilter;
+        expect(quota).toMatchObject({
+            codexQuotaFilterCalls: 15,
+            codexQuotaFilterCacheHits: 11,
+            codexQuotaFilterCacheMisses: 4,
+            codexQuotaProvidersScanned: 21,
+            codexQuotaUnavailableProviders: 3,
+            codexQuotaCrossWorkerReuse: 4,
+            activeSnapshots: 3,
+            fastPathHits: 5,
+            fastPathMisses: 10,
+            fastPathFallbackFailures: 1,
+            codexQuotaSnapshotAgeMs: 250,
+            cacheHitRatio: 11 / 15,
+            byWorker: {
+                'execution-1': expect.objectContaining({ fastPathHits: 4 }),
+                'execution-2': expect.objectContaining({ fastPathHits: 1 })
+            }
+        });
+        expect(JSON.stringify(quota)).not.toMatch(/secretToken|must-not-leak/i);
+    });
+
     test('credential manifest excludes secrets while preserving scheduling inputs', () => {
         const pools = {
             'gemini-antigravity': [{
@@ -293,6 +353,21 @@ describe('runtime observability baseline', () => {
                     fallbacks: 0,
                     byModel: {}
                 }
+            },
+            codexQuotaFilter: {
+                codexQuotaFilterCalls: 0,
+                codexQuotaFilterCacheHits: 0,
+                codexQuotaFilterCacheMisses: 0,
+                codexQuotaProvidersScanned: 0,
+                codexQuotaUnavailableProviders: 0,
+                codexQuotaCrossWorkerReuse: 0,
+                codexQuotaSnapshotAgeMs: 0,
+                activeSnapshots: 0,
+                fastPathHits: 0,
+                fastPathMisses: 0,
+                fastPathFallbackFailures: 0,
+                cacheHitRatio: 0,
+                byWorker: {}
             },
             potluckQuota: {
                 localDegradedRequests: 0,

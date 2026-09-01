@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -107,7 +108,7 @@ async function callPotluckRoute(handler, method, routePath, body, token = 'admin
         }
     };
 
-    await handler(method, routePath, req, res);
+    await handler(method, routePath.split('?')[0], req, res);
     return { statusCode, body: JSON.parse(responseBody) };
 }
 
@@ -137,6 +138,105 @@ afterEach(() => {
 });
 
 describe('API Potluck key credential routing', () => {
+    test('uses sanitized identifiers for management detail and mutation responses while allowing on-demand secret retrieval', async () => {
+        const { keyManager, apiRoutes } = await loadPotluckModules();
+        const token = writeAdminToken();
+        const created = await keyManager.createKey('Public Contract', 1000);
+        const publicId = `sha256:${crypto.createHash('sha256').update(created.id).digest('hex').slice(0, 16)}`;
+
+        const detailResponse = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'GET',
+            `/api/potluck/keys/${encodeURIComponent(publicId)}`,
+            undefined,
+            token
+        );
+        expect(detailResponse.statusCode).toBe(200);
+        expect(detailResponse.body.data.id).toBe(publicId);
+        expect(JSON.stringify(detailResponse.body)).not.toContain(created.id);
+
+        const secretResponse = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'GET',
+            `/api/potluck/keys/${encodeURIComponent(publicId)}/detail`,
+            undefined,
+            token
+        );
+        expect(secretResponse.statusCode).toBe(200);
+        expect(secretResponse.body.data).toMatchObject({ id: publicId, secret: created.id });
+
+        const limitResponse = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'PUT',
+            `/api/potluck/keys/${encodeURIComponent(publicId)}/limit`,
+            { dailyLimit: 2000 },
+            token
+        );
+        expect(limitResponse.statusCode).toBe(200);
+        expect(limitResponse.body.data.id).toBe(publicId);
+        expect(JSON.stringify(limitResponse.body)).not.toContain(created.id);
+
+        const createResponse = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'POST',
+            '/api/potluck/keys',
+            { name: 'Created Public Contract', dailyLimit: 1000 },
+            token
+        );
+        expect(createResponse.statusCode).toBe(201);
+        expect(createResponse.body.data.id).toMatch(/^sha256:[a-f0-9]{16}$/);
+        expect(JSON.stringify(createResponse.body)).not.toContain(created.id);
+    });
+
+    test('returns range summaries indexed by sanitized key references', async () => {
+        const { keyManager, apiRoutes } = await loadPotluckModules();
+        const token = writeAdminToken();
+        const created = await keyManager.createKey('Range Contract', 1000);
+        const publicId = `sha256:${crypto.createHash('sha256').update(created.id).digest('hex').slice(0, 16)}`;
+        const date = '2026-08-12';
+        const ledgerDir = path.join(tempDir, 'configs', 'permanent-usage-ledger', 'daily');
+        fs.mkdirSync(ledgerDir, { recursive: true });
+        fs.writeFileSync(path.join(ledgerDir, `usage-${date}.jsonl`), `${JSON.stringify({
+            date,
+            provider: 'openai-codex-oauth',
+            accountKey: 'openai-codex-oauth:range@example.com',
+            accountEmail: 'range@example.com',
+            accountIdentity: 'range@example.com',
+            keyHash: publicId,
+            model: 'gpt-5.5',
+            usage: { requestCount: 3, promptTokens: 80, completionTokens: 20, totalTokens: 100 }
+        })}\n`, 'utf8');
+
+        const rangeResponse = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'GET',
+            `/api/potluck/range-stats?range=custom&from=${date}&to=${date}&includeKeys=1`,
+            undefined,
+            token
+        );
+        expect(rangeResponse.statusCode).toBe(200);
+        expect(rangeResponse.body.data.keySummaries[publicId].summary).toMatchObject({
+            requestCount: 3,
+            totalTokens: 100
+        });
+        expect(rangeResponse.body.data.keySummaries).not.toHaveProperty(created.id);
+        expect(JSON.stringify(rangeResponse.body)).not.toContain(created.id);
+
+        const keyRangeResponse = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'GET',
+            `/api/potluck/keys/${encodeURIComponent(publicId)}/range-stats?from=${date}&to=${date}`,
+            undefined,
+            token
+        );
+        expect(keyRangeResponse.statusCode).toBe(200);
+        expect(keyRangeResponse.body.data.keySummary.summary).toMatchObject({
+            requestCount: 3,
+            totalTokens: 100
+        });
+        expect(JSON.stringify(keyRangeResponse.body)).not.toContain(created.id);
+    });
+
     test('creates new keys with explicit whole-pool routing defaults', async () => {
         const { plugin } = await loadPotluckModules();
         const created = await plugin.exports.createKey('Default Routing', 1000);
@@ -315,7 +415,7 @@ describe('API Potluck key credential routing', () => {
                 primaryGroupId: null,
                 fixedCredential: {
                     providerType: 'openai-codex-oauth',
-                    uuid: 'cred-api'
+                    credentialRef: expect.any(String)
                 },
                 manualLock: true
             }
