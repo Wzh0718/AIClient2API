@@ -2226,7 +2226,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         // Convert the response back to the client's format (fromProvider), if necessary.
         let clientResponse = nativeResponse;
         if (needsConversion) {
-            logger.info(`[Response Convert] Converting response from ${toProvider} to ${fromProvider}`);
+            logger.debug(`[Response Convert] Converting response from ${toProvider} to ${fromProvider}`);
             clientResponse = convertData(nativeResponse, 'response', toProvider, fromProvider, model);
         }
         clientResponse = preserveClientResponseModel(clientResponse, retryContext);
@@ -2826,7 +2826,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         }
     }
 
-    logger.info(`[Content Generation] Model: ${model}, Stream: ${isStream}`);
+    logger.debug(`[Content Generation] Model: ${model}, Stream: ${isStream}`);
 
     let actualCustomName = CONFIG.customName;
     let actualAccountIdentity = CONFIG.codexAccountKey || CONFIG.codexAccountId || null;
@@ -2909,7 +2909,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         if (result.isFallback) {
             logger.info(`[Content Generation] Fallback activated: ${CONFIG.MODEL_PROVIDER} -> ${toProvider} (uuid: ${actualUuid})`);
         } else {
-            logger.info(`[Content Generation] Selected service adapter based on model: ${model}`);
+            logger.debug(`[Content Generation] Selected service adapter based on model: ${model}`);
         }
     }
 
@@ -2933,7 +2933,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     // fs.writeFile('originalRequestBody'+Date.now()+'.json', JSON.stringify(originalRequestBody));
     const requestConvertStartedAt = performance.now();
     if (getProtocolPrefix(fromProvider) !== getProtocolPrefix(toProvider)) {
-        logger.info(`[Request Convert] Converting request from ${fromProvider} to ${toProvider}`);
+        logger.debug(`[Request Convert] Converting request from ${fromProvider} to ${toProvider}`);
         const preConvertBody = processedRequestBody;
         processedRequestBody = convertData(preConvertBody, 'request', fromProvider, toProvider);
 
@@ -2944,7 +2944,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             }
         });
     } else {
-        logger.info(`[Request Convert] Request format matches backend provider. No conversion needed.`);
+        logger.debug(`[Request Convert] Request format matches backend provider. No conversion needed.`);
     }
     requestContext.get('runtimeRequest')?.recordStage?.('requestConvertMs', performance.now() - requestConvertStartedAt);
     

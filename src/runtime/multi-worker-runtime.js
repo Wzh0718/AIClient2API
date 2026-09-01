@@ -42,6 +42,22 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         stages: { byWorker: {} },
         output: { bytes: 0, backpressureMs: 0 },
         hooks: { pending: 0, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 0, consumerLag: 0, oldestPendingAgeMs: 0, available: true, unavailableWorkers: [], byWorker: {} },
+        usageEventBatch: {
+            flushCount: 0,
+            flushBySize: 0,
+            flushByTimer: 0,
+            flushByShutdown: 0,
+            eventsAppended: 0,
+            totalBatchSize: 0,
+            averageBatchSize: 0,
+            lastBatchSize: 0,
+            lastFlushMs: 0,
+            lastCommitMs: 0,
+            failedBatches: 0,
+            pending: 0,
+            queueAgeMs: 0,
+            byWorker: {}
+        },
         imageCapacity: {
             activeBytes: 0,
             queued: 0,
@@ -162,6 +178,17 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             }
             result.hooks.oldestPendingAgeMs = Math.max(result.hooks.oldestPendingAgeMs, Number(snapshot.hooks.oldestPendingAgeMs || 0));
         }
+        if (snapshot?.usageEventBatch) {
+            const batch = snapshot.usageEventBatch;
+            result.usageEventBatch.byWorker[workerId] = batch;
+            for (const field of ['flushCount', 'flushBySize', 'flushByTimer', 'flushByShutdown', 'eventsAppended', 'totalBatchSize', 'failedBatches', 'pending']) {
+                result.usageEventBatch[field] += Number(batch[field] || 0);
+            }
+            result.usageEventBatch.lastBatchSize = Math.max(result.usageEventBatch.lastBatchSize, Number(batch.lastBatchSize || 0));
+            result.usageEventBatch.lastFlushMs = Math.max(result.usageEventBatch.lastFlushMs, Number(batch.lastFlushMs || 0));
+            result.usageEventBatch.lastCommitMs = Math.max(result.usageEventBatch.lastCommitMs, Number(batch.lastCommitMs || batch.lastFlushMs || 0));
+            result.usageEventBatch.queueAgeMs = Math.max(result.usageEventBatch.queueAgeMs, Number(batch.queueAgeMs || 0));
+        }
         result.process.rss += Number(snapshot?.process?.rss || 0);
         result.process.heapUsed += Number(snapshot?.process?.heapUsed || 0);
         result.process.maxEventLoopUtilization = Math.max(result.process.maxEventLoopUtilization, Number(snapshot?.process?.eventLoopUtilization || 0));
@@ -270,6 +297,9 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
     result.codexQuotaFilter.cacheHitRatio = quotaCalls > 0
         ? result.codexQuotaFilter.codexQuotaFilterCacheHits / quotaCalls
         : 0;
+    if (result.usageEventBatch.flushCount > 0) {
+        result.usageEventBatch.averageBatchSize = result.usageEventBatch.totalBatchSize / result.usageEventBatch.flushCount;
+    }
     return result;
 }
 

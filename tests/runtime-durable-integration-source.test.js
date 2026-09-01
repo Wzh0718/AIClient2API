@@ -12,6 +12,9 @@ describe('runtime durable hook integration source', () => {
         expect(server).toContain('createRuntimeHookStreamFromEnv');
         expect(server).toContain('runtimeHookStream.readBatch');
         expect(server).toContain('runtimeHookConsumer.consumeBatch(events)');
+        expect(server).toContain('RuntimeEventBatcher');
+        expect(server).toContain('USAGE_EVENT_BATCH_FLUSH_MS');
+        expect(server).toContain('runtimeEventBatcher?.close?.()');
         expect(server).toContain('RuntimeUsageProjector');
         expect(server).toContain('scheduleProjections');
         expect(server).toContain('let usageProjectionRefreshPromise = null');

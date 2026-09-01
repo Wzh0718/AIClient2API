@@ -21,6 +21,7 @@ import { RuntimeEventConsumer, createDurableRuntimeHookApply } from '../runtime/
 import { createRuntimeHookStreamFromEnv } from '../runtime/runtime-hook-stream.js';
 import { createUsageEventStore } from '../runtime/usage-event-store.js';
 import { RuntimeUsageProjector } from '../runtime/runtime-usage-projector.js';
+import { RuntimeEventBatcher } from '../runtime/runtime-event-batcher.js';
 import { migrateCodexFingerprintProviderPoolsFile } from '../utils/codex-fingerprint-migration.js';
 import { invalidateServiceAdapter } from '../providers/adapter.js';
 import { runtimeImageCapacity } from '../runtime/runtime-image-capacity.js';
@@ -157,6 +158,7 @@ let runtimeHookStream = null;
 let usageEventStore = null;
 let usageEventStoreSnapshot = null;
 let runtimeUsageProjector = null;
+let runtimeEventBatcher = null;
 let usageProjectionRefreshPromise = null;
 let usageProjectionRefreshRequested = false;
 let usageEventMaintenanceTimerId = null;
@@ -214,6 +216,21 @@ const runtimeHookConsumer = new RuntimeEventConsumer({
     }
 });
 
+function getRuntimeEventBatcher() {
+    if (!runtimeEventBatcher) {
+        runtimeEventBatcher = new RuntimeEventBatcher({
+            maxSize: Math.max(1, Number(process.env.USAGE_EVENT_BATCH_SIZE ?? CONFIG.USAGE_EVENT_BATCH_SIZE ?? 100)),
+            flushMs: Math.max(0, Number(process.env.USAGE_EVENT_BATCH_FLUSH_MS ?? CONFIG.USAGE_EVENT_BATCH_FLUSH_MS ?? 1000)),
+            flush: events => runtimeHookConsumer.consumeBatch(events)
+        });
+    }
+    return runtimeEventBatcher;
+}
+
+function enqueueRuntimeHookEvent(event) {
+    return getRuntimeEventBatcher().push(event);
+}
+
 function getRuntimeHookSnapshot() {
     const bridgeSnapshot = getPluginManager()?.runtimeHookBridge?.snapshot?.() || {};
     const streamSnapshot = runtimeHookStream?.snapshot?.() || {};
@@ -270,6 +287,7 @@ function buildRuntimeMetricsSnapshot() {
         codexQuotaFilter: getProviderPoolManager()?.getCodexQuotaFilterMetrics?.() || null,
         potluckQuota: getPotluckQuotaMetrics(),
         requestAudit: getRequestAuditMetrics(),
+        usageEventBatch: runtimeEventBatcher?.snapshot?.() || null,
         hooks: getRuntimeHookSnapshot()
     };
 }
@@ -284,7 +302,9 @@ function startRuntimeHookPolling() {
                     count: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_SIZE || process.env.USAGE_EVENT_BATCH_SIZE || 100)),
                     blockMs: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_WAIT_MS || process.env.USAGE_EVENT_BATCH_WAIT_MS || 20))
                 });
-                await runtimeHookConsumer.consumeBatch(events);
+                if (events.length > 0) {
+                    await Promise.all(events.map(event => enqueueRuntimeHookEvent(event)));
+                }
                 runtimeHookStreamStatus = await runtimeHookStream.pendingSnapshot();
             } catch (error) {
                 if (!runtimeHookPollStopped) {
@@ -308,6 +328,8 @@ async function stopRuntimeHookTransport() {
     }
     runtimeHookPollStopped = true;
     await runtimeHookPollPromise;
+    await runtimeEventBatcher?.close?.();
+    runtimeEventBatcher = null;
     await getPluginManager()?.runtimeHookBridge?.drain?.({ timeoutMs: 20000 });
     await runtimeHookStream?.flushSpool?.();
     await runtimeUsageProjector?.drain?.();
@@ -557,9 +579,9 @@ async function startServer() {
         });
         usageEventStoreSnapshot = await usageEventStore.snapshot();
         pluginManager.configureRuntimeHookBridge({
-            durableTransport: {
-                publish: async event => {
-                    const result = await runtimeHookConsumer.consumeBatch([event]);
+                durableTransport: {
+                    publish: async event => {
+                    const result = await enqueueRuntimeHookEvent(event);
                     usageEventStoreSnapshot = await usageEventStore.snapshot();
                     return { streamId: `local:${event.eventId}`, ...result };
                 },
@@ -927,7 +949,7 @@ const shutdownHandlers = registerWorkerShutdownHandlers({
             return true;
         }
         if (message.type === 'runtime_hook' && RUNTIME_WORKER_ROLE === 'control') {
-            runtimeHookConsumer.consumeBatch([message]).catch(error => {
+            enqueueRuntimeHookEvent(message).catch(error => {
                 logger.error('[Runtime Hook] Failed to apply remote hook:', error.message);
             });
             return true;

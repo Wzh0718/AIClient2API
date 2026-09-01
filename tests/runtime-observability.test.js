@@ -177,6 +177,7 @@ describe('runtime observability baseline', () => {
             workerId: 'execution-1',
             kind: 'model',
             metadata: {
+                requestId: 'req-42',
                 method: 'POST',
                 path: '/v1/chat/completions',
                 model: 'gpt-5.5',
@@ -196,6 +197,7 @@ describe('runtime observability baseline', () => {
             statusCode: 200,
             durationMs: 60,
             metadata: {
+                requestId: 'req-42',
                 method: 'POST',
                 path: '/v1/chat/completions',
                 model: 'gpt-5.5',
@@ -314,6 +316,22 @@ describe('runtime observability baseline', () => {
             stages: { byWorker: {} },
             output: { bytes: 300, backpressureMs: 10 },
             hooks: { pending: 0, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 0, consumerLag: 0, oldestPendingAgeMs: 0, available: true, unavailableWorkers: [], byWorker: {} },
+            usageEventBatch: {
+                flushCount: 0,
+                flushBySize: 0,
+                flushByTimer: 0,
+                flushByShutdown: 0,
+                eventsAppended: 0,
+                totalBatchSize: 0,
+                averageBatchSize: 0,
+                lastBatchSize: 0,
+                lastFlushMs: 0,
+                failedBatches: 0,
+                pending: 0,
+                queueAgeMs: 0,
+                lastCommitMs: 0,
+                byWorker: {}
+            },
             inFlight: 3,
             process: { rss: 2200, heapUsed: 1100, maxEventLoopUtilization: 0.3, eventLoopDelay: { p95: 15, p99: 22, max: 30 } },
             imageCapacity: {
@@ -454,6 +472,54 @@ describe('runtime observability baseline', () => {
             byWorker: {
                 'execution-1': snapshots.get('execution-1').stages,
                 'execution-2': snapshots.get('execution-2').stages
+            }
+        });
+    });
+
+    test('aggregates usage event batch metrics by worker', () => {
+        const snapshots = new Map([
+            ['control-1', { usageEventBatch: {
+                flushCount: 2,
+                flushBySize: 1,
+                flushByTimer: 1,
+                eventsAppended: 8,
+                totalBatchSize: 8,
+                averageBatchSize: 4,
+                lastBatchSize: 4,
+                lastFlushMs: 12,
+                failedBatches: 0,
+                pending: 2,
+                queueAgeMs: 50
+            } }],
+            ['execution-1', { usageEventBatch: {
+                flushCount: 1,
+                flushBySize: 0,
+                flushByTimer: 1,
+                eventsAppended: 3,
+                totalBatchSize: 3,
+                averageBatchSize: 3,
+                lastBatchSize: 3,
+                lastFlushMs: 8,
+                failedBatches: 1,
+                pending: 1,
+                queueAgeMs: 90
+            } }]
+        ]);
+
+        expect(aggregateWorkerMetrics(snapshots).usageEventBatch).toMatchObject({
+            flushCount: 3,
+            flushBySize: 1,
+            flushByTimer: 2,
+            eventsAppended: 11,
+            averageBatchSize: 11 / 3,
+            lastBatchSize: 4,
+            lastFlushMs: 12,
+            failedBatches: 1,
+            pending: 3,
+            queueAgeMs: 90,
+            byWorker: {
+                'control-1': expect.any(Object),
+                'execution-1': expect.any(Object)
             }
         });
     });

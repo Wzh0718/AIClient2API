@@ -11,7 +11,7 @@ function readSampleRate(value, fallback = 0) {
 
 function safeMetadata(metadata = {}) {
     const allowed = [
-        'method', 'path', 'model', 'providerType', 'stream',
+        'requestId', 'method', 'path', 'model', 'providerType', 'stream',
         'requestBodyBytes', 'responseStatus',
         'geminiSelection', 'geminiRetryCount', 'geminiFallbackCount', 'geminiFinalProviderUuidHash', 'clientAborted'
     ];

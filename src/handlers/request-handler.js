@@ -16,6 +16,7 @@ import { randomUUID } from 'crypto';
 import { handleGrokAssetsProxy } from '../utils/grok-assets-proxy.js';
 import { instrumentResponseForAudit } from '../utils/request-audit-lifecycle.js';
 import { runtimeMetrics } from '../runtime/runtime-metrics.js';
+import { formatSuccessLog } from '../runtime/success-log.js';
 
 /**
  * Generate a collision-resistant server-side request ID.
@@ -24,10 +25,14 @@ function generateRequestId() {
     return randomUUID();
 }
 
-function logRequestProfile(profile) {
-    if (!profile) return;
+function logRequestCompletion(completion, config = {}) {
+    if (!completion) return;
     try {
-        logger.info(`[Request Perf] ${JSON.stringify(profile)}`);
+        const formatted = formatSuccessLog(completion, {
+            mode: process.env.REQUEST_SUCCESS_LOG_MODE ?? config.REQUEST_SUCCESS_LOG_MODE,
+            sampleRate: process.env.REQUEST_SUCCESS_LOG_SAMPLE_RATE ?? config.REQUEST_SUCCESS_LOG_SAMPLE_RATE
+        });
+        if (formatted) logger.info(`[Request Completed] ${formatted}`);
     } catch {
         // Performance diagnostics must never affect request handling.
     }
@@ -87,11 +92,17 @@ export function createRequestHandler(config, providerPoolManager) {
         const runtimeRequest = runtimeMetrics.beginRequest({
             workerId,
             kind: requestKind,
-            metadata: { method: req.method, path: originalPath }
+            metadata: { requestId, method: req.method, path: originalPath }
         });
         res.runtimeRequest = runtimeRequest;
         instrumentResponseMetrics(res, runtimeRequest);
         let runtimeCompletion = null;
+        let completionLogged = false;
+        const logOnce = statusCode => {
+            if (completionLogged) return;
+            completionLogged = true;
+            logRequestCompletion(finalizeRuntime(statusCode), config);
+        };
         const finalizeRuntime = statusCode => {
             runtimeCompletion ||= runtimeRequest.end({ statusCode });
             return runtimeCompletion;
@@ -100,13 +111,11 @@ export function createRequestHandler(config, providerPoolManager) {
         // EventEmitter methods. Real Node responses still get lifecycle metrics;
         // lightweight test doubles continue through the normal handler path.
         if (typeof res.once === 'function') {
-            res.once('finish', () => {
-                finalizeRuntime(res.statusCode);
-                logRequestProfile(runtimeRequest.getProfile?.());
-            });
-            res.once('close', () => {
-                finalizeRuntime(res.statusCode || 499);
-                logRequestProfile(runtimeRequest.getProfile?.());
+                res.once('finish', () => {
+                    logOnce(res.statusCode);
+                });
+                res.once('close', () => {
+                    logOnce(res.statusCode || 499);
             });
         }
 
@@ -210,7 +219,7 @@ export function createRequestHandler(config, providerPoolManager) {
                     if (uiHandled) return;
 
                     // logger.info(`\n${new Date().toLocaleString()}`);
-                    logger.info(`[Server] Received request: ${req.method} http://${req.headers.host}${req.url}`);
+                    logger.debug(`[Server] Received request: ${req.method} http://${req.headers.host}${req.url}`);
 
                     // Health check endpoint
                     if (method === 'GET' && path === '/health') {
