@@ -30,6 +30,8 @@ function boundedPositive(value, fallback, minimum = 1) {
     return Number.isFinite(number) && number >= minimum ? number : fallback;
 }
 
+const MAX_BATCH_SIZE = 10_000;
+
 export class RuntimeEventBatcher {
     constructor({
         flush,
@@ -46,10 +48,10 @@ export class RuntimeEventBatcher {
     } = {}) {
         if (typeof flush !== 'function') throw new TypeError('flush callback is required');
         this.flush = flush;
-        this.maxSize = Math.max(1, Number(maxSize) || 1);
+        this.maxSize = Math.min(MAX_BATCH_SIZE, Math.max(1, Number(maxSize) || 1));
         this.flushMs = Math.max(0, Number(flushMs) || 0);
-        const defaultMaxPending = Math.min(10_000, Math.max(1_000, this.maxSize * 10));
-        this.maxPending = Math.max(this.maxSize, boundedPositive(maxPending, defaultMaxPending));
+        const defaultMaxPending = Math.min(MAX_BATCH_SIZE, Math.max(1_000, this.maxSize * 10));
+        this.maxPending = Math.min(MAX_BATCH_SIZE, Math.max(this.maxSize, boundedPositive(maxPending, defaultMaxPending)));
         this.retryDelayMs = Math.max(25, boundedPositive(
             retryDelayMs,
             Math.max(100, Math.min(this.flushMs || 1000, 1000))
@@ -302,16 +304,21 @@ export class RuntimeEventBatcher {
                 await new Promise(resolve => this.setTimeoutFn(resolve, Math.min(this.retryDelayMs, remainingMs)));
             }
         }
-        this.closed = true;
-        this._notifyCapacity();
         if (this.pending > 0) {
             const error = new Error(`Runtime event batcher drain timed out with ${this.pending} pending events`);
             error.code = 'RUNTIME_EVENT_DRAIN_TIMEOUT';
             error.cause = lastError || undefined;
-            for (const entry of this.entries.splice(0, this.entries.length)) entry.reject(error);
-            for (const entry of this.activeEntries) entry.reject(error);
+            // A timeout is not proof that the durable append failed. Keep the
+            // queue and active flush intact so standalone events are not
+            // rejected or discarded, and so a late SQLite commit can finish.
+            this.closing = false;
+            if (!this.running && this.entries.length > 0 && !this.retryTimer) this._scheduleRetry();
+            this._notifyCapacity();
             throw error;
         }
+        this.closed = true;
+        this.closing = false;
+        this._notifyCapacity();
         return lastResult;
     }
 

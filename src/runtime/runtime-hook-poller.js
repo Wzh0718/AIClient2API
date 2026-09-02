@@ -42,6 +42,7 @@ export class RuntimeHookPoller {
         this.onError = typeof onError === 'function' ? onError : null;
         this.onBatchError = typeof onBatchError === 'function' ? onBatchError : null;
         this.running = null;
+        this.statusPromise = null;
         this.stopped = true;
         this.stopWaiters = [];
         this.lastClaimAt = 0;
@@ -73,38 +74,49 @@ export class RuntimeHookPoller {
 
     async _run() {
         while (!this.stopped) {
-            const availableCapacity = Math.max(0, Number(this.ingress.availableCapacity()) || 0);
-            if (availableCapacity <= 0) {
-                this.metrics.pollPaused = true;
-                const capacityPromise = this.ingress.waitForCapacity(1);
-                await this._awaitWithStop(capacityPromise);
-                this.metrics.pollPaused = false;
-                continue;
-            }
-
-            const count = Math.max(1, Math.min(this.readBatchSize, availableCapacity));
-            const claim = this.claimIntervalMs === 0 || this.now() >= this.lastClaimAt + this.claimIntervalMs;
-            if (claim) {
-                this.lastClaimAt = this.now();
-                this.metrics.claimCount += 1;
-            }
             try {
+                const availableCapacity = Math.max(0, Number(this.ingress.availableCapacity()) || 0);
+                if (availableCapacity <= 0) {
+                    this.metrics.pollPaused = true;
+                    const capacityPromise = this.ingress.waitForCapacity(1);
+                    await this._awaitWithStop(capacityPromise);
+                    this.metrics.pollPaused = false;
+                    continue;
+                }
+
+                const count = Math.max(1, Math.min(this.readBatchSize, availableCapacity));
+                const claim = this.claimIntervalMs === 0 || this.now() >= this.lastClaimAt + this.claimIntervalMs;
+                if (claim) {
+                    this.lastClaimAt = this.now();
+                    this.metrics.claimCount += 1;
+                }
                 const events = await this.stream.readBatch({ count, blockMs: this.blockMs, claim });
                 if (this.stopped) break;
                 this.metrics.streamReadBatches += 1;
                 this.metrics.streamReadEvents += events.length;
                 if (events.length > 0) {
-                    const result = this.ingress.pushBatch(events, { awaitFlush: false });
-                    this.metrics.enqueuedEvents += Number(result?.accepted || 0);
-                    this.metrics.rejectedEvents += Number(result?.rejected || 0);
-                    result?.completion?.catch(error => this._reportBatchError(error));
+                    this.stream.markInFlight?.(events);
+                    try {
+                        const result = this.ingress.pushBatch(events, { awaitFlush: false });
+                        this.metrics.enqueuedEvents += Number(result?.accepted || 0);
+                        this.metrics.rejectedEvents += Number(result?.rejected || 0);
+                        result?.completion
+                            ?.then(() => this.stream.unmarkInFlight?.(events))
+                            .catch(error => {
+                                this.stream.unmarkInFlight?.(events);
+                                this._reportBatchError(error);
+                            });
+                    } catch (error) {
+                        try { this.stream.unmarkInFlight?.(events); } catch {}
+                        throw error;
+                    }
                 } else {
                     // A mocked/non-blocking Redis client can resolve immediately;
                     // yield between empty reads so shutdown and capacity signals
                     // are not starved by a microtask-only loop.
                     await this._awaitWithStop(this.sleep(Math.max(1, Math.min(this.blockMs || 1, 25))));
                 }
-                await this._sampleStatusIfDue();
+                void this._sampleStatusIfDue();
             } catch (error) {
                 if (this.stopped) break;
                 this._reportError(error);
@@ -151,19 +163,23 @@ export class RuntimeHookPoller {
 
     async _sampleStatusIfDue(force = false) {
         if (!this.stream.pendingSnapshot) return null;
+        if (this.statusPromise) return this.statusPromise;
         const now = this.now();
         if (!force && now < this.nextStatusAt) return null;
         this.nextStatusAt = now + this.statusPollMs;
-        try {
-            const snapshot = await this.stream.pendingSnapshot();
-            this.metrics.statusPollCount += 1;
-            this.metrics.lastStatusAt = new Date().toISOString();
-            invokeSafely(this.onStatus, snapshot);
-            return snapshot;
-        } catch (error) {
-            this._reportError(error);
-            return null;
-        }
+        this.statusPromise = (async () => {
+            try {
+                const snapshot = await this.stream.pendingSnapshot();
+                this.metrics.statusPollCount += 1;
+                this.metrics.lastStatusAt = new Date().toISOString();
+                invokeSafely(this.onStatus, snapshot);
+                return snapshot;
+            } catch (error) {
+                this._reportError(error);
+                return null;
+            }
+        })().finally(() => { this.statusPromise = null; });
+        return this.statusPromise;
     }
 
     async stop({ drain = true, timeoutMs = 30000 } = {}) {
@@ -171,6 +187,7 @@ export class RuntimeHookPoller {
         for (const waiter of this.stopWaiters.splice(0)) waiter.resolve(true);
         if (this.running) await this.running.catch(() => {});
         this.running = null;
+        if (this.statusPromise) await this.statusPromise.catch(() => {});
         await this._sampleStatusIfDue(true);
         if (drain && this.ingress.close) return this.ingress.close({ timeoutMs });
         return null;

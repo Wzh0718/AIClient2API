@@ -136,6 +136,23 @@ describe('runtime event batcher', () => {
         });
     }, 1000);
 
+    test('preserves active events when shutdown times out instead of rejecting them', async () => {
+        let release;
+        const flushPromise = new Promise(resolve => { release = resolve; });
+        const flush = jest.fn().mockReturnValueOnce(flushPromise);
+        const batcher = new RuntimeEventBatcher({ flush, maxSize: 1, maxPending: 1, flushMs: 1000 });
+        const pending = batcher.push({ eventId: 'preserve-on-timeout' });
+
+        await expect(batcher.close({ timeoutMs: 20 })).rejects.toMatchObject({
+            code: 'RUNTIME_EVENT_DRAIN_TIMEOUT'
+        });
+        expect(batcher.snapshot().totalPending).toBe(1);
+
+        release({ inserted: 1 });
+        await expect(pending).resolves.toEqual({ inserted: 1 });
+        expect(batcher.snapshot().totalPending).toBe(0);
+    }, 1000);
+
     test('flushes asynchronously when the timer is explicitly configured as zero', async () => {
         const flush = jest.fn().mockResolvedValue({ inserted: 1 });
         const batcher = new RuntimeEventBatcher({ flush, maxSize: 100, flushMs: 0 });

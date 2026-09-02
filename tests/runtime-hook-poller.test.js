@@ -56,6 +56,59 @@ describe('runtime hook poller', () => {
         await poller.stop({ drain: false });
     });
 
+    test('tracks stream entries as in-flight until durable completion', async () => {
+        let release;
+        const completion = new Promise(resolve => { release = resolve; });
+        const stream = {
+            readBatch: jest.fn()
+                .mockResolvedValueOnce([{ eventId: 'evt-1', streamId: '1-0' }])
+                .mockResolvedValue([]),
+            pendingSnapshot: jest.fn().mockResolvedValue({ pending: 1 }),
+            markInFlight: jest.fn(),
+            unmarkInFlight: jest.fn()
+        };
+        const ingress = {
+            availableCapacity: jest.fn(() => 10),
+            pushBatch: jest.fn(() => ({ accepted: 1, completion })),
+            waitForCapacity: jest.fn().mockResolvedValue(true),
+            close: jest.fn().mockResolvedValue(undefined),
+            snapshot: jest.fn(() => ({ pending: 1 }))
+        };
+        const poller = new RuntimeHookPoller({ stream, ingress, blockMs: 1, statusPollMs: 10000 });
+        poller.start();
+        await eventually(() => expect(stream.markInFlight).toHaveBeenCalledWith([{ eventId: 'evt-1', streamId: '1-0' }]));
+        expect(stream.unmarkInFlight).not.toHaveBeenCalled();
+        release({ inserted: 1 });
+        await eventually(() => expect(stream.unmarkInFlight).toHaveBeenCalledWith([{ eventId: 'evt-1', streamId: '1-0' }]));
+        await poller.stop({ drain: false });
+    });
+
+    test('unmarks stream entries when ingress rejects synchronously', async () => {
+        const stream = {
+            readBatch: jest.fn()
+                .mockResolvedValueOnce([{ eventId: 'evt-sync-fail', streamId: '2-0' }])
+                .mockResolvedValue([]),
+            pendingSnapshot: jest.fn().mockResolvedValue({ pending: 1 }),
+            markInFlight: jest.fn(),
+            unmarkInFlight: jest.fn()
+        };
+        const ingress = {
+            availableCapacity: jest.fn(() => 10),
+            pushBatch: jest.fn(() => { throw new Error('queue rejected'); }),
+            waitForCapacity: jest.fn().mockResolvedValue(true),
+            close: jest.fn().mockResolvedValue(undefined),
+            snapshot: jest.fn(() => ({ pending: 0 }))
+        };
+        const onError = jest.fn();
+        const poller = new RuntimeHookPoller({ stream, ingress, onError, blockMs: 1, errorRetryMs: 1 });
+        poller.start();
+        await eventually(() => expect(stream.unmarkInFlight).toHaveBeenCalledWith([
+            { eventId: 'evt-sync-fail', streamId: '2-0' }
+        ]));
+        expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'queue rejected' }));
+        await poller.stop({ drain: false });
+    });
+
     test('pauses reads when ingress capacity is exhausted', async () => {
         let available = 0;
         const stream = {
@@ -107,6 +160,31 @@ describe('runtime hook poller', () => {
         expect(statusBeforeStop).toBeLessThan(readsBeforeStop);
     });
 
+    test('continues polling while a status snapshot is slow', async () => {
+        let releaseStatus;
+        const slowStatus = new Promise(resolve => { releaseStatus = resolve; });
+        const stream = {
+            readBatch: jest.fn(async () => {
+                await new Promise(resolve => setTimeout(resolve, 1));
+                return [];
+            }),
+            pendingSnapshot: jest.fn(() => slowStatus)
+        };
+        const ingress = {
+            availableCapacity: jest.fn(() => 10),
+            waitForCapacity: jest.fn().mockResolvedValue(true),
+            pushBatch: jest.fn(),
+            close: jest.fn().mockResolvedValue(undefined),
+            snapshot: jest.fn(() => ({ pending: 0 }))
+        };
+        const poller = new RuntimeHookPoller({ stream, ingress, blockMs: 1, statusPollMs: 1 });
+        poller.start();
+        await new Promise(resolve => setTimeout(resolve, 20));
+        expect(stream.readBatch.mock.calls.length).toBeGreaterThan(1);
+        releaseStatus({ pending: 0 });
+        await poller.stop({ drain: false });
+    });
+
     test('reports durable batch failures separately from Redis polling failures', async () => {
         const batchFailure = new Error('sqlite busy');
         const stream = {
@@ -153,5 +231,30 @@ describe('runtime hook poller', () => {
         expect(poller.stopWaiters.length).toBeLessThanOrEqual(1);
         await poller.stop({ drain: false });
         expect(poller.stopWaiters.length).toBe(0);
+    });
+
+    test('recovers when ingress capacity inspection fails', async () => {
+        const stream = {
+            readBatch: jest.fn().mockResolvedValue([]),
+            pendingSnapshot: jest.fn().mockResolvedValue({ pending: 0 })
+        };
+        let checks = 0;
+        const ingress = {
+            availableCapacity: jest.fn(() => {
+                checks += 1;
+                if (checks === 1) throw new Error('capacity unavailable');
+                return 10;
+            }),
+            waitForCapacity: jest.fn().mockResolvedValue(true),
+            pushBatch: jest.fn(),
+            close: jest.fn().mockResolvedValue(undefined),
+            snapshot: jest.fn(() => ({ pending: 0 }))
+        };
+        const onError = jest.fn();
+        const poller = new RuntimeHookPoller({ stream, ingress, onError, blockMs: 1, errorRetryMs: 1 });
+        poller.start();
+        await eventually(() => expect(stream.readBatch).toHaveBeenCalled());
+        expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'capacity unavailable' }));
+        await poller.stop({ drain: false });
     });
 });

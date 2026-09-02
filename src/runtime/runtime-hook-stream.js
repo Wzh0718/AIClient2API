@@ -14,14 +14,14 @@ return acknowledged
 
 const COMMIT_BATCH_SCRIPT = `
 local committed = 0
-for index = 1, #ARGV do
+for index = 2, #ARGV do
     local acknowledged = redis.call('XACK', KEYS[1], ARGV[1], ARGV[index])
     if acknowledged > 0 then
         redis.call('XDEL', KEYS[1], ARGV[index])
         committed = committed + acknowledged
     end
 end
-return committed
+return { committed, #ARGV - 1 }
 `;
 
 function safeFileName(eventId) {
@@ -57,7 +57,10 @@ export function decodeRuntimeHookStreamResponse(response) {
             const fields = fieldsToObject(entry?.[1]);
             if (!streamId || !fields.payload) continue;
             try {
-                events.push({ ...JSON.parse(fields.payload), streamId });
+                const payload = JSON.parse(fields.payload);
+                if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
+                if (!fields.eventId || payload.eventId !== fields.eventId) continue;
+                events.push({ ...payload, streamId });
             } catch {
                 // Corrupt stream entries are left pending for diagnostics.
             }
@@ -95,6 +98,8 @@ export class RuntimeHookStream {
         this.retentionSeconds = retentionSeconds;
         this.redisCommandTimeoutMs = redisCommandTimeoutMs;
         this.pendingClaimIdleMs = pendingClaimIdleMs;
+        this.claimCursor = '0-0';
+        this.inFlightStreamIds = new Set();
         this.groupReady = false;
         this.closed = false;
         this.inFlight = 0;
@@ -245,7 +250,7 @@ export class RuntimeHookStream {
         if (claim !== false) {
             const claimCommand = [
                 'XAUTOCLAIM', this.streamKey, this.group, this.workerId,
-                String(this.pendingClaimIdleMs), '0-0', 'COUNT', count
+                String(this.pendingClaimIdleMs), this.claimCursor, 'COUNT', count
             ];
             let claimed;
             try {
@@ -253,13 +258,16 @@ export class RuntimeHookStream {
             } catch (error) {
                 if (!isMissingConsumerGroup(error)) throw error;
                 this.groupReady = false;
+                this.claimCursor = '0-0';
                 await this.ensureGroup();
+                claimCommand[5] = '0-0';
                 claimed = await this._blockingCommand(claimCommand, { timeoutMs: this.redisCommandTimeoutMs });
             }
+            this.claimCursor = claimed?.[0] || '0-0';
             const claimedEvents = decodeRuntimeHookStreamResponse([[
                 this.streamKey,
                 claimed?.[1] || []
-            ]]);
+            ]]).filter(event => !this.inFlightStreamIds.has(event.streamId));
             if (claimedEvents.length > 0) return claimedEvents;
         }
         const command = [
@@ -295,11 +303,38 @@ export class RuntimeHookStream {
     async commitBatch(events = []) {
         const committed = events.filter(event => event?.eventId && event?.streamId);
         if (committed.length === 0) return 0;
-        const args = committed.map(event => event.streamId);
-        const script = COMMIT_BATCH_SCRIPT.replace('ARGV[1]', `'${this.group}'`);
-        await this.redis.evalScript('commit-runtime-hook-batch', script, [this.streamKey], args);
+        const args = [this.group, ...committed.map(event => event.streamId)];
+        const commitResult = await this.redis.evalScript(
+            'commit-runtime-hook-batch',
+            COMMIT_BATCH_SCRIPT,
+            [this.streamKey],
+            args
+        );
+        const acknowledged = Array.isArray(commitResult)
+            ? Number(commitResult[0] || 0)
+            : Number(commitResult || 0);
+        const requested = Array.isArray(commitResult)
+            ? Number(commitResult[1] || 0)
+            : committed.length;
+        if (requested !== committed.length) {
+            const error = new Error(`Runtime hook commit mismatch: expected=${committed.length} requested=${requested}`);
+            error.code = 'RUNTIME_HOOK_COMMIT_MISMATCH';
+            throw error;
+        }
         this.lastCommittedAt = new Date().toISOString();
         return committed.length;
+    }
+
+    markInFlight(events = []) {
+        for (const event of events) {
+            if (event?.streamId) this.inFlightStreamIds.add(event.streamId);
+        }
+    }
+
+    unmarkInFlight(events = []) {
+        for (const event of events) {
+            if (event?.streamId) this.inFlightStreamIds.delete(event.streamId);
+        }
     }
 
     async pendingSnapshot() {

@@ -22,6 +22,7 @@ import { createRuntimeHookStreamFromEnv } from '../runtime/runtime-hook-stream.j
 import { createUsageEventStore } from '../runtime/usage-event-store.js';
 import { RuntimeUsageProjector } from '../runtime/runtime-usage-projector.js';
 import { RuntimeEventBatcher } from '../runtime/runtime-event-batcher.js';
+import { drainRuntimeHookTransport } from '../runtime/runtime-hook-shutdown.js';
 import { RuntimeHookPoller } from '../runtime/runtime-hook-poller.js';
 import { resolveRuntimeBatchConfig } from '../runtime/runtime-batch-config.js';
 import { migrateCodexFingerprintProviderPoolsFile } from '../utils/codex-fingerprint-migration.js';
@@ -255,8 +256,15 @@ function enqueueRuntimeHookEvent(event) {
 function getRuntimeHookSnapshot() {
     const bridgeSnapshot = getPluginManager()?.runtimeHookBridge?.snapshot?.() || {};
     const streamSnapshot = runtimeHookStream?.snapshot?.() || {};
+    const outboundPending = Number(bridgeSnapshot.pending || 0);
+    const streamPending = Number(runtimeHookStreamStatus.pending || 0);
     return {
-        pending: Number(bridgeSnapshot.pending || runtimeHookStreamStatus.pending || 0),
+        // The same event can remain in the producer bridge until the control
+        // worker ACKs it, while also appearing in the Redis PEL. Expose both
+        // layers and use their max as the logical pending count.
+        pending: Math.max(outboundPending, streamPending),
+        outboundPending,
+        streamPending,
         dropped: Number(bridgeSnapshot.dropped || 0),
         backpressured: Number(bridgeSnapshot.backpressured || 0),
         spooled: Number(bridgeSnapshot.spooled || streamSnapshot.spooled || 0),
@@ -360,18 +368,22 @@ async function stopRuntimeHookTransport() {
         await poller.stop({ drain: false });
     }
     await runtimeHookPollPromise;
-    await runtimeEventBatcher?.close?.();
+    const result = await drainRuntimeHookTransport({
+        batcher: runtimeEventBatcher,
+        bridge: getPluginManager()?.runtimeHookBridge,
+        stream: runtimeHookStream,
+        projector: runtimeUsageProjector,
+        usageEventStore,
+        waitForProjectionRefresh: () => usageProjectionRefreshPromise,
+        onUsageEventStoreSnapshot: snapshot => {
+            usageEventStoreSnapshot = snapshot;
+        }
+    });
     runtimeEventBatcher = null;
-    await getPluginManager()?.runtimeHookBridge?.drain?.({ timeoutMs: 20000 });
-    await runtimeHookStream?.flushSpool?.();
-    await runtimeUsageProjector?.drain?.();
     runtimeUsageProjector = null;
-    if (usageEventStore) {
-        usageEventStoreSnapshot = await usageEventStore.checkpoint();
-        await usageEventStore.close();
-        usageEventStore = null;
-    }
-    await runtimeHookStream?.close?.();
+    usageEventStore = null;
+    runtimeHookStream = null;
+    return result;
 }
 
 /**
@@ -615,7 +627,7 @@ async function startServer() {
                     publish: async event => {
                     const result = await enqueueRuntimeHookEvent(event);
                     usageEventStoreSnapshot = await usageEventStore.snapshot();
-                    return { streamId: `local:${event.eventId}`, ...result };
+                    return { streamId: `local:${event.eventId}`, ...result, acknowledged: true };
                 },
                 acknowledge: async () => true,
                 snapshot: () => ({

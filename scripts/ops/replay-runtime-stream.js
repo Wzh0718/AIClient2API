@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { RedisRespClient } from '../../src/runtime/redis-resp-client.js';
 
@@ -16,6 +17,27 @@ for index = 2, #ARGV do
     end
 end
 return committed
+`;
+
+const WRITE_TARGET_ENTRY_SCRIPT = `
+if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then
+    return 0
+end
+redis.call('XADD', KEYS[1], '*',
+    'eventId', ARGV[1],
+    'sourceWorkerId', ARGV[2],
+    'createdAt', ARGV[3],
+    'payload', ARGV[4]
+)
+redis.call('SADD', KEYS[2], ARGV[1])
+return 1
+`;
+
+const RELEASE_RECOVERY_LOCK_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
 `;
 
 function fieldsToObject(fields = []) {
@@ -64,6 +86,7 @@ export function parseRecoveryArgs(argv = []) {
         group: null,
         consumer: `recovery-${process.pid}`,
         checkpointPath: null
+        ,checkpointDisabled: false
     };
     for (let index = 0; index < argv.length; index += 1) {
         const flag = argv[index];
@@ -73,12 +96,12 @@ export function parseRecoveryArgs(argv = []) {
             case '--redis-url': options.redisUrl = readArgValue(argv, index, flag); index += 1; break;
             case '--batch-size': options.batchSize = positiveInteger(readArgValue(argv, index, flag), 100, flag, { maximum: 10_000 }); index += 1; break;
             case '--max-events': options.maxEvents = positiveInteger(readArgValue(argv, index, flag), 0, flag, { allowZero: true }); index += 1; break;
-            case '--block-ms': options.blockMs = positiveInteger(readArgValue(argv, index, flag), 1000, flag, { allowZero: true, maximum: 60_000 }); index += 1; break;
+            case '--block-ms': options.blockMs = Math.max(1, positiveInteger(readArgValue(argv, index, flag), 1000, flag, { allowZero: true, maximum: 60_000 })); index += 1; break;
             case '--claim-idle-ms': options.claimIdleMs = positiveInteger(readArgValue(argv, index, flag), 0, flag, { allowZero: true, maximum: 86_400_000 }); index += 1; break;
             case '--group': options.group = readArgValue(argv, index, flag); index += 1; break;
             case '--consumer': options.consumer = readArgValue(argv, index, flag); index += 1; break;
             case '--checkpoint': options.checkpointPath = readArgValue(argv, index, flag); index += 1; break;
-            case '--no-checkpoint': options.checkpointPath = null; break;
+            case '--no-checkpoint': options.checkpointPath = null; options.checkpointDisabled = true; break;
             case '--apply': options.apply = true; break;
             case '--dry-run': options.apply = false; break;
             case '--help':
@@ -92,7 +115,9 @@ export function parseRecoveryArgs(argv = []) {
     if (options.sourceEpoch === options.targetEpoch) throw new Error('source and target epochs must be different');
     if (!options.redisUrl && options.apply) throw new Error('--redis-url or REDIS_URL is required when --apply is used');
     options.group = options.group || `recovery-${options.sourceEpoch}-${options.targetEpoch}`;
-    options.checkpointPath = options.checkpointPath === null
+    options.checkpointPath = options.checkpointDisabled
+        ? null
+        : options.checkpointPath === null
         ? defaultCheckpointPath(options.sourceEpoch, options.targetEpoch)
         : options.checkpointPath;
     return options;
@@ -116,7 +141,9 @@ export function decodeRecoveryEntries(entries = []) {
         const fields = fieldsToObject(entry?.[1]);
         if (!streamId || !fields.eventId || !fields.payload) continue;
         try {
-            JSON.parse(fields.payload);
+            const payload = JSON.parse(fields.payload);
+            if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
+            if (payload.eventId !== fields.eventId) continue;
         } catch {
             continue;
         }
@@ -167,10 +194,24 @@ async function saveCheckpoint(checkpointPath, checkpoint) {
 
 async function ensureRecoveryGroup(redis, streamKey, group) {
     try {
-        await redis.command(['XGROUP', 'CREATE', streamKey, group, '0', 'MKSTREAM']);
+        // The source stream is checked before this call. Omitting MKSTREAM
+        // also prevents a race from creating an empty recovery source.
+        await redis.command(['XGROUP', 'CREATE', streamKey, group, '0']);
     } catch (error) {
         if (!/BUSYGROUP/i.test(error?.message || '')) throw error;
     }
+}
+
+async function acquireRecoveryLock(redis, lockKey, token, ttlMs) {
+    const result = await redis.command(['SET', lockKey, token, 'PX', ttlMs, 'NX']);
+    if (String(result).toUpperCase() === 'OK' || Number(result) === 1) return;
+    const error = new Error(`runtime stream recovery is already running for ${lockKey}`);
+    error.code = 'RUNTIME_RECOVERY_LOCKED';
+    throw error;
+}
+
+async function releaseRecoveryLock(redis, lockKey, token) {
+    await redis.evalScript('replay-runtime-stream-release-lock', RELEASE_RECOVERY_LOCK_SCRIPT, [lockKey], [token]);
 }
 
 async function commitSourceBatch(redis, sourceStream, group, sourceIds) {
@@ -183,6 +224,15 @@ async function commitSourceBatch(redis, sourceStream, group, sourceIds) {
     );
 }
 
+async function writeTargetEntry(redis, targetStream, markerKey, event) {
+    return Number(await redis.evalScript(
+        'replay-runtime-stream-write',
+        WRITE_TARGET_ENTRY_SCRIPT,
+        [targetStream, markerKey],
+        [event.eventId, event.sourceWorkerId || '', event.createdAt || new Date().toISOString(), event.payload]
+    ) || 0);
+}
+
 async function readRecoveryBatch(redis, {
     sourceStream,
     group,
@@ -191,11 +241,12 @@ async function readRecoveryBatch(redis, {
     blockMs,
     claimIdleMs
 }) {
+    const safeBlockMs = Math.max(1, Number(blockMs) || 1);
     try {
         const claimed = await redis.command([
             'XAUTOCLAIM', sourceStream, group, consumer,
             claimIdleMs, '0-0', 'COUNT', count
-        ], { timeoutMs: Math.max(5000, blockMs + 2000) });
+        ], { timeoutMs: Math.max(5000, safeBlockMs + 2000) });
         const claimedEntries = claimed?.[1] || [];
         if (claimedEntries.length > 0) return claimedEntries;
     } catch (error) {
@@ -206,9 +257,9 @@ async function readRecoveryBatch(redis, {
     }
     const response = await redis.command([
         'XREADGROUP', 'GROUP', group, consumer,
-        'COUNT', count, 'BLOCK', blockMs,
+        'COUNT', count, 'BLOCK', safeBlockMs,
         'STREAMS', sourceStream, '>'
-    ], { timeoutMs: Math.max(5000, blockMs + 2000) });
+    ], { timeoutMs: Math.max(5000, safeBlockMs + 2000) });
     return response?.[0]?.[1] || [];
 }
 
@@ -224,6 +275,8 @@ export async function replayRuntimeStream({
     group = null,
     consumer = `recovery-${process.pid}`,
     checkpointPath = null,
+    lock = true,
+    lockTtlMs = 300_000,
     now = () => new Date().toISOString()
 } = {}) {
     const keys = buildRecoveryKeys({ sourceEpoch, targetEpoch });
@@ -238,92 +291,108 @@ export async function replayRuntimeStream({
             markerKey: keys.markerKey
         };
     }
-    if (!redis?.command || !redis?.evalScript) throw new TypeError('Redis client with command() and evalScript() is required');
-    const resolvedGroup = group || `recovery-${sourceEpoch}-${targetEpoch}`;
-    const checkpoint = await loadCheckpoint(checkpointPath, sourceEpoch, targetEpoch);
-    let moved = Number(checkpoint?.moved || 0);
-    let skipped = Number(checkpoint?.skipped || 0);
-    let failed = Number(checkpoint?.failed || 0);
-    let processed = moved + skipped;
-    let lastSourceId = checkpoint?.lastSourceId || null;
-    await ensureRecoveryGroup(redis, keys.sourceStream, resolvedGroup);
-
-    while (maxEvents === 0 || processed < maxEvents) {
-        const remaining = maxEvents === 0 ? batchSize : Math.min(batchSize, maxEvents - processed);
-        const rawEntries = await readRecoveryBatch(redis, {
+    if (!redis?.command) throw new TypeError('Redis client with command() is required');
+    const sourceExists = await redis.command(['EXISTS', keys.sourceStream]);
+    if (Number(sourceExists) !== 1) {
+        return {
+            dryRun: false,
+            sourceMissing: true,
+            moved: 0,
+            skipped: 0,
+            failed: 0,
+            processed: 0,
             sourceStream: keys.sourceStream,
-            group: resolvedGroup,
-            consumer,
-            count: remaining,
-            blockMs,
-            claimIdleMs
-        });
-        if (rawEntries.length === 0) break;
-        const entries = decodeRecoveryEntries(rawEntries);
-        const invalidEntries = rawEntries.length - entries.length;
-        failed += invalidEntries;
-        const sourceIds = [];
-        let failedInBatch = invalidEntries;
-        for (const event of entries) {
-            if (maxEvents > 0 && processed >= maxEvents) break;
-            try {
-                const alreadyMigrated = await redis.command(['SISMEMBER', keys.markerKey, event.eventId]);
-                if (Number(alreadyMigrated) === 1) {
+            targetStream: keys.targetStream,
+            markerKey: keys.markerKey
+        };
+    }
+    if (!redis?.evalScript) throw new TypeError('Redis client with command() and evalScript() is required');
+    const resolvedGroup = group || `recovery-${sourceEpoch}-${targetEpoch}`;
+    const safeBatchSize = Math.min(10_000, Math.max(1, Math.floor(Number(batchSize) || 1)));
+    const safeMaxEvents = Math.max(0, Math.floor(Number(maxEvents) || 0));
+    const safeBlockMs = Math.min(60_000, Math.max(1, Number(blockMs) || 1));
+    const safeClaimIdleMs = Math.min(86_400_000, Math.max(0, Number(claimIdleMs) || 0));
+    const lockKey = `${keys.markerKey}:lock`;
+    const lockToken = `${process.pid}:${Date.now()}:${randomUUID()}`;
+    let lockAcquired = false;
+    if (lock !== false) {
+        await acquireRecoveryLock(redis, lockKey, lockToken, Math.max(1, Number(lockTtlMs) || 300_000));
+        lockAcquired = true;
+    }
+    try {
+        const checkpoint = await loadCheckpoint(checkpointPath, sourceEpoch, targetEpoch);
+        let moved = Number(checkpoint?.moved || 0);
+        let skipped = Number(checkpoint?.skipped || 0);
+        let failed = Number(checkpoint?.failed || 0);
+        let processed = moved + skipped;
+        let lastSourceId = checkpoint?.lastSourceId || null;
+        await ensureRecoveryGroup(redis, keys.sourceStream, resolvedGroup);
+
+        while (safeMaxEvents === 0 || processed < safeMaxEvents) {
+            const remaining = safeMaxEvents === 0 ? safeBatchSize : Math.min(safeBatchSize, safeMaxEvents - processed);
+            const rawEntries = await readRecoveryBatch(redis, {
+                sourceStream: keys.sourceStream,
+                group: resolvedGroup,
+                consumer,
+                count: remaining,
+                blockMs: safeBlockMs,
+                claimIdleMs: safeClaimIdleMs
+            });
+            if (rawEntries.length === 0) break;
+            const entries = decodeRecoveryEntries(rawEntries);
+            const invalidEntries = rawEntries.length - entries.length;
+            failed += invalidEntries;
+            const sourceIds = [];
+            let failedInBatch = invalidEntries;
+            for (const event of entries) {
+                if (safeMaxEvents > 0 && processed >= safeMaxEvents) break;
+                try {
+                    const inserted = await writeTargetEntry(redis, keys.targetStream, keys.markerKey, event);
                     sourceIds.push(event.streamId);
-                    skipped += 1;
+                    if (inserted === 1) moved += 1;
+                    else skipped += 1;
                     processed += 1;
                     lastSourceId = event.streamId;
-                    continue;
+                } catch (error) {
+                    failed += 1;
+                    failedInBatch += 1;
+                    // Leave this source entry pending. The next invocation can retry it;
+                    // no source ACK/XDEL is attempted after a failed target write.
                 }
-                await redis.command([
-                    'XADD', keys.targetStream, '*',
-                    'eventId', event.eventId,
-                    'sourceWorkerId', event.sourceWorkerId || '',
-                    'createdAt', event.createdAt || now(),
-                    'payload', event.payload
-                ]);
-                await redis.command(['SADD', keys.markerKey, event.eventId]);
-                sourceIds.push(event.streamId);
-                moved += 1;
-                processed += 1;
-                lastSourceId = event.streamId;
-            } catch (error) {
-                failed += 1;
-                failedInBatch += 1;
-                // Leave this source entry pending. The next invocation can retry it;
-                // no source ACK/XDEL is attempted after a failed target write.
             }
+            const committed = Number(await commitSourceBatch(redis, keys.sourceStream, resolvedGroup, sourceIds) || 0);
+            if (committed !== sourceIds.length) {
+                throw new Error(`source commit mismatch: expected=${sourceIds.length} committed=${committed}`);
+            }
+            await saveCheckpoint(checkpointPath, {
+                sourceEpoch,
+                targetEpoch,
+                group: resolvedGroup,
+                consumer,
+                markerKey: keys.markerKey,
+                lastSourceId,
+                moved,
+                skipped,
+                failed,
+                updatedAt: now()
+            });
+            if (failedInBatch > 0 || rawEntries.length < remaining) break;
         }
-        const committed = Number(await commitSourceBatch(redis, keys.sourceStream, resolvedGroup, sourceIds) || 0);
-        if (committed !== sourceIds.length) {
-            throw new Error(`source commit mismatch: expected=${sourceIds.length} committed=${committed}`);
-        }
-        await saveCheckpoint(checkpointPath, {
-            sourceEpoch,
-            targetEpoch,
-            group: resolvedGroup,
-            consumer,
-            markerKey: keys.markerKey,
-            lastSourceId,
+        return {
+            dryRun: false,
             moved,
             skipped,
             failed,
-            updatedAt: now()
-        });
-        if (failedInBatch > 0 || rawEntries.length < remaining) break;
+            processed,
+            lastSourceId,
+            sourceStream: keys.sourceStream,
+            targetStream: keys.targetStream,
+            markerKey: keys.markerKey,
+            group: resolvedGroup
+        };
+    } finally {
+        if (lockAcquired) await releaseRecoveryLock(redis, lockKey, lockToken).catch(() => {});
     }
-    return {
-        dryRun: false,
-        moved,
-        skipped,
-        failed,
-        processed,
-        lastSourceId,
-        sourceStream: keys.sourceStream,
-        targetStream: keys.targetStream,
-        markerKey: keys.markerKey,
-        group: resolvedGroup
-    };
 }
 
 function printHelp() {

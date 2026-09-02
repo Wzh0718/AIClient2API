@@ -34,6 +34,28 @@ describe('RuntimeHookStream', () => {
         expect(redis.command.mock.calls.some(([parts]) => parts[0] === 'XREADGROUP')).toBe(false);
     });
 
+    test('does not decode malformed or event-id-mismatched payloads into ACKable events', async () => {
+        const redis = {
+            command: jest.fn(async parts => {
+                if (parts[0] === 'XGROUP') return 'OK';
+                if (parts[0] === 'XAUTOCLAIM') return ['0-0', [], []];
+                if (parts[0] === 'XREADGROUP') return [[
+                    'aiclient2api:test:runtime-hooks',
+                    [
+                        ['1-0', ['eventId', 'evt-empty', 'payload', '{}']],
+                        ['2-0', ['eventId', 'evt-mismatch', 'payload', '{"eventId":"other"}']],
+                        ['3-0', ['eventId', 'evt-good', 'payload', '{"eventId":"evt-good"}']]
+                    ]
+                ]];
+                return 0;
+            })
+        };
+        const stream = new RuntimeHookStream({ redis, epoch: 'test', workerId: 'control-1' });
+        await expect(stream.readBatch({ blockMs: 1 })).resolves.toEqual([
+            expect.objectContaining({ eventId: 'evt-good', streamId: '3-0' })
+        ]);
+    });
+
     test('can skip pending reclaim during a hot polling cycle', async () => {
         const redis = {
             command: jest.fn(async parts => {
@@ -175,10 +197,85 @@ describe('RuntimeHookStream', () => {
             { eventId: 'evt-b', streamId: '11-0' }
         ]);
         const batchCall = redis.evalScript.mock.calls[0];
-        expect(batchCall).toEqual(['commit-runtime-hook-batch', expect.any(String), [stream.streamKey], ['10-0', '11-0']]);
+        expect(batchCall).toEqual(['commit-runtime-hook-batch', expect.any(String), [stream.streamKey], ['control', '10-0', '11-0']]);
         expect(batchCall[1]).toContain("redis.call('XACK'");
         expect(batchCall[1]).toContain("redis.call('XDEL'");
         expect(batchCall[1]).not.toContain('SADD');
+    });
+
+    test('passes the consumer group as a Redis script argument and validates ACK count', async () => {
+        const redis = {
+            command: jest.fn().mockResolvedValue(0),
+            evalScript: jest.fn().mockResolvedValue([1, 1])
+        };
+        const stream = new RuntimeHookStream({ redis, epoch: 'test', workerId: 'control-1', group: "group-'unsafe" });
+        await expect(stream.commitBatch([
+            { eventId: 'evt-a', streamId: '10-0' },
+            { eventId: 'evt-b', streamId: '11-0' }
+        ])).rejects.toThrow(/commit mismatch/i);
+        const batchCall = redis.evalScript.mock.calls[0];
+        expect(batchCall[3]).toEqual(["group-'unsafe", '10-0', '11-0']);
+        expect(batchCall[1]).not.toContain("group-'unsafe");
+    });
+
+    test('continues pending reclaim from the returned XAUTOCLAIM cursor', async () => {
+        const cursors = [];
+        const redis = {
+            command: jest.fn(async parts => {
+                if (parts[0] === 'XGROUP') return 'OK';
+                if (parts[0] === 'XAUTOCLAIM') {
+                    cursors.push(parts[5]);
+                    return cursors.length === 1
+                        ? ['7-0', [], []]
+                        : ['0-0', [], []];
+                }
+                if (parts[0] === 'XREADGROUP') return null;
+                return 0;
+            })
+        };
+        const stream = new RuntimeHookStream({ redis, epoch: 'test', workerId: 'control-1' });
+        await stream.readBatch({ blockMs: 0 });
+        await stream.readBatch({ blockMs: 0 });
+        expect(cursors).toEqual(['0-0', '7-0']);
+    });
+
+    test('does not return an entry already being processed by this consumer', async () => {
+        const redis = {
+            command: jest.fn(async parts => {
+                if (parts[0] === 'XGROUP') return 'OK';
+                if (parts[0] === 'XAUTOCLAIM') return ['0-0', [[
+                    '4-0', ['payload', JSON.stringify({ eventId: 'evt-in-flight' })]
+                ]], []];
+                if (parts[0] === 'XREADGROUP') return null;
+                return 0;
+            })
+        };
+        const stream = new RuntimeHookStream({ redis, epoch: 'test', workerId: 'control-1' });
+        stream.markInFlight([{ streamId: '4-0' }]);
+        await expect(stream.readBatch({ blockMs: 0 })).resolves.toEqual([]);
+    });
+
+    test('resets the reclaim cursor when the consumer group is recreated', async () => {
+        let claimAttempts = 0;
+        const cursors = [];
+        const redis = {
+            command: jest.fn(async parts => {
+                if (parts[0] === 'XGROUP') return 'OK';
+                if (parts[0] === 'XAUTOCLAIM') {
+                    cursors.push(parts[5]);
+                    claimAttempts += 1;
+                    if (claimAttempts === 1) return ['7-0', [], []];
+                    if (claimAttempts === 2) throw new Error('NOGROUP missing group');
+                    return ['0-0', [], []];
+                }
+                if (parts[0] === 'XREADGROUP') return null;
+                return 0;
+            })
+        };
+        const stream = new RuntimeHookStream({ redis, epoch: 'test', workerId: 'control-1' });
+        await stream.readBatch({ blockMs: 0 });
+        await stream.readBatch({ blockMs: 0 });
+        expect(cursors).toEqual(['0-0', '7-0', '0-0']);
     });
 
     test('reports Redis memory and stream length without retaining acknowledged entries', async () => {
@@ -236,7 +333,7 @@ describe('RuntimeHookStream', () => {
                     if (readAttempts === 1) throw new Error('NOGROUP No such key or consumer group');
                     return [[
                         'aiclient2api:test:runtime-hooks',
-                        [['3-0', ['payload', JSON.stringify({ eventId: 'evt-recovered' })]]]
+                        [['3-0', ['eventId', 'evt-recovered', 'payload', JSON.stringify({ eventId: 'evt-recovered' })]]]
                     ]];
                 }
                 return 0;
@@ -257,7 +354,7 @@ describe('RuntimeHookStream', () => {
                 if (parts[0] === 'XAUTOCLAIM') {
                     return ['0-0', [[
                         '4-0',
-                        ['payload', JSON.stringify({ eventId: 'evt-stale' })]
+                        ['eventId', 'evt-stale', 'payload', JSON.stringify({ eventId: 'evt-stale' })]
                     ]], []];
                 }
                 if (parts[0] === 'XREADGROUP') return null;
