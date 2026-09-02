@@ -536,26 +536,6 @@
             min-width: 0;
         }
         .key-card-header .key-name { flex: 1; min-width: 0; }
-        .key-status-badge {
-            flex: 0 0 auto;
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-            padding: 4px 8px;
-            border-radius: var(--radius-full);
-            font-size: 11px;
-            font-weight: 700;
-            line-height: 1.2;
-            color: var(--success-color);
-            background: color-mix(in srgb, var(--success-color) 10%, transparent);
-            border: 1px solid color-mix(in srgb, var(--success-color) 28%, var(--border-color));
-            white-space: nowrap;
-        }
-        .key-status-badge.is-disabled {
-            color: var(--danger-color);
-            background: color-mix(in srgb, var(--danger-color) 8%, transparent);
-            border-color: color-mix(in srgb, var(--danger-color) 26%, var(--border-color));
-        }
         .key-info {
             min-width: 0;
             grid-row: span 2;
@@ -1309,7 +1289,6 @@
                 gap: 8px;
             }
             .key-card-header { flex-direction: column; }
-            .key-status-badge { align-self: flex-start; }
             .toolbar-filters { flex-direction: column; }
             .toolbar-filters .search-wrapper { width: 100%; }
             .navbar-brand .badge { display: none; }
@@ -3532,7 +3511,6 @@
                     <div class="key-info">
                         <div class="key-card-header">
                             <div class="key-name"><span class="key-name-text">${escapeHtml(key.name)}</span><button class="btn-copy" style="padding: 2px 6px;" onclick="openEditName('${key.id}', '${escapeHtml(key.name).replace(/'/g, "\\'")}')" title="修改名称" aria-label="修改 Key 名称"><i class="fas fa-edit"></i></button>${renderKeyRoutingSummary(key)}${renderEdgeAdmissionSummary(key)}</div>
-                            <span class="key-status-badge ${key.enabled ? '' : 'is-disabled'}"><i class="fas ${key.enabled ? 'fa-check-circle' : 'fa-ban'}" aria-hidden="true"></i>${key.enabled ? '启用' : '禁用'}</span>
                         </div>
                         <div class="key-id">${key.maskedKey} <button class="btn-copy" onclick="copyKeyFromDetail('${key.id}')" title="按需获取并复制完整 Key"><i class="fas fa-copy"></i></button></div>
                         ${providerBadges ? `<div class="key-dist-mini">${providerBadges}</div>` : ''}
@@ -3571,10 +3549,6 @@
                         <div class="key-stat">
                             <div class="label">最后调用</div>
                             <div class="value muted">${formatTime(key.lastUsedAt)}</div>
-                        </div>
-                        <div class="key-stat">
-                            <div class="label">状态</div>
-                            <div class="value" style="color:${key.enabled ? 'var(--success-color)' : 'var(--danger-color)'}">${key.enabled ? '启用' : '禁用'}</div>
                         </div>
                     </div>
                     <div class="key-actions">

@@ -19,7 +19,8 @@ describe('Potluck Key list UI layout source contract', () => {
     test('provides accessible state and interaction styling hooks', () => {
         const html = read('static/potluck.html');
 
-        expect(html).toContain('key-status-badge');
+        expect(html).toContain('.key-card.disabled { opacity: 0.6; }');
+        expect(html).not.toContain('key-status-badge');
         expect(html).toContain('key-action-secondary');
         expect(html).toContain('key-action-danger');
         expect(html).toContain('@media (prefers-reduced-motion: reduce)');
