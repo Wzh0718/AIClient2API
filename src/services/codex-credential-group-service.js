@@ -11,6 +11,26 @@ const MAX_CREDENTIALS_PER_GROUP = 2;
 const DEMAND_MODEL_FILTER = 'gpt-*';
 const DEMAND_MODEL_FILTER_CASE_SENSITIVE = false;
 
+/**
+ * Every Codex request resolves its key routing through a fresh service
+ * instance, and the production store grew past 20 MB of revision history, so a
+ * synchronous read plus JSON.parse per request became the single largest CPU
+ * consumer in the execution workers (~23% of samples) and blocked the event
+ * loop. Only the current revision's config is needed on that path, so it is
+ * cached per file and invalidated by the file's mtime and size.
+ * @type {Map<string, {mtimeMs: number, size: number, config: object}>}
+ */
+const currentConfigCache = new Map();
+
+function statStoreSync(filePath) {
+    try {
+        const stats = fs.statSync(filePath);
+        return { mtimeMs: stats.mtimeMs, size: stats.size };
+    } catch {
+        return null;
+    }
+}
+
 function toFiniteNumber(value, fallback = 0) {
     const number = Number(value);
     return Number.isFinite(number) ? number : fallback;
@@ -959,6 +979,7 @@ export class CredentialGroupService {
     }
 
     writeStoreSync(store) {
+        currentConfigCache.delete(this.filePath);
         fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
         const tempPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}`;
         fs.writeFileSync(tempPath, JSON.stringify(store, null, 2), { encoding: 'utf8', mode: 0o600 });
@@ -966,16 +987,31 @@ export class CredentialGroupService {
     }
 
     async writeStore(store) {
+        currentConfigCache.delete(this.filePath);
         await fs.promises.mkdir(path.dirname(this.filePath), { recursive: true });
         await atomicWriteFile(this.filePath, JSON.stringify(store, null, 2), { encoding: 'utf8', mode: 0o600 });
     }
 
     async getCurrentConfig() {
+        const cached = currentConfigCache.get(this.filePath);
+        const stats = statStoreSync(this.filePath);
+        if (cached && stats && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+            return cloneJson(cached.config);
+        }
+
         const store = this.readStoreSync();
         const current = getRevision(store, store.currentRevision);
-        return current
+        const config = current
             ? { ...cloneJson(current.config), revision: current.revision, action: current.action }
             : { revision: 0, action: null, groups: [], keyAssignments: [] };
+
+        // readStoreSync may have rewritten the file while compacting revisions,
+        // so the identity has to be re-read rather than reused from above.
+        const persisted = statStoreSync(this.filePath);
+        if (persisted) {
+            currentConfigCache.set(this.filePath, { ...persisted, config: cloneJson(config) });
+        }
+        return config;
     }
 
     async updateKeyAssignment(keyId, routing = {}) {

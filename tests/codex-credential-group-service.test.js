@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from '@jest/globals';
+import { afterEach, describe, expect, jest, test } from '@jest/globals';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -610,6 +610,64 @@ describe('Codex credential routing decisions', () => {
         expect(JSON.stringify(result)).not.toContain('stale-uuid');
         expect(JSON.stringify(result)).not.toContain('token');
         expect(JSON.stringify(result)).not.toContain('proxy');
+    });
+});
+
+describe('Codex credential group store reads', () => {
+    test('reads the store once while it is unchanged', async () => {
+        const filePath = makeTempFile();
+        const service = new CredentialGroupService({ filePath, now: () => NOW });
+        await service.apply({
+            applicable: true,
+            groups: [{ id: 'group-1', credentialUuids: ['cred-1'] }],
+            keyAssignments: [{ keyId: 'key-1', routingMode: 'auto', primaryGroupId: 'group-1' }]
+        });
+
+        const readFileSync = jest.spyOn(fs, 'readFileSync');
+        try {
+            const first = await service.getCurrentConfig();
+            const second = await new CredentialGroupService({ filePath, now: () => NOW }).getCurrentConfig();
+
+            expect(readFileSync.mock.calls.filter(([target]) => target === filePath)).toHaveLength(1);
+            expect(second).toEqual(first);
+        } finally {
+            readFileSync.mockRestore();
+        }
+    });
+
+    test('re-reads the store after it changes on disk', async () => {
+        const filePath = makeTempFile();
+        const service = new CredentialGroupService({ filePath, now: () => NOW });
+        await service.apply({
+            applicable: true,
+            groups: [{ id: 'group-1', credentialUuids: ['cred-1'] }],
+            keyAssignments: []
+        });
+        expect((await service.getCurrentConfig()).groups[0].id).toBe('group-1');
+
+        await service.apply({
+            applicable: true,
+            groups: [{ id: 'group-2', credentialUuids: ['cred-2'] }],
+            keyAssignments: [],
+            baseRevision: 1
+        });
+
+        expect((await service.getCurrentConfig()).groups[0].id).toBe('group-2');
+    });
+
+    test('hands out copies so callers cannot mutate the cached store', async () => {
+        const filePath = makeTempFile();
+        const service = new CredentialGroupService({ filePath, now: () => NOW });
+        await service.apply({
+            applicable: true,
+            groups: [{ id: 'group-1', credentialUuids: ['cred-1'] }],
+            keyAssignments: []
+        });
+
+        const config = await service.getCurrentConfig();
+        config.groups[0].id = 'mutated';
+
+        expect((await service.getCurrentConfig()).groups[0].id).toBe('group-1');
     });
 });
 
