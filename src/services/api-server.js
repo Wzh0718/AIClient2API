@@ -234,7 +234,20 @@ function getRuntimeEventBatcher() {
 }
 
 function enqueueRuntimeHookEvent(event) {
-    return getRuntimeEventBatcher().push(event);
+    const batcher = getRuntimeEventBatcher();
+    return (async () => {
+        while (true) {
+            while (batcher.availableCapacity() < 1) {
+                const available = await batcher.waitForCapacity(1);
+                if (!available) throw new Error('Runtime event batcher is closing');
+            }
+            try {
+                return await batcher.push(event);
+            } catch (error) {
+                if (error?.code !== 'RUNTIME_EVENT_QUEUE_FULL') throw error;
+            }
+        }
+    })();
 }
 
 function getRuntimeHookSnapshot() {
@@ -294,6 +307,7 @@ function buildRuntimeMetricsSnapshot() {
         potluckQuota: getPotluckQuotaMetrics(),
         requestAudit: getRequestAuditMetrics(),
         usageEventBatch: runtimeEventBatcher?.snapshot?.() || null,
+        runtimeHookPoller: runtimeHookPoller?.snapshot?.() || null,
         hooks: getRuntimeHookSnapshot()
     };
 }

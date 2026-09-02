@@ -104,4 +104,14 @@ describe('runtime event batcher', () => {
         expect(batcher.availableCapacity()).toBe(1);
         expect(batcher.snapshot().rejectedEvents).toBe(1);
     });
+
+    test('honors the shutdown drain timeout when a flush never resolves', async () => {
+        const flush = jest.fn(() => new Promise(() => {}));
+        const batcher = new RuntimeEventBatcher({ flush, maxSize: 1, maxPending: 1, flushMs: 1000 });
+        batcher.push({ eventId: 'never-completes' }).catch(() => {});
+
+        await expect(batcher.close({ timeoutMs: 20 })).rejects.toMatchObject({
+            code: 'RUNTIME_EVENT_DRAIN_TIMEOUT'
+        });
+    }, 1000);
 });

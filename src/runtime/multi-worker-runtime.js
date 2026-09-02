@@ -55,7 +55,27 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             lastCommitMs: 0,
             failedBatches: 0,
             pending: 0,
+            acceptedEvents: 0,
+            rejectedEvents: 0,
+            retryCount: 0,
+            queuePending: 0,
+            queueCapacity: 0,
+            availableCapacity: 0,
+            inFlight: 0,
+            pollPaused: false,
             queueAgeMs: 0,
+            byWorker: {}
+        },
+        runtimeHookPoller: {
+            streamReadBatches: 0,
+            streamReadEvents: 0,
+            claimCount: 0,
+            statusPollCount: 0,
+            errors: 0,
+            enqueuedEvents: 0,
+            rejectedEvents: 0,
+            pollPaused: false,
+            lastError: null,
             byWorker: {}
         },
         imageCapacity: {
@@ -181,13 +201,42 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         if (snapshot?.usageEventBatch) {
             const batch = snapshot.usageEventBatch;
             result.usageEventBatch.byWorker[workerId] = batch;
-            for (const field of ['flushCount', 'flushBySize', 'flushByTimer', 'flushByShutdown', 'eventsAppended', 'totalBatchSize', 'failedBatches', 'pending']) {
+            for (const field of [
+                'flushCount', 'flushBySize', 'flushByTimer', 'flushByShutdown',
+                'eventsAppended', 'totalBatchSize', 'failedBatches', 'pending',
+                'acceptedEvents', 'rejectedEvents', 'retryCount', 'queuePending', 'inFlight'
+            ]) {
                 result.usageEventBatch[field] += Number(batch[field] || 0);
             }
+            result.usageEventBatch.queueCapacity = Math.max(
+                result.usageEventBatch.queueCapacity,
+                Number(batch.queueCapacity || 0)
+            );
+            if (result.usageEventBatch.byWorkerCount === undefined) result.usageEventBatch.byWorkerCount = 0;
+            if (Number(batch.queueCapacity || 0) > 0) {
+                const available = Number(batch.availableCapacity || 0);
+                result.usageEventBatch.availableCapacity = result.usageEventBatch.byWorkerCount === 0
+                    ? available
+                    : Math.min(result.usageEventBatch.availableCapacity, available);
+                result.usageEventBatch.byWorkerCount += 1;
+            }
+            result.usageEventBatch.pollPaused ||= batch.pollPaused === true;
             result.usageEventBatch.lastBatchSize = Math.max(result.usageEventBatch.lastBatchSize, Number(batch.lastBatchSize || 0));
             result.usageEventBatch.lastFlushMs = Math.max(result.usageEventBatch.lastFlushMs, Number(batch.lastFlushMs || 0));
             result.usageEventBatch.lastCommitMs = Math.max(result.usageEventBatch.lastCommitMs, Number(batch.lastCommitMs || batch.lastFlushMs || 0));
             result.usageEventBatch.queueAgeMs = Math.max(result.usageEventBatch.queueAgeMs, Number(batch.queueAgeMs || 0));
+        }
+        if (snapshot?.runtimeHookPoller) {
+            const poller = snapshot.runtimeHookPoller;
+            result.runtimeHookPoller.byWorker[workerId] = poller;
+            for (const field of [
+                'streamReadBatches', 'streamReadEvents', 'claimCount', 'statusPollCount',
+                'errors', 'enqueuedEvents', 'rejectedEvents'
+            ]) {
+                result.runtimeHookPoller[field] += Number(poller[field] || 0);
+            }
+            result.runtimeHookPoller.pollPaused ||= poller.pollPaused === true;
+            if (poller.lastError) result.runtimeHookPoller.lastError = poller.lastError;
         }
         result.process.rss += Number(snapshot?.process?.rss || 0);
         result.process.heapUsed += Number(snapshot?.process?.heapUsed || 0);
@@ -300,6 +349,7 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
     if (result.usageEventBatch.flushCount > 0) {
         result.usageEventBatch.averageBatchSize = result.usageEventBatch.totalBatchSize / result.usageEventBatch.flushCount;
     }
+    delete result.usageEventBatch.byWorkerCount;
     return result;
 }
 

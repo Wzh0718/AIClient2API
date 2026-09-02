@@ -328,8 +328,28 @@ describe('runtime observability baseline', () => {
                 lastFlushMs: 0,
                 failedBatches: 0,
                 pending: 0,
+                acceptedEvents: 0,
+                rejectedEvents: 0,
+                retryCount: 0,
+                queuePending: 0,
+                queueCapacity: 0,
+                availableCapacity: 0,
+                inFlight: 0,
+                pollPaused: false,
                 queueAgeMs: 0,
                 lastCommitMs: 0,
+                byWorker: {}
+            },
+            runtimeHookPoller: {
+                streamReadBatches: 0,
+                streamReadEvents: 0,
+                claimCount: 0,
+                statusPollCount: 0,
+                errors: 0,
+                enqueuedEvents: 0,
+                rejectedEvents: 0,
+                pollPaused: false,
+                lastError: null,
                 byWorker: {}
             },
             inFlight: 3,
@@ -522,6 +542,56 @@ describe('runtime observability baseline', () => {
                 'execution-1': expect.any(Object)
             }
         });
+    });
+
+    test('aggregates bounded ingress and poller metrics without double-counting stream backlog', () => {
+        const snapshots = new Map([
+            ['control-1', {
+                usageEventBatch: {
+                    acceptedEvents: 120,
+                    rejectedEvents: 0,
+                    retryCount: 2,
+                    queuePending: 80,
+                    queueCapacity: 1000,
+                    inFlight: 100,
+                    availableCapacity: 820,
+                    pollPaused: false
+                },
+                runtimeHookPoller: {
+                    streamReadBatches: 3,
+                    streamReadEvents: 120,
+                    claimCount: 1,
+                    statusPollCount: 2,
+                    enqueuedEvents: 120,
+                    rejectedEvents: 0,
+                    pollPaused: false
+                },
+                hooks: { pending: 80, spooled: 0, consumerLag: 0, available: true }
+            }]
+        ]);
+
+        const aggregate = aggregateWorkerMetrics(snapshots);
+        expect(aggregate.usageEventBatch).toMatchObject({
+            acceptedEvents: 120,
+            rejectedEvents: 0,
+            retryCount: 2,
+            queuePending: 80,
+            queueCapacity: 1000,
+            inFlight: 100,
+            availableCapacity: 820,
+            pollPaused: false
+        });
+        expect(aggregate.runtimeHookPoller).toMatchObject({
+            streamReadBatches: 3,
+            streamReadEvents: 120,
+            claimCount: 1,
+            statusPollCount: 2,
+            enqueuedEvents: 120,
+            rejectedEvents: 0,
+            pollPaused: false,
+            byWorker: { 'control-1': expect.any(Object) }
+        });
+        expect(aggregate.hooks.pending).toBe(80);
     });
 
     test('aggregates pricing anomaly diagnostics across workers', () => {

@@ -1,9 +1,18 @@
 function createDeferred() {
     let resolve;
     let reject;
+    let settled = false;
     const promise = new Promise((res, rej) => {
-        resolve = res;
-        reject = rej;
+        resolve = value => {
+            if (settled) return;
+            settled = true;
+            res(value);
+        };
+        reject = error => {
+            if (settled) return;
+            settled = true;
+            rej(error);
+        };
     });
     return { promise, resolve, reject };
 }
@@ -56,6 +65,7 @@ export class RuntimeEventBatcher {
         this.retryTimer = null;
         this.running = null;
         this.inFlightEntries = 0;
+        this.activeEntries = [];
         this.retryAttempt = 0;
         this.capacityWaiters = [];
         this.closed = false;
@@ -196,6 +206,7 @@ export class RuntimeEventBatcher {
         this._clearTimer('retryTimer');
         const entries = this.entries.splice(0, this.entries.length);
         const events = entries.map(entry => entry.event);
+        this.activeEntries = entries;
         this.inFlightEntries = entries.length;
         const startedAt = this.performanceNow();
         this.running = (async () => {
@@ -228,6 +239,7 @@ export class RuntimeEventBatcher {
                 this._scheduleRetry();
                 throw error;
             } finally {
+                this.activeEntries = [];
                 this.inFlightEntries = 0;
                 this.running = null;
                 this._notifyCapacity();
@@ -262,18 +274,20 @@ export class RuntimeEventBatcher {
         while (this.pending > 0) {
             if (this.running) {
                 try {
-                    lastResult = await this.running;
+                    lastResult = await this._awaitUntil(this.running, deadline);
                 } catch (error) {
                     lastError = error;
+                    if (error?.code === 'RUNTIME_EVENT_DRAIN_TIMEOUT') break;
                 }
             }
             if (this.entries.length === 0) continue;
             if (this.now() >= deadline) break;
             try {
-                lastResult = await this.flushNow('shutdown');
+                lastResult = await this._awaitUntil(this.flushNow('shutdown'), deadline);
                 lastError = null;
             } catch (error) {
                 lastError = error;
+                if (error?.code === 'RUNTIME_EVENT_DRAIN_TIMEOUT') break;
                 const remainingMs = Math.max(1, deadline - this.now());
                 await new Promise(resolve => this.setTimeoutFn(resolve, Math.min(this.retryDelayMs, remainingMs)));
             }
@@ -285,9 +299,32 @@ export class RuntimeEventBatcher {
             error.code = 'RUNTIME_EVENT_DRAIN_TIMEOUT';
             error.cause = lastError || undefined;
             for (const entry of this.entries.splice(0, this.entries.length)) entry.reject(error);
+            for (const entry of this.activeEntries) entry.reject(error);
             throw error;
         }
         return lastResult;
+    }
+
+    async _awaitUntil(promise, deadline) {
+        const remainingMs = deadline - this.now();
+        if (remainingMs <= 0) {
+            const error = new Error('Runtime event batcher drain timed out');
+            error.code = 'RUNTIME_EVENT_DRAIN_TIMEOUT';
+            throw error;
+        }
+        let timer;
+        const timeout = new Promise((_, reject) => {
+            timer = this.setTimeoutFn(() => {
+                const error = new Error('Runtime event batcher drain timed out');
+                error.code = 'RUNTIME_EVENT_DRAIN_TIMEOUT';
+                reject(error);
+            }, remainingMs);
+        });
+        try {
+            return await Promise.race([promise, timeout]);
+        } finally {
+            if (timer) this.clearTimeoutFn(timer);
+        }
     }
 
     snapshot() {
