@@ -34,6 +34,22 @@ describe('RuntimeHookStream', () => {
         expect(redis.command.mock.calls.some(([parts]) => parts[0] === 'XREADGROUP')).toBe(false);
     });
 
+    test('can skip pending reclaim during a hot polling cycle', async () => {
+        const redis = {
+            command: jest.fn(async parts => {
+                if (parts[0] === 'XGROUP') return 'OK';
+                if (parts[0] === 'XREADGROUP') return null;
+                if (parts[0] === 'XAUTOCLAIM') throw new Error('claim should be skipped');
+                return 0;
+            })
+        };
+        const stream = new RuntimeHookStream({ redis, epoch: 'test', workerId: 'control-1' });
+
+        await expect(stream.readBatch({ blockMs: 0, claim: false })).resolves.toEqual([]);
+        expect(redis.command.mock.calls.some(([parts]) => parts[0] === 'XAUTOCLAIM')).toBe(false);
+        expect(redis.command.mock.calls.some(([parts]) => parts[0] === 'XREADGROUP')).toBe(true);
+    });
+
     test('closes a failed blocking connection so the next poll can reconnect', async () => {
         const redis = { command: jest.fn().mockResolvedValue('OK') };
         const blockingRedis = {

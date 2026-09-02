@@ -22,6 +22,8 @@ import { createRuntimeHookStreamFromEnv } from '../runtime/runtime-hook-stream.j
 import { createUsageEventStore } from '../runtime/usage-event-store.js';
 import { RuntimeUsageProjector } from '../runtime/runtime-usage-projector.js';
 import { RuntimeEventBatcher } from '../runtime/runtime-event-batcher.js';
+import { RuntimeHookPoller } from '../runtime/runtime-hook-poller.js';
+import { resolveRuntimeBatchConfig } from '../runtime/runtime-batch-config.js';
 import { migrateCodexFingerprintProviderPoolsFile } from '../utils/codex-fingerprint-migration.js';
 import { invalidateServiceAdapter } from '../providers/adapter.js';
 import { runtimeImageCapacity } from '../runtime/runtime-image-capacity.js';
@@ -159,6 +161,7 @@ let usageEventStore = null;
 let usageEventStoreSnapshot = null;
 let runtimeUsageProjector = null;
 let runtimeEventBatcher = null;
+let runtimeHookPoller = null;
 let usageProjectionRefreshPromise = null;
 let usageProjectionRefreshRequested = false;
 let usageEventMaintenanceTimerId = null;
@@ -218,10 +221,13 @@ const runtimeHookConsumer = new RuntimeEventConsumer({
 
 function getRuntimeEventBatcher() {
     if (!runtimeEventBatcher) {
+        const batchConfig = resolveRuntimeBatchConfig({ env: process.env, config: CONFIG });
         runtimeEventBatcher = new RuntimeEventBatcher({
-            maxSize: Math.max(1, Number(process.env.USAGE_EVENT_BATCH_SIZE ?? CONFIG.USAGE_EVENT_BATCH_SIZE ?? 100)),
-            flushMs: Math.max(0, Number(process.env.USAGE_EVENT_BATCH_FLUSH_MS ?? CONFIG.USAGE_EVENT_BATCH_FLUSH_MS ?? 1000)),
-            flush: events => runtimeHookConsumer.consumeBatch(events)
+            maxSize: batchConfig.appendBatchSize,
+            flushMs: batchConfig.flushMs,
+            maxPending: batchConfig.queueMax,
+            flush: events => runtimeHookConsumer.consumeBatch(events),
+            onError: error => logger.warn('[Runtime Hook] Durable batch flush failed:', error.message)
         });
     }
     return runtimeEventBatcher;
@@ -295,26 +301,30 @@ function buildRuntimeMetricsSnapshot() {
 function startRuntimeHookPolling() {
     if (!runtimeHookStream || RUNTIME_WORKER_ROLE !== 'control' || runtimeHookPollPromise) return;
     runtimeHookPollStopped = false;
-    runtimeHookPollPromise = (async () => {
-        while (!runtimeHookPollStopped) {
-            try {
-                const events = await runtimeHookStream.readBatch({
-                    count: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_SIZE || process.env.USAGE_EVENT_BATCH_SIZE || 100)),
-                    blockMs: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_WAIT_MS || process.env.USAGE_EVENT_BATCH_WAIT_MS || 20))
-                });
-                if (events.length > 0) {
-                    await Promise.all(events.map(event => enqueueRuntimeHookEvent(event)));
-                }
-                runtimeHookStreamStatus = await runtimeHookStream.pendingSnapshot();
-            } catch (error) {
-                if (!runtimeHookPollStopped) {
-                    runtimeHookStreamStatus = { pending: 0, consumerLag: 0, available: false, error: error.message };
-                    logger.error('[Runtime Hook] Redis stream poll failed:', error.message);
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                }
+    const batchConfig = resolveRuntimeBatchConfig({ env: process.env, config: CONFIG });
+    runtimeHookPoller = new RuntimeHookPoller({
+        stream: runtimeHookStream,
+        ingress: getRuntimeEventBatcher(),
+        readBatchSize: batchConfig.streamReadBatchSize,
+        blockMs: batchConfig.waitMs,
+        statusPollMs: batchConfig.statusPollMs,
+        claimIntervalMs: batchConfig.claimIntervalMs,
+        onStatus: snapshot => { runtimeHookStreamStatus = snapshot; },
+        onError: error => {
+            if (!runtimeHookPollStopped) {
+                runtimeHookStreamStatus = {
+                    pending: 0,
+                    consumerLag: 0,
+                    available: false,
+                    error: error?.message || String(error)
+                };
+                logger.error('[Runtime Hook] Redis stream poll failed:', error?.message || String(error));
             }
         }
-    })().finally(() => { runtimeHookPollPromise = null; });
+    });
+    runtimeHookPollPromise = runtimeHookPoller.start().finally(() => {
+        runtimeHookPollPromise = null;
+    });
 }
 
 async function stopRuntimeHookTransport() {
@@ -327,6 +337,11 @@ async function stopRuntimeHookTransport() {
         usageEventMaintenanceTimerId = null;
     }
     runtimeHookPollStopped = true;
+    if (runtimeHookPoller) {
+        const poller = runtimeHookPoller;
+        runtimeHookPoller = null;
+        await poller.stop({ drain: false });
+    }
     await runtimeHookPollPromise;
     await runtimeEventBatcher?.close?.();
     runtimeEventBatcher = null;
@@ -515,7 +530,7 @@ async function startServer() {
             });
             runtimeUsageProjector = new RuntimeUsageProjector({
                 store: usageEventStore,
-                batchSize: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_SIZE || process.env.USAGE_EVENT_BATCH_SIZE || 100)),
+                batchSize: resolveRuntimeBatchConfig({ env: process.env, config: CONFIG }).projectionBatchSize,
                 executeProjectionBatch: (projectionName, items) => getPluginManager()?.executeUsageProjectionBatch?.(
                     projectionName,
                     items
@@ -560,7 +575,7 @@ async function startServer() {
         });
         runtimeUsageProjector = new RuntimeUsageProjector({
             store: usageEventStore,
-            batchSize: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_SIZE || process.env.USAGE_EVENT_BATCH_SIZE || 100)),
+            batchSize: resolveRuntimeBatchConfig({ env: process.env, config: CONFIG }).projectionBatchSize,
             executeProjectionBatch: (projectionName, items) => getPluginManager()?.executeUsageProjectionBatch?.(
                 projectionName,
                 items

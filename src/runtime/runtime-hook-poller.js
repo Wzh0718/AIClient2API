@@ -1,0 +1,162 @@
+function sleep(delayMs) {
+    return new Promise(resolve => setTimeout(resolve, Math.max(0, delayMs)));
+}
+
+function invokeSafely(callback, value) {
+    try {
+        return callback?.(value);
+    } catch {
+        return undefined;
+    }
+}
+
+export class RuntimeHookPoller {
+    constructor({
+        stream,
+        ingress,
+        readBatchSize = 100,
+        blockMs = 20,
+        statusPollMs = 1000,
+        claimIntervalMs = 5000,
+        errorRetryMs = 1000,
+        now = () => Date.now(),
+        sleepFn = sleep,
+        onStatus = null,
+        onError = null
+    } = {}) {
+        if (!stream?.readBatch) throw new TypeError('runtime hook stream is required');
+        if (!ingress?.pushBatch || !ingress?.availableCapacity || !ingress?.waitForCapacity) {
+            throw new TypeError('runtime hook ingress is required');
+        }
+        this.stream = stream;
+        this.ingress = ingress;
+        this.readBatchSize = Math.max(1, Number(readBatchSize) || 1);
+        this.blockMs = Math.max(0, Number(blockMs) || 0);
+        this.statusPollMs = Math.max(0, Number(statusPollMs) || 0);
+        this.claimIntervalMs = Math.max(0, Number(claimIntervalMs) || 0);
+        this.errorRetryMs = Math.max(1, Number(errorRetryMs) || 1);
+        this.now = now;
+        this.sleep = sleepFn;
+        this.onStatus = typeof onStatus === 'function' ? onStatus : null;
+        this.onError = typeof onError === 'function' ? onError : null;
+        this.running = null;
+        this.stopped = true;
+        this.stopWaiters = [];
+        this.lastClaimAt = 0;
+        this.nextStatusAt = 0;
+        this.metrics = {
+            streamReadBatches: 0,
+            streamReadEvents: 0,
+            claimCount: 0,
+            statusPollCount: 0,
+            errors: 0,
+            enqueuedEvents: 0,
+            rejectedEvents: 0,
+            pollPaused: false,
+            lastError: null,
+            lastStatusAt: null
+        };
+    }
+
+    start() {
+        if (this.running) return this.running;
+        this.stopped = false;
+        this.nextStatusAt = 0;
+        this.running = this._run().finally(() => {
+            this.running = null;
+        });
+        return this.running;
+    }
+
+    async _run() {
+        while (!this.stopped) {
+            const availableCapacity = Math.max(0, Number(this.ingress.availableCapacity()) || 0);
+            if (availableCapacity <= 0) {
+                this.metrics.pollPaused = true;
+                const capacityPromise = this.ingress.waitForCapacity(1);
+                await Promise.race([capacityPromise, this._waitForStop()]);
+                this.metrics.pollPaused = false;
+                continue;
+            }
+
+            const count = Math.max(1, Math.min(this.readBatchSize, availableCapacity));
+            const claim = this.claimIntervalMs === 0 || this.now() >= this.lastClaimAt + this.claimIntervalMs;
+            if (claim) {
+                this.lastClaimAt = this.now();
+                this.metrics.claimCount += 1;
+            }
+            try {
+                const events = await this.stream.readBatch({ count, blockMs: this.blockMs, claim });
+                if (this.stopped) break;
+                this.metrics.streamReadBatches += 1;
+                this.metrics.streamReadEvents += events.length;
+                if (events.length > 0) {
+                    const result = this.ingress.pushBatch(events, { awaitFlush: false });
+                    this.metrics.enqueuedEvents += Number(result?.accepted || 0);
+                    this.metrics.rejectedEvents += Number(result?.rejected || 0);
+                    result?.completion?.catch(error => this._reportError(error));
+                } else {
+                    // A mocked/non-blocking Redis client can resolve immediately;
+                    // yield between empty reads so shutdown and capacity signals
+                    // are not starved by a microtask-only loop.
+                    await Promise.race([
+                        this.sleep(Math.max(1, Math.min(this.blockMs || 1, 25))),
+                        this._waitForStop()
+                    ]);
+                }
+                await this._sampleStatusIfDue();
+            } catch (error) {
+                if (this.stopped) break;
+                this._reportError(error);
+                await Promise.race([this.sleep(this.errorRetryMs), this._waitForStop()]);
+            }
+        }
+    }
+
+    _reportError(error) {
+        this.metrics.errors += 1;
+        this.metrics.lastError = error?.message || String(error);
+        invokeSafely(this.onError, error);
+    }
+
+    _waitForStop() {
+        if (this.stopped) return Promise.resolve(true);
+        return new Promise(resolve => this.stopWaiters.push(resolve));
+    }
+
+    async _sampleStatusIfDue(force = false) {
+        if (!this.stream.pendingSnapshot) return null;
+        const now = this.now();
+        if (!force && now < this.nextStatusAt) return null;
+        this.nextStatusAt = now + this.statusPollMs;
+        try {
+            const snapshot = await this.stream.pendingSnapshot();
+            this.metrics.statusPollCount += 1;
+            this.metrics.lastStatusAt = new Date().toISOString();
+            invokeSafely(this.onStatus, snapshot);
+            return snapshot;
+        } catch (error) {
+            this._reportError(error);
+            return null;
+        }
+    }
+
+    async stop({ drain = true, timeoutMs = 30000 } = {}) {
+        this.stopped = true;
+        for (const resolve of this.stopWaiters.splice(0)) resolve(true);
+        if (this.running) await this.running.catch(() => {});
+        this.running = null;
+        await this._sampleStatusIfDue(true);
+        if (drain && this.ingress.close) return this.ingress.close({ timeoutMs });
+        return null;
+    }
+
+    snapshot() {
+        return {
+            ...this.metrics,
+            running: Boolean(this.running),
+            availableCapacity: Number(this.ingress.availableCapacity?.() || 0),
+            queuePending: Number(this.ingress.snapshot?.().pending || 0)
+        };
+    }
+}

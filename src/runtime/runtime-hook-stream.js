@@ -240,26 +240,28 @@ export class RuntimeHookStream {
         }
     }
 
-    async readBatch({ count = 100, blockMs = 1000 } = {}) {
+    async readBatch({ count = 100, blockMs = 1000, claim = true } = {}) {
         await this.ensureGroup();
-        const claimCommand = [
-            'XAUTOCLAIM', this.streamKey, this.group, this.workerId,
-            String(this.pendingClaimIdleMs), '0-0', 'COUNT', count
-        ];
-        let claimed;
-        try {
-            claimed = await this._blockingCommand(claimCommand, { timeoutMs: this.redisCommandTimeoutMs });
-        } catch (error) {
-            if (!isMissingConsumerGroup(error)) throw error;
-            this.groupReady = false;
-            await this.ensureGroup();
-            claimed = await this._blockingCommand(claimCommand, { timeoutMs: this.redisCommandTimeoutMs });
+        if (claim !== false) {
+            const claimCommand = [
+                'XAUTOCLAIM', this.streamKey, this.group, this.workerId,
+                String(this.pendingClaimIdleMs), '0-0', 'COUNT', count
+            ];
+            let claimed;
+            try {
+                claimed = await this._blockingCommand(claimCommand, { timeoutMs: this.redisCommandTimeoutMs });
+            } catch (error) {
+                if (!isMissingConsumerGroup(error)) throw error;
+                this.groupReady = false;
+                await this.ensureGroup();
+                claimed = await this._blockingCommand(claimCommand, { timeoutMs: this.redisCommandTimeoutMs });
+            }
+            const claimedEvents = decodeRuntimeHookStreamResponse([[
+                this.streamKey,
+                claimed?.[1] || []
+            ]]);
+            if (claimedEvents.length > 0) return claimedEvents;
         }
-        const claimedEvents = decodeRuntimeHookStreamResponse([[
-            this.streamKey,
-            claimed?.[1] || []
-        ]]);
-        if (claimedEvents.length > 0) return claimedEvents;
         const command = [
             'XREADGROUP', 'GROUP', this.group, this.workerId,
             'COUNT', count, 'BLOCK', blockMs,
