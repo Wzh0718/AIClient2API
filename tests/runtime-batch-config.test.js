@@ -25,7 +25,7 @@ describe('runtime batch configuration', () => {
     test('uses the legacy batch size as the stream read fallback', () => {
         expect(resolveRuntimeBatchConfig({
             env: { USAGE_EVENT_BATCH_SIZE: '500' },
-            config: { USAGE_EVENT_BATCH_SIZE: 100, USAGE_EVENT_BATCH_WAIT_MS: 20 }
+            config: { USAGE_EVENT_BATCH_SIZE: 100 }
         })).toMatchObject({
             appendBatchSize: 500,
             streamReadBatchSize: 500,
@@ -62,7 +62,7 @@ describe('runtime batch configuration', () => {
             },
             config: {}
         })).toMatchObject({
-            waitMs: 20,
+            waitMs: 1000,
             statusPollMs: 1000,
             claimIntervalMs: 5000
         });

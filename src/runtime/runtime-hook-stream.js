@@ -80,7 +80,7 @@ export class RuntimeHookStream {
         spoolDir = path.join(process.cwd(), 'configs', 'runtime-hook-spool', workerId),
         spoolMaxBytes = 256 * 1024 * 1024,
         retentionSeconds = 45 * 24 * 60 * 60,
-        redisCommandTimeoutMs = 3000,
+        redisCommandTimeoutMs = 10000,
         pendingClaimIdleMs = 30_000
     } = {}) {
         if (!redis?.command) throw new TypeError('Redis executor with command() is required');
@@ -277,12 +277,12 @@ export class RuntimeHookStream {
         ];
         let response;
         try {
-            response = await this._blockingCommand(command, { timeoutMs: Math.max(this.redisCommandTimeoutMs, blockMs + 1000) });
+            response = await this._blockingCommand(command, { timeoutMs: Math.max(this.redisCommandTimeoutMs, blockMs + 5000, 10000) });
         } catch (error) {
             if (!isMissingConsumerGroup(error)) throw error;
             this.groupReady = false;
             await this.ensureGroup();
-            response = await this._blockingCommand(command, { timeoutMs: Math.max(this.redisCommandTimeoutMs, blockMs + 1000) });
+            response = await this._blockingCommand(command, { timeoutMs: Math.max(this.redisCommandTimeoutMs, blockMs + 5000, 10000) });
         }
         return decodeRuntimeHookStreamResponse(response);
     }
@@ -456,6 +456,7 @@ export function createRuntimeHookStreamFromEnv({ env = process.env, workerId } =
         epoch: env.RUNTIME_DEPLOYMENT_EPOCH || 'default',
         workerId: workerId || env.RUNTIME_WORKER_ID || `worker-${process.pid}`,
         spoolDir: env.RUNTIME_HOOK_SPOOL_DIR || path.join(process.cwd(), 'configs', 'runtime-hook-spool', workerId || env.RUNTIME_WORKER_ID || `worker-${process.pid}`),
-        spoolMaxBytes: Number(env.RUNTIME_HOOK_SPOOL_MAX_BYTES || 256 * 1024 * 1024)
+        spoolMaxBytes: Number(env.RUNTIME_HOOK_SPOOL_MAX_BYTES || 256 * 1024 * 1024),
+        redisCommandTimeoutMs: Number(env.RUNTIME_HOOK_REDIS_COMMAND_TIMEOUT_MS || 10000)
     });
 }

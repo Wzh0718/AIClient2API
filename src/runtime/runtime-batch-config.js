@@ -2,7 +2,7 @@ const DEFAULTS = Object.freeze({
     appendBatchSize: 100,
     streamReadBatchSize: null,
     projectionBatchSize: null,
-    waitMs: 20,
+    waitMs: 1000,
     flushMs: 1000,
     queueMax: null,
     statusPollMs: 1000,

@@ -24,6 +24,7 @@ import { RuntimeUsageProjector } from '../runtime/runtime-usage-projector.js';
 import { RuntimeEventBatcher } from '../runtime/runtime-event-batcher.js';
 import { drainRuntimeHookTransport } from '../runtime/runtime-hook-shutdown.js';
 import { RuntimeHookPoller } from '../runtime/runtime-hook-poller.js';
+import { RuntimeHookHealthState } from '../runtime/runtime-hook-health-state.js';
 import { resolveRuntimeBatchConfig } from '../runtime/runtime-batch-config.js';
 import { migrateCodexFingerprintProviderPoolsFile } from '../utils/codex-fingerprint-migration.js';
 import { invalidateServiceAdapter } from '../providers/adapter.js';
@@ -163,6 +164,9 @@ let usageEventStoreSnapshot = null;
 let runtimeUsageProjector = null;
 let runtimeEventBatcher = null;
 let runtimeHookPoller = null;
+const runtimeHookHealthState = new RuntimeHookHealthState({
+    failureThreshold: Number(process.env.RUNTIME_HOOK_REDIS_FAILURE_THRESHOLD || 3)
+});
 let usageProjectionRefreshPromise = null;
 let usageProjectionRefreshRequested = false;
 let usageEventMaintenanceTimerId = null;
@@ -333,16 +337,11 @@ function startRuntimeHookPolling() {
         blockMs: batchConfig.waitMs,
         statusPollMs: batchConfig.statusPollMs,
         claimIntervalMs: batchConfig.claimIntervalMs,
-        onStatus: snapshot => { runtimeHookStreamStatus = snapshot; },
+        onStatus: snapshot => { runtimeHookStreamStatus = runtimeHookHealthState.recordSnapshot(snapshot); },
         onBatchError: error => logger.warn('[Runtime Hook] Durable batch flush failed:', error?.message || String(error)),
         onError: error => {
             if (!runtimeHookPollStopped) {
-                runtimeHookStreamStatus = {
-                    pending: 0,
-                    consumerLag: 0,
-                    available: false,
-                    error: error?.message || String(error)
-                };
+                runtimeHookStreamStatus = runtimeHookHealthState.recordFailure(error);
                 logger.error('[Runtime Hook] Redis stream poll failed:', error?.message || String(error));
             }
         }

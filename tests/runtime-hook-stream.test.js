@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { RuntimeHookStream } from '../src/runtime/runtime-hook-stream.js';
+import { RuntimeHookStream, createRuntimeHookStreamFromEnv } from '../src/runtime/runtime-hook-stream.js';
 
 describe('RuntimeHookStream', () => {
     test('uses a dedicated Redis connection for blocking reads', async () => {
@@ -426,6 +426,41 @@ describe('RuntimeHookStream', () => {
         await expect(stream.publish({ eventId: 'evt-timeout' })).resolves.toMatchObject({ spooled: true });
         expect(redis.command).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ timeoutMs: expect.any(Number) }));
         fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('gives blocking stream reads a timeout beyond the Redis BLOCK window', async () => {
+        const redis = {
+            command: jest.fn(async parts => {
+                if (parts[0] === 'XGROUP') return 'OK';
+                if (parts[0] === 'XREADGROUP') return null;
+                return 0;
+            })
+        };
+        const stream = new RuntimeHookStream({
+            redis,
+            blockingRedis: redis,
+            epoch: 'test',
+            workerId: 'control-1',
+            redisCommandTimeoutMs: 3000
+        });
+
+        await stream.readBatch({ blockMs: 5000, claim: false });
+
+        const readCall = redis.command.mock.calls.find(([parts]) => parts[0] === 'XREADGROUP');
+        expect(readCall[1].timeoutMs).toBeGreaterThanOrEqual(10000);
+    });
+
+    test('reads the Redis command timeout from the runtime environment', () => {
+        const stream = createRuntimeHookStreamFromEnv({
+            env: {
+                REDIS_URL: 'redis://127.0.0.1:6379/0',
+                RUNTIME_DEPLOYMENT_EPOCH: 'test',
+                RUNTIME_HOOK_REDIS_COMMAND_TIMEOUT_MS: '15000'
+            },
+            workerId: 'control-1'
+        });
+
+        expect(stream.redisCommandTimeoutMs).toBe(15000);
     });
 
     test('rejects new spool writes after the configured disk bound without growing memory', async () => {

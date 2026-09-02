@@ -176,7 +176,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         MODEL_USAGE_STATS_PERSIST_DEBOUNCE_MS: 30_000,
         USAGE_EVENT_BATCH_SIZE: 100,
         USAGE_EVENT_STREAM_READ_BATCH_SIZE: null,
-        USAGE_EVENT_BATCH_WAIT_MS: 20,
+        USAGE_EVENT_BATCH_WAIT_MS: 1000,
         USAGE_EVENT_BATCH_FLUSH_MS: 1000,
         USAGE_EVENT_PROJECTION_BATCH_SIZE: 100,
         USAGE_EVENT_INGEST_QUEUE_MAX: null,
