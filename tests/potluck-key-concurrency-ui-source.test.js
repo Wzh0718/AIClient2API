@@ -32,15 +32,16 @@ describe('Potluck Key concurrency UI source contract', () => {
 });
 
 describe('Provider usage summary UI source contract', () => {
-    test('uses an adaptive two-column summary and removes standalone model cooldown badge', () => {
+    test('uses the current Antigravity model availability summary and removes standalone model cooldown badge', () => {
         const css = read('static/components/section-usage.css');
         const source = read('static/app/usage-manager.js');
 
-        expect(css).toContain('.usage-provider-summary-grid');
-        expect(css).toContain('grid-template-columns: repeat(2');
-        expect(source).toContain('function renderProviderUsageSummary');
-        expect(source).toContain('最快恢复');
-        expect(source).toContain('role="status"');
+        expect(css).toContain('.antigravity-model-availability-summary');
+        expect(css).toContain('.antigravity-model-availability-row');
+        expect(source).toContain('function renderAntigravityModelAvailabilitySummary');
+        expect(source).toContain('usage.antigravity.availability.recoveryAt');
+        expect(source).toContain('aria-label="Gemini 模型可用性摘要"');
+        expect(source).not.toContain('usage-provider-summary-grid');
         expect(source).not.toContain('模型冷却：${activeModels.length}');
     });
 });
