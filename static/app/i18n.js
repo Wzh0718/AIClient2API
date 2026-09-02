@@ -1242,6 +1242,7 @@ const translations = {
         // Models
         'models.title': '可用模型列表',
         'models.note': '点击模型名称可直接复制到剪贴板',
+        'models.routingOrder': 'Antigravity 模型路由顺序',
         'models.empty': '暂无可用模型',
         'models.loadError': '加载模型列表失败',
         'models.copied': '已复制',
@@ -2709,6 +2710,7 @@ const translations = {
         // Models
         'models.title': 'Available Models',
         'models.note': 'Click model name to copy to clipboard',
+        'models.routingOrder': 'Antigravity model routing order',
         'models.empty': 'No models available',
         'models.loadError': 'Failed to load models',
         'models.copied': 'Copied',

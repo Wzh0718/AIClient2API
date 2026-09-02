@@ -6,6 +6,14 @@ function readSource(relativePath) {
 }
 
 describe('Antigravity quota UI source', () => {
+    test('shows the canonical Antigravity Flash routing order', () => {
+        const source = readSource('static/app/models-manager.js');
+        expect(source).toContain('gemini-2.5-flash-lite');
+        expect(source).toContain('gemini-3.5-flash-lite');
+        expect(source).toContain('gemini-3.7-flash');
+        expect(source).toContain('models.routingOrder');
+    });
+
     test('advertises the verified 22-model Antigravity display set', async () => {
         const { PROVIDER_MODELS } = await import('../src/providers/provider-models.js');
         expect(PROVIDER_MODELS['gemini-antigravity']).toEqual([
@@ -17,6 +25,8 @@ describe('Antigravity quota UI source', () => {
             'gemini-3.1-flash-lite',
             'gemini-3.1-pro-high',
             'gemini-3.1-pro-low',
+            'gemini-3.5-flash',
+            'gemini-3.5-flash-lite',
             'gemini-3.5-flash-extra-low',
             'gemini-3.5-flash-medium',
             'gemini-3.6-flash',

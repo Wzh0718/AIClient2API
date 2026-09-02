@@ -14,7 +14,15 @@ const ANTIGRAVITY_ELASTIC_ROUTING_DEFAULTS = Object.freeze({
     enabled: true,
     maxQueueWaitMs: 45_000,
     preferOriginalWaitMs: 10_000,
-    fallbackModels: ['gemini-2.5-flash', 'gemini-3.1-flash-lite'],
+    fallbackModels: [
+        'gemini-2.5-flash',
+        'gemini-3.1-flash-lite',
+        'gemini-3-flash',
+        'gemini-3.5-flash-lite',
+        'gemini-3.5-flash',
+        'gemini-3.6-flash',
+        'gemini-3.7-flash'
+    ],
     globalQueueLimit: 512,
     perKeyModelQueueLimit: 256,
     globalQueuedBytesLimit: 64 * BYTES_PER_MB,

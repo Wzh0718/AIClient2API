@@ -21,6 +21,13 @@ function loadEnsureToolCallIds() {
 }
 
 describe('upstream model registrations', () => {
+    test('registers canonical Gemini 3.5 Flash models for Antigravity', () => {
+        expect(getProviderModels('gemini-antigravity')).toEqual(expect.arrayContaining([
+            'gemini-3.5-flash',
+            'gemini-3.5-flash-lite'
+        ]));
+    });
+
     test('registers current Grok CLI OAuth models', () => {
         expect(getProviderModels('grok-cli-oauth')).toEqual(expect.arrayContaining([
             'grok-4.5',
@@ -51,6 +58,26 @@ describe('upstream model registrations', () => {
 
     test('registers Claude Opus 5 for Kiro', () => {
         expect(getProviderModels('claude-kiro-oauth')).toContain('claude-opus-5');
+    });
+});
+
+describe('Antigravity model identity mappings', () => {
+    test('keeps canonical Flash model names unchanged upstream', () => {
+        const source = fs.readFileSync(
+            path.join(repoRoot, 'src', 'providers', 'gemini', 'antigravity-core.js'),
+            'utf8'
+        );
+        expect(source).not.toMatch(/'gemini-3\.5-flash':\s*'[^']+'/);
+        expect(source).not.toMatch(/'gemini-3\.5-flash-lite':\s*'[^']+'/);
+        expect(source).not.toMatch(/'gemini-3\.6-flash':\s*'gemini-3\.6-flash-low'/);
+        expect(source).not.toMatch(/'gemini-3\.7-flash':\s*'gemini-3\.7-flash-low'/);
+        expect(source).not.toMatch(/'gemini-3\.5-flash-high':\s*'gemini-3\.5-flash-low'/);
+        expect(source).not.toMatch(/'gemini-3\.6-flash-high':\s*'gemini-3\.6-flash-low'/);
+        expect(source).not.toMatch(/'gemini-3\.7-flash-high':\s*'gemini-3\.7-flash-low'/);
+        expect(source).not.toMatch(/'gemini-3\.1-pro-high':\s*'gemini-pro-agent'/);
+        expect(source).not.toMatch(/'gemini-3\.1-pro-preview':\s*'gemini-pro-agent'/);
+        expect(source).toContain('.map(modelId => normalizeAntigravityModelId(modelId))');
+        expect(source).not.toContain('.flatMap(modelId => expandAntigravityClientModels(modelId))');
     });
 });
 

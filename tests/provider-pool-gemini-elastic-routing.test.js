@@ -16,8 +16,9 @@ const sourceModel = 'gemini-2.5-flash-lite';
 const firstFallback = 'gemini-2.5-flash';
 const secondFallback = 'gemini-3.1-flash-lite';
 const thirdFallback = 'gemini-3-flash';
-const fourthFallback = 'gemini-3.6-flash';
+const fourthFallback = 'gemini-3.5-flash-lite';
 const fifthFallback = 'gemini-3.5-flash';
+const sixthFallback = 'gemini-3.6-flash';
 
 function coolingUntil(delayMs) {
     return {
@@ -69,15 +70,16 @@ function createCoordinatedManager(providers, coordination, overrides = {}) {
 
 describe('Antigravity elastic queue and model fallback', () => {
     test('only falls forward to stronger models when the requested model is in the middle', () => {
-        const configured = [firstFallback, secondFallback, thirdFallback, fourthFallback, fifthFallback];
+        const configured = [firstFallback, secondFallback, thirdFallback, fourthFallback, fifthFallback, sixthFallback];
         expect(getAntigravityElasticFallbackModels(sourceModel, configured)).toEqual(configured);
         expect(getAntigravityElasticFallbackModels(firstFallback, configured)).toEqual([
-            secondFallback, thirdFallback, fourthFallback, fifthFallback
+            secondFallback, thirdFallback, fourthFallback, fifthFallback, sixthFallback
         ]);
         expect(getAntigravityElasticFallbackModels(secondFallback, configured)).toEqual([
-            thirdFallback, fourthFallback, fifthFallback
+            thirdFallback, fourthFallback, fifthFallback, sixthFallback
         ]);
-        expect(getAntigravityElasticFallbackModels(fifthFallback, configured)).toEqual([]);
+        expect(getAntigravityElasticFallbackModels(fifthFallback, configured)).toEqual([sixthFallback]);
+        expect(getAntigravityElasticFallbackModels(sixthFallback, configured)).toEqual([]);
     });
 
     test('waits for a short source-model cooldown and keeps the requested model', async () => {

@@ -12,6 +12,26 @@ let modelsCache = null;
 // 提供商配置缓存
 let currentProviderConfigs = null;
 
+const ANTIGRAVITY_FLASH_ROUTING_ORDER = [
+    'gemini-2.5-flash-lite',
+    'gemini-2.5-flash',
+    'gemini-3.1-flash-lite',
+    'gemini-3-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-3.5-flash',
+    'gemini-3.6-flash',
+    'gemini-3.7-flash'
+];
+
+function sortAntigravityModels(models) {
+    const order = new Map(ANTIGRAVITY_FLASH_ROUTING_ORDER.map((model, index) => [model, index]));
+    return [...models].sort((a, b) => {
+        const ai = order.has(a) ? order.get(a) : Number.MAX_SAFE_INTEGER;
+        const bi = order.has(b) ? order.get(b) : Number.MAX_SAFE_INTEGER;
+        return ai - bi || a.localeCompare(b);
+    });
+}
+
 /**
  * 更新提供商配置
  * @param {Array} configs - 提供商配置列表
@@ -121,9 +141,22 @@ function renderModelsList(models) {
     
     // 渲染每个提供商的模型组
     let html = '';
+
+    if (models['gemini-antigravity']?.length) {
+        const available = new Set(models['gemini-antigravity']);
+        const visibleOrder = ANTIGRAVITY_FLASH_ROUTING_ORDER.filter(model => available.has(model));
+        html += `
+            <div class="models-routing-order" role="note">
+                <div class="models-routing-order-title"><i class="fas fa-route" aria-hidden="true"></i> ${t('models.routingOrder') || 'Antigravity 模型路由顺序'}</div>
+                <div class="models-routing-order-value">${visibleOrder.map(escapeHtml).join(' <span aria-hidden="true">→</span> ')}</div>
+            </div>
+        `;
+    }
     
     for (const providerType of providerTypes) {
-        const modelList = models[providerType];
+        const modelList = providerType === 'gemini-antigravity'
+            ? sortAntigravityModels(models[providerType] || [])
+            : models[providerType];
         if (!modelList || modelList.length === 0) continue;
         
         // 如果配置了不可见，则跳过

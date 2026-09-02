@@ -61,22 +61,6 @@ const ANTIGRAVITY_ERROR_BODY_MAX_BYTES = 1024 * 1024;
 // 获取 Antigravity 模型列表
 const ANTIGRAVITY_MODELS = getProviderModels(MODEL_PROVIDER.ANTIGRAVITY);
 
-const ANTIGRAVITY_CLIENT_TO_UPSTREAM_MODEL = {
-    'gemini-3.1-pro-high': 'gemini-pro-agent',
-    'gemini-3.1-pro-preview': 'gemini-pro-agent',
-    'gemini-3.5-flash-high': 'gemini-3.5-flash-low',
-    'gemini-3.6-flash-high': 'gemini-3.6-flash-low',
-    'gemini-3.6-flash': 'gemini-3.6-flash-low',
-    'gemini-3.7-flash-high': 'gemini-3.7-flash-low',
-    'gemini-3.7-flash': 'gemini-3.7-flash-low',
-};
-
-const ANTIGRAVITY_UPSTREAM_TO_CLIENT_MODELS = {
-    'gemini-pro-agent': ['gemini-3.1-pro-high', 'gemini-3.1-pro-preview'],
-    'gemini-3.6-flash-low': ['gemini-3.6-flash', 'gemini-3.6-flash-low', 'gemini-3.6-flash-high'],
-    'gemini-3.7-flash-low': ['gemini-3.7-flash', 'gemini-3.7-flash-low', 'gemini-3.7-flash-high'],
-};
-
 const ANTIGRAVITY_CLIENT_MODEL_THINKING_LEVEL = {
     'gemini-pro-agent': 'high',
     'gemini-3.1-pro-high': 'high',
@@ -183,33 +167,7 @@ function resolveAntigravityUpstreamModel(modelName) {
     if (baseModel.startsWith('gemini-claude-')) {
         return baseModel.replace('gemini-claude-', 'claude-');
     }
-    return ANTIGRAVITY_CLIENT_TO_UPSTREAM_MODEL[baseModel] || baseModel;
-}
-
-function expandAntigravityClientModels(upstreamModel) {
-    const baseModel = stripModelSuffix(upstreamModel);
-    if (!baseModel) return [];
-    const out = [];
-    const push = (modelId) => {
-        if (modelId && !out.includes(modelId)) out.push(modelId);
-    };
-
-    if (baseModel.startsWith('claude-')) {
-        push(`gemini-${baseModel}`);
-        return out;
-    }
-
-    let exposedAlias = false;
-    for (const alias of ANTIGRAVITY_UPSTREAM_TO_CLIENT_MODELS[baseModel] || []) {
-        if (ANTIGRAVITY_MODELS.includes(alias)) {
-            push(alias);
-            exposedAlias = true;
-        }
-    }
-    if (ANTIGRAVITY_MODELS.includes(baseModel) || (!exposedAlias && ANTIGRAVITY_MODEL_METADATA[baseModel])) {
-        push(baseModel);
-    }
-    return out;
+    return baseModel;
 }
 
 function getAntigravityModelMetadata(modelName) {
@@ -1658,7 +1616,7 @@ export class AntigravityApiService {
                     const models = Object.keys(res.data.models);
                     const seenModels = new Set();
                     this.availableModels = models
-                        .flatMap(modelId => expandAntigravityClientModels(modelId))
+                        .map(modelId => normalizeAntigravityModelId(modelId))
                         .filter(modelId => {
                             if (!modelId || seenModels.has(modelId)) return false;
                             seenModels.add(modelId);

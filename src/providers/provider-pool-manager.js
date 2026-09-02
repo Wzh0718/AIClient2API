@@ -34,8 +34,10 @@ const ANTIGRAVITY_ELASTIC_MODEL_ORDER = Object.freeze([
     'gemini-2.5-flash',
     'gemini-3.1-flash-lite',
     'gemini-3-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-3.5-flash',
     'gemini-3.6-flash',
-    'gemini-3.5-flash'
+    'gemini-3.7-flash'
 ]);
 const ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS = Object.freeze({
     ...Object.fromEntries(ANTIGRAVITY_ELASTIC_MODEL_ORDER.map((model, index) => [
