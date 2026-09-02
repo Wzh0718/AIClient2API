@@ -5,7 +5,10 @@ const DEFAULTS = Object.freeze({
     waitMs: 1000,
     flushMs: 1000,
     queueMax: null,
-    statusPollMs: 1000,
+    // Each status sample costs XPENDING + XINFO + XLEN + two INFO calls, which at
+    // one second made the health poll one of the busiest Redis clients in
+    // production for numbers that only feed /runtime/health.
+    statusPollMs: 5000,
     claimIntervalMs: 5000
 });
 

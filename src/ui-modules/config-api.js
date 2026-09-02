@@ -11,6 +11,7 @@ import { broadcastEvent } from '../ui-modules/event-broadcast.js';
 import { HEALTH_CHECK, PASSWORD, NETWORK, RETRY } from '../utils/constants.js';
 import { withFileLock, atomicWriteFile } from '../utils/file-lock.js';
 import { validateCredentials } from './auth.js';
+import { ANTIGRAVITY_ELASTIC_MODEL_ORDER } from '../providers/antigravity-model-order.js';
 
 function parseBooleanConfig(value) {
     if (typeof value === 'boolean') return value;
@@ -38,10 +39,7 @@ function normalizeAntigravityElasticRoutingUpdate(incoming, current = {}) {
     if (Array.isArray(incoming.fallbackModels)) {
         next.fallbackModels = incoming.fallbackModels
             .map(model => String(model || '').trim())
-            .filter(model => [
-                'gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-3.1-flash-lite',
-                'gemini-3-flash', 'gemini-3.6-flash-medium', 'gemini-3.7-flash-medium'
-            ].includes(model));
+            .filter(model => ANTIGRAVITY_ELASTIC_MODEL_ORDER.includes(model));
     }
     return next;
 }

@@ -13,11 +13,30 @@ quota, proxy, and model-routing code runs.
 - Redis failure uses a bounded local fail-open guard (`120/minute` by default).
 - Existing Node provider/key concurrency controls remain authoritative.
 
-The edge service does not acquire a long-lived concurrency lease. NGINX
-`auth_request` has no reliable callback after the proxied upstream request
-finishes, so acquiring a Redis lease there would leak slots until a TTL. Keep
-the existing Node concurrency controller until a gateway with request-lifecycle
-hooks is introduced.
+## Edge admission leases
+
+The edge service now acquires a Redis admission lease during `/authorize` and
+returns it as `X-Edge-Lease-ID` plus `X-Edge-Lease-Mode`. NGINX has no callback
+after the proxied request finishes, so the lease is bounded by
+`EDGE_AUTH_LEASE_TTL_MS` (120s by default) and the API worker releases it when
+the request completes. Waiting requests are queued and promoted in Redis.
+
+The API worker only trusts these headers when `EDGE_ADMISSION_ENABLED=true`;
+with `EDGE_ADMISSION_REQUIRED=true` a request that carries no valid lease is
+rejected instead of falling back to in-process limits.
+
+## Go-live checklist
+
+1. Deploy the edge-auth image built from the same commit as the API image.
+2. Replace the deployed `edge-auth-api-directives.conf` with the contents of
+   `docker/nginx-edge-auth-api-location.conf` so the lease headers reach the
+   upstream; without this step `edgeAdmissionMode=enforce` keys are enforced
+   nowhere.
+3. Set `EDGE_ADMISSION_ENABLED=true` and `EDGE_ADMISSION_REQUIRED=true` on the
+   API container, together with a deliberate `EDGE_AUTH_DEFAULT_KEY_CONCURRENCY`.
+4. Only after observing the dry-run IP counters, add
+   `docker/nginx-edge-auth-api-enforce.conf` to switch per-IP limits from
+   observation to enforcement.
 
 ## Local smoke test
 

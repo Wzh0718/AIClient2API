@@ -22,6 +22,8 @@ function safeMetadata(metadata = {}) {
 
 const REQUIRED_STAGE_NAMES = [
     'providerFilterMs',
+    'keyQueueWaitMs',
+    'selectionComputeMs',
     'redisLeaseMs',
     'identityReadMs',
     'identityPersistLockWaitMs',

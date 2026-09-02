@@ -34,6 +34,9 @@ function fieldsToObject(fields = []) {
     return result;
 }
 
+const REDIS_MEMORY_SNAPSHOT_TTL_MS = 5000;
+const REDIS_MEMORY_FORCE_TTL_MS = 1000;
+
 function isMissingConsumerGroup(error) {
     return /NOGROUP/i.test(error?.message || '');
 }
@@ -389,7 +392,11 @@ export class RuntimeHookStream {
 
     async _getRedisMemorySnapshot(force = false) {
         const now = Date.now();
-        if (!force && this.memorySnapshot && now - this.memorySnapshotAt < 1000) return this.memorySnapshot;
+        // Every publish consulted this snapshot, which turned INFO MEMORY into one
+        // of the busiest Redis commands in production. Memory pressure moves slowly
+        // enough that a 5s view is still a usable guard.
+        const ttlMs = force ? REDIS_MEMORY_FORCE_TTL_MS : REDIS_MEMORY_SNAPSHOT_TTL_MS;
+        if (this.memorySnapshot && now - this.memorySnapshotAt < ttlMs) return this.memorySnapshot;
         const info = parseRedisInfo(await this.redis.command(['INFO', 'MEMORY'], { timeoutMs: this.redisCommandTimeoutMs }));
         const usedBytes = Number(info.used_memory || 0);
         const peakBytes = Number(info.used_memory_peak || 0);

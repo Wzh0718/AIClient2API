@@ -3,6 +3,7 @@ import { promises as pfs } from 'fs';
 import { DEFAULT_REQUEST_BODY_MAX_BYTES, INPUT_SYSTEM_PROMPT_FILE } from '../utils/common.js';
 import { MODEL_PROVIDER } from '../utils/constants.js';
 import { normalizeAspectMismatchThreshold } from '../utils/image-size-normalizer.js';
+import { ANTIGRAVITY_ELASTIC_MODEL_ORDER } from '../providers/antigravity-model-order.js';
 import logger from '../utils/logger.js';
 
 export let CONFIG = {}; // Make CONFIG exportable
@@ -14,14 +15,7 @@ const ANTIGRAVITY_ELASTIC_ROUTING_DEFAULTS = Object.freeze({
     enabled: true,
     maxQueueWaitMs: 45_000,
     preferOriginalWaitMs: 10_000,
-    fallbackModels: [
-        'gemini-2.5-flash-lite',
-        'gemini-2.5-flash',
-        'gemini-3.1-flash-lite',
-        'gemini-3-flash',
-        'gemini-3.6-flash-medium',
-        'gemini-3.7-flash-medium'
-    ],
+    fallbackModels: [...ANTIGRAVITY_ELASTIC_MODEL_ORDER],
     globalQueueLimit: 512,
     perKeyModelQueueLimit: 256,
     globalQueuedBytesLimit: 64 * BYTES_PER_MB,

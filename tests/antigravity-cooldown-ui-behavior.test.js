@@ -2,6 +2,9 @@ import { afterAll, beforeAll, describe, expect, jest, test } from '@jest/globals
 
 describe('Antigravity cooldown UI behavior', () => {
     beforeAll(() => {
+        // The fixtures below use absolute cooldown timestamps, so the clock must be
+        // pinned before them or every cooldown reads as already recovered.
+        jest.useFakeTimers({ now: new Date('2026-08-24T08:00:00.000Z') });
         globalThis.window = {
             location: { origin: 'http://localhost' }
         };
@@ -13,6 +16,7 @@ describe('Antigravity cooldown UI behavior', () => {
     });
 
     afterAll(() => {
+        jest.useRealTimers();
         delete globalThis.window;
         delete globalThis.localStorage;
     });

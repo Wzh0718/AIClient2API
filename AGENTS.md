@@ -23,10 +23,17 @@
 - Before traffic switch, verify `/runtime/health` shows complete worker topology and provider config convergence with `pendingWorkerCount=0`.
 - Do not directly restart or replace the active container while writing mounted config. Pause management/OAuth writes, perform the documented manual Nginx handoff, retain rollback state, and obtain explicit production authorization.
 
+## Edge Admission Rollout
+
+- Edge Admission needs three things at once; any one missing means `edgeAdmissionMode=enforce` keys are enforced nowhere: an edge-auth image from the same commit, the deployed Nginx snippet replaced by `docker/nginx-edge-auth-api-location.conf` so the lease headers reach upstream, and `EDGE_ADMISSION_ENABLED=true` plus `EDGE_ADMISSION_REQUIRED=true` on the API container.
+- Per-IP rate limits stay in `limit_req_dry_run` until `docker/nginx-edge-auth-api-enforce.conf` is explicitly included. Include it only after reviewing the dry-run counters.
+- The steps and the lease lifecycle are documented in `docs/edge-auth.md`.
+
 ## Testing
 
 - Prefer focused Jest tests before implementation changes.
 - Run targeted tests for touched modules, then broader tests when feasible.
+- `scripts/ops/build-image.sh` gates the build on `tests/provider-pool-`, `tests/antigravity-`, and `tests/runtime-`. It runs with `--runInBand` because several pool suites share the real `configs/usage-cache.json` fixture and race in parallel workers; `tests/runtime-usage-event-store.test.js` is excluded because the Windows host has no compiled `better-sqlite3` binding. `SKIP_TEST_GATE=1` is for emergency rebuilds of an already-verified commit only.
 
 ## Docker Build Notes
 

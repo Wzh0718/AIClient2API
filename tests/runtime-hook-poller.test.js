@@ -179,7 +179,11 @@ describe('runtime hook poller', () => {
         };
         const poller = new RuntimeHookPoller({ stream, ingress, blockMs: 1, statusPollMs: 1 });
         poller.start();
-        await new Promise(resolve => setTimeout(resolve, 20));
+        // A 20ms window made this assertion flaky when the suite runs in parallel.
+        const deadline = Date.now() + 2000;
+        while (stream.readBatch.mock.calls.length <= 1 && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 5));
+        }
         expect(stream.readBatch.mock.calls.length).toBeGreaterThan(1);
         releaseStatus({ pending: 0 });
         await poller.stop({ drain: false });

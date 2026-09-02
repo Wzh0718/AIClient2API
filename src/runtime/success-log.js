@@ -1,5 +1,7 @@
 const ALLOWED_STAGES = new Set([
     'providerFilterMs',
+    'keyQueueWaitMs',
+    'selectionComputeMs',
     'redisLeaseMs',
     'identityReadMs',
     'identityPersistLockWaitMs',

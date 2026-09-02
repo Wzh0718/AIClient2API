@@ -22,27 +22,24 @@ import {
     readFreshUsageCacheSync
 } from '../utils/codex-plan.js';
 import { normalizeCodexRateLimitWindows } from '../utils/codex-rate-limit.js';
-import requestContext from '../utils/context.js';
+import requestContext, { accumulateRoutingWait } from '../utils/context.js';
 import { SmoothWeightedRoundRobin } from './smooth-weighted-round-robin.js';
 import { performance } from 'node:perf_hooks';
 import { createProviderStateEvent, applyProviderStateEvent } from '../runtime/provider-state-event.js';
 import { matchesModelFamily } from './openai/codex-model-routing.js';
+import { ANTIGRAVITY_ELASTIC_MODEL_ORDER, ANTIGRAVITY_ELASTIC_SOURCE_MODEL } from './antigravity-model-order.js';
 
-const ANTIGRAVITY_ELASTIC_SOURCE_MODEL = 'gemini-2.5-flash-lite';
-const ANTIGRAVITY_ELASTIC_MODEL_ORDER = Object.freeze([
-    'gemini-2.5-flash-lite',
-    'gemini-2.5-flash',
-    'gemini-3.1-flash-lite',
-    'gemini-3-flash',
-    'gemini-3.6-flash-medium',
-    'gemini-3.7-flash-medium'
-]);
 const ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS = Object.freeze(
     Object.fromEntries(ANTIGRAVITY_ELASTIC_MODEL_ORDER.map((model, index) => [
         model,
         ANTIGRAVITY_ELASTIC_MODEL_ORDER.slice(index + 1)
     ]))
 );
+// A 404 from upstream means the model does not exist at all, so the entry can
+// live far longer than a quota cooldown. It is still bounded so an upstream
+// rename or a newly granted tier recovers without an operator action.
+const ANTIGRAVITY_MODEL_NOT_FOUND_TTL_MS = 60 * 60 * 1000;
+const ANTIGRAVITY_MODEL_NOT_FOUND_SYNC_INTERVAL_MS = 5000;
 const ANTIGRAVITY_ELASTIC_DEFAULTS = Object.freeze({
     enabled: true,
     maxQueueWaitMs: 45_000,
@@ -691,8 +688,14 @@ export class ProviderPoolManager {
             queueEnqueued: 0,
             queueWaitMs: 0,
             queueTimeouts: 0,
-            retrySuppressed: 0
+            retrySuppressed: 0,
+            modelNotFoundMarked: 0,
+            modelNotFoundFastFails: 0,
+            availableModelsUnknown: 0
         };
+        this._antigravityModelNotFound = new Map();
+        this._antigravityModelNotFoundSync = { fetchedAt: 0, promise: null };
+        this._antigravityAvailableModelsWarnedAt = 0;
         this._providerSelectionLoadStats = new Map();
         this._poolKeySchedulers = new Map();
         this._geminiElasticQueue = {
@@ -2075,7 +2078,9 @@ export class ProviderPoolManager {
                     requestedModel
                 })
                 : await this.coordination.acquire(coordinatedCandidates, { requestedModel });
-            requestContext.get('runtimeRequest')?.recordStage?.('redisLeaseMs', performance.now() - leaseStartedAt);
+            const leaseWaitMs = performance.now() - leaseStartedAt;
+            requestContext.get('runtimeRequest')?.recordStage?.('redisLeaseMs', leaseWaitMs);
+            accumulateRoutingWait('credentialLeaseWaitMs', leaseWaitMs);
             if (!lease) return null;
             const selected = this._findProvider(lease.providerType, lease.uuid);
             if (!selected) {
@@ -2464,7 +2469,9 @@ export class ProviderPoolManager {
                         : ''
                 })
                 : await this.coordination.acquire(candidates, { requestedModel });
-            requestContext.get('runtimeRequest')?.recordStage?.('redisLeaseMs', performance.now() - leaseStartedAt);
+            const leaseWaitMs = performance.now() - leaseStartedAt;
+            requestContext.get('runtimeRequest')?.recordStage?.('redisLeaseMs', leaseWaitMs);
+            accumulateRoutingWait('credentialLeaseWaitMs', leaseWaitMs);
             if (!lease) return null;
             const selected = this._findProvider(lease.providerType, lease.uuid);
             if (!selected) {
@@ -2567,7 +2574,7 @@ export class ProviderPoolManager {
                 this._log('warn', `[Coordination] Lease release deferred to TTL for ${key}: ${error.message}`);
                 return false;
             });
-            this._notifyGeminiElasticWaiters();
+            this._notifyGeminiElasticWaiters(providerType);
             return released;
         }
         
@@ -2587,7 +2594,7 @@ export class ProviderPoolManager {
                 setImmediate(next);
             }
         }
-        this._notifyGeminiElasticWaiters();
+        this._notifyGeminiElasticWaiters(providerType);
     }
 
     /**
@@ -3365,6 +3372,181 @@ export class ProviderPoolManager {
         return count;
     }
 
+    /**
+     * Records the model list an Antigravity credential actually advertises
+     * upstream. Without this write-back `getAntigravityAvailableModels` sees an
+     * empty set in production and the intersection filter silently degrades to
+     * the hand-maintained static chain.
+     */
+    recordAntigravityAvailableModels(providerType, providerUuid, models) {
+        if (!isAntigravityProviderType(providerType) || !providerUuid) return false;
+        const provider = this._findProvider(providerType, providerUuid);
+        if (!provider) return false;
+        const normalized = [...new Set(
+            (Array.isArray(models) ? models : [])
+                .map(model => String(model || '').trim())
+                .filter(Boolean)
+        )];
+        if (normalized.length === 0) return false;
+        const existing = Array.isArray(provider.config.availableModels) ? provider.config.availableModels : [];
+        if (existing.length === normalized.length && existing.every((model, index) => model === normalized[index])) {
+            return false;
+        }
+        provider.config.availableModels = normalized;
+        this.invalidateAntigravityAvailability();
+        this._log('info', `Recorded ${normalized.length} probed Antigravity models for ${this._getDisplayName(provider.config)}`);
+        return true;
+    }
+
+    _getAntigravityVerifiedModels(providerType) {
+        const models = getAntigravityAvailableModels(this.providerStatus?.[providerType] || []);
+        if (models.length === 0 && isAntigravityProviderType(providerType)) {
+            this._antigravityRoutingMetrics.availableModelsUnknown += 1;
+            const now = Date.now();
+            if (now - this._antigravityAvailableModelsWarnedAt > 60_000) {
+                this._antigravityAvailableModelsWarnedAt = now;
+                this._log('warn', `No probed model list is known for ${providerType}; the elastic chain is falling back to the static model order`);
+            }
+        }
+        return models;
+    }
+
+    _getAntigravityModelNotFoundScope(providerType) {
+        return `antigravity-model-not-found:${providerType}:${this.providerConfigRevision}`;
+    }
+
+    _getAntigravityModelNotFoundKey(providerType, canonicalModel) {
+        return `${providerType}:${this.providerConfigRevision}:${canonicalModel}`;
+    }
+
+    isAntigravityModelNotFound(providerType, model) {
+        const canonicalModel = normalizeAntigravityQuotaModel(model);
+        if (!canonicalModel) return false;
+        const key = this._getAntigravityModelNotFoundKey(providerType, canonicalModel);
+        const expiresAt = Number(this._antigravityModelNotFound.get(key));
+        if (!Number.isFinite(expiresAt)) return false;
+        if (expiresAt <= Date.now()) {
+            this._antigravityModelNotFound.delete(key);
+            return false;
+        }
+        return true;
+    }
+
+    markAntigravityModelNotFound(providerType, model, errorMessage = null) {
+        if (!isAntigravityProviderType(providerType)) return false;
+        const canonicalModel = normalizeAntigravityQuotaModel(model);
+        if (!canonicalModel) return false;
+        const alreadyKnown = this.isAntigravityModelNotFound(providerType, canonicalModel);
+        this._antigravityModelNotFound.set(
+            this._getAntigravityModelNotFoundKey(providerType, canonicalModel),
+            Date.now() + ANTIGRAVITY_MODEL_NOT_FOUND_TTL_MS
+        );
+        this._antigravityRoutingMetrics.modelNotFoundMarked += 1;
+        if (!alreadyKnown) {
+            this._log('warn', `Antigravity model ${canonicalModel} does not exist upstream; excluding it from routing for ${ANTIGRAVITY_MODEL_NOT_FOUND_TTL_MS / 60000} minutes (${errorMessage || 'not found'})`);
+            this.invalidateAntigravityAvailability(canonicalModel);
+        }
+        this._publishAntigravityModelNotFound(providerType);
+        return true;
+    }
+
+    clearAntigravityModelNotFound() {
+        const count = this._antigravityModelNotFound.size;
+        this._antigravityModelNotFound.clear();
+        this._antigravityModelNotFoundSync.fetchedAt = 0;
+        return count;
+    }
+
+    getAntigravityModelNotFoundModels(providerType) {
+        const now = Date.now();
+        const prefix = `${providerType}:${this.providerConfigRevision}:`;
+        const models = [];
+        for (const [key, expiresAt] of this._antigravityModelNotFound) {
+            if (!key.startsWith(prefix)) continue;
+            if (Number(expiresAt) <= now) {
+                this._antigravityModelNotFound.delete(key);
+                continue;
+            }
+            models.push(key.slice(prefix.length));
+        }
+        return models;
+    }
+
+    _publishAntigravityModelNotFound(providerType) {
+        if (typeof this.coordination?.setModelNegativeCache !== 'function') return;
+        const models = {};
+        for (const model of this.getAntigravityModelNotFoundModels(providerType)) {
+            models[model] = Number(this._antigravityModelNotFound.get(
+                this._getAntigravityModelNotFoundKey(providerType, model)
+            ));
+        }
+        Promise.resolve(this.coordination.setModelNegativeCache(
+            this._getAntigravityModelNotFoundScope(providerType),
+            { version: 1, models },
+            { ttlMs: ANTIGRAVITY_MODEL_NOT_FOUND_TTL_MS }
+        )).catch(error => this._log('warn', `Failed to publish Antigravity model-not-found cache: ${error.message}`));
+    }
+
+    /**
+     * Pulls the shared model-not-found set so a worker that has never seen the
+     * 404 itself still skips the model. Rate limited so the routing path costs
+     * at most one Redis read per interval instead of one per request.
+     */
+    async _hydrateAntigravityModelNotFound(providerType) {
+        if (!isAntigravityProviderType(providerType)) return;
+        if (typeof this.coordination?.getModelNegativeCache !== 'function') return;
+        const sync = this._antigravityModelNotFoundSync;
+        if (sync.promise) {
+            await sync.promise;
+            return;
+        }
+        if (Date.now() - sync.fetchedAt < ANTIGRAVITY_MODEL_NOT_FOUND_SYNC_INTERVAL_MS) return;
+        sync.promise = (async () => {
+            try {
+                const shared = await this.coordination.getModelNegativeCache(
+                    this._getAntigravityModelNotFoundScope(providerType)
+                );
+                const models = shared?.models;
+                if (!models || typeof models !== 'object') return;
+                const now = Date.now();
+                for (const [model, expiresAt] of Object.entries(models)) {
+                    const canonicalModel = normalizeAntigravityQuotaModel(model);
+                    const numericExpiry = Number(expiresAt);
+                    if (!canonicalModel || !Number.isFinite(numericExpiry) || numericExpiry <= now) continue;
+                    const key = this._getAntigravityModelNotFoundKey(providerType, canonicalModel);
+                    const localExpiry = Number(this._antigravityModelNotFound.get(key)) || 0;
+                    if (numericExpiry > localExpiry) this._antigravityModelNotFound.set(key, numericExpiry);
+                }
+            } catch (error) {
+                this._log('warn', `Failed to hydrate Antigravity model-not-found cache: ${error.message}`);
+            } finally {
+                sync.fetchedAt = Date.now();
+                sync.promise = null;
+            }
+        })();
+        await sync.promise;
+    }
+
+    _excludeAntigravityModelsNotFound(providerType, models) {
+        if (!isAntigravityProviderType(providerType)) return models;
+        return models.filter(model => {
+            if (!this.isAntigravityModelNotFound(providerType, model)) return true;
+            this._antigravityRoutingMetrics.skippedByNegativeCache += 1;
+            return false;
+        });
+    }
+
+    _createAntigravityModelNotFoundError(requestedModel) {
+        const canonicalModel = normalizeAntigravityQuotaModel(requestedModel);
+        this._antigravityRoutingMetrics.modelNotFoundFastFails += 1;
+        return createGeminiRoutingError(
+            `Antigravity model ${canonicalModel} does not exist upstream`,
+            'MODEL_NOT_FOUND',
+            404,
+            { quotaScope: 'model', quotaKey: canonicalModel }
+        );
+    }
+
     async _filterAntigravityProvidersByQuota(providerType, providers, requestedModel = null, selectionDiagnostics = null, options = {}) {
         if (!requestedModel) return providers;
 
@@ -3509,15 +3691,17 @@ export class ProviderPoolManager {
     }
 
     async _selectGeminiWithModelFallback(providerType, requestedModel, options, select) {
-        const availableModels = getAntigravityAvailableModels(this.providerStatus?.[providerType] || []);
-        const models = [
+        await this._hydrateAntigravityModelNotFound(providerType);
+        const availableModels = this._getAntigravityVerifiedModels(providerType);
+        const models = this._excludeAntigravityModelsNotFound(providerType, [
             requestedModel,
             ...getAntigravityElasticFallbackModels(
                 requestedModel,
                 getConfiguredGeminiFallbackModels(this.globalConfig),
                 availableModels
             )
-        ];
+        ]);
+        if (models.length === 0) throw this._createAntigravityModelNotFoundError(requestedModel);
         let lastError = null;
         for (let index = 0; index < models.length; index += 1) {
             const model = models[index];
@@ -3550,8 +3734,15 @@ export class ProviderPoolManager {
         };
     }
 
-    _notifyGeminiElasticWaiters() {
-        for (const waiter of [...this._geminiElasticQueue.waiters]) waiter();
+    // Only Antigravity requests queue here, yet every releaseSlot call used to
+    // wake all of them. Codex traffic dominates release volume, so unscoped
+    // wakes made each Codex completion re-run the whole Gemini selection loop
+    // for every waiter.
+    _notifyGeminiElasticWaiters(providerType = null) {
+        for (const waiter of [...this._geminiElasticQueue.waiters]) {
+            if (providerType && waiter.providerType && waiter.providerType !== providerType) continue;
+            waiter.wake();
+        }
     }
 
     async _acquireGeminiElasticQueueEntry(requestedModel, options, config) {
@@ -3616,17 +3807,17 @@ export class ProviderPoolManager {
         this._geminiElasticQueue.queuedBytes = Math.max(0, this._geminiElasticQueue.queuedBytes - entry.bytes);
     }
 
-    _waitForGeminiElasticWake({ timeoutMs, abortSignal }) {
+    _waitForGeminiElasticWake({ timeoutMs, abortSignal, providerType = null }) {
         if (abortSignal?.aborted) {
             return Promise.reject(createGeminiRoutingError('Client aborted while queued', 'CLIENT_ABORTED', 499));
         }
         return new Promise((resolve, reject) => {
             let settled = false;
-            const wake = () => finish(resolve);
+            const waiter = { providerType, wake: () => finish(resolve) };
             const onAbort = () => finish(() => reject(createGeminiRoutingError('Client aborted while queued', 'CLIENT_ABORTED', 499)));
             const cleanup = () => {
                 clearTimeout(timer);
-                this._geminiElasticQueue.waiters.delete(wake);
+                this._geminiElasticQueue.waiters.delete(waiter);
                 abortSignal?.removeEventListener?.('abort', onAbort);
             };
             const finish = callback => {
@@ -3635,9 +3826,9 @@ export class ProviderPoolManager {
                 cleanup();
                 callback();
             };
-            const timer = setTimeout(wake, Math.max(1, timeoutMs));
+            const timer = setTimeout(waiter.wake, Math.max(1, timeoutMs));
             timer.unref?.();
-            this._geminiElasticQueue.waiters.add(wake);
+            this._geminiElasticQueue.waiters.add(waiter);
             abortSignal?.addEventListener?.('abort', onAbort, { once: true });
         });
     }
@@ -3710,8 +3901,16 @@ export class ProviderPoolManager {
         };
         requestStore.antigravityRouting = requestRouting;
         const configuredFallbacks = Array.isArray(policy.fallbackModels) ? policy.fallbackModels : [];
-        const availableModels = getAntigravityAvailableModels(this.providerStatus?.[providerType] || []);
-        const models = [requestedModel, ...getAntigravityElasticFallbackModels(requestedModel, configuredFallbacks, availableModels)];
+        const availableModels = this._getAntigravityVerifiedModels(providerType);
+        await this._hydrateAntigravityModelNotFound(providerType);
+        const models = this._excludeAntigravityModelsNotFound(
+            providerType,
+            [requestedModel, ...getAntigravityElasticFallbackModels(requestedModel, configuredFallbacks, availableModels)]
+        );
+        if (models.length === 0) throw this._createAntigravityModelNotFoundError(requestedModel);
+        // The requested model itself may be the one upstream does not host, in
+        // which case every surviving entry is a fallback and must be attempted.
+        const sourceModelUsable = models[0] === requestedModel;
         const startedAt = Date.now();
         const deadline = startedAt + policy.maxQueueWaitMs;
         let queueEntry = null;
@@ -3720,7 +3919,7 @@ export class ProviderPoolManager {
 
         const attemptModels = async ({ includeSource = true } = {}) => {
             latestErrors = [];
-            const startIndex = includeSource ? 0 : 1;
+            const startIndex = (includeSource || !sourceModelUsable) ? 0 : 1;
             for (let index = startIndex; index < models.length; index += 1) {
                 const model = models[index];
                 if (requestRouting.attemptedModels.includes(model)) {
@@ -3753,18 +3952,21 @@ export class ProviderPoolManager {
         };
 
         try {
-            if (!requestRouting.attemptedModels.includes(requestedModel)) requestRouting.attemptedModels.push(requestedModel);
-            const sourceAttempt = await this._tryAntigravityElasticModel(providerType, requestedModel, options);
-            this._antigravityRoutingMetrics.sourceAttempts += 1;
-            if (sourceAttempt.config) {
-                return {
-                    config: sourceAttempt.config,
-                    actualProviderType: providerType,
-                    actualModel: requestedModel,
-                    isFallback: false,
-                    fallbackAttemptCount: 0,
-                    queueWaitMs: 0
-                };
+            let sourceAttempt = { config: null, error: null };
+            if (sourceModelUsable) {
+                if (!requestRouting.attemptedModels.includes(requestedModel)) requestRouting.attemptedModels.push(requestedModel);
+                sourceAttempt = await this._tryAntigravityElasticModel(providerType, requestedModel, options);
+                this._antigravityRoutingMetrics.sourceAttempts += 1;
+                if (sourceAttempt.config) {
+                    return {
+                        config: sourceAttempt.config,
+                        actualProviderType: providerType,
+                        actualModel: requestedModel,
+                        isFallback: false,
+                        fallbackAttemptCount: 0,
+                        queueWaitMs: 0
+                    };
+                }
             }
 
             const sourceRecovery = this._getRecoveryTimeFromError(sourceAttempt.error);
@@ -3777,7 +3979,8 @@ export class ProviderPoolManager {
                 this._antigravityRoutingMetrics.queueEnqueued += 1;
                 await this._waitForGeminiElasticWake({
                     timeoutMs: Math.min(sourceWaitMs, Math.max(1, deadline - Date.now())),
-                    abortSignal: options.abortSignal
+                    abortSignal: options.abortSignal,
+                    providerType
                 });
                 this.invalidateAntigravityAvailability(canonicalRequestedModel);
                 const jitterRange = Math.max(0, policy.recoveryJitterMaxMs - policy.recoveryJitterMinMs);
@@ -3785,7 +3988,8 @@ export class ProviderPoolManager {
                 if (jitterMs > 0 && Date.now() < deadline) {
                     await this._waitForGeminiElasticWake({
                         timeoutMs: Math.min(jitterMs, Math.max(1, deadline - Date.now())),
-                        abortSignal: options.abortSignal
+                        abortSignal: options.abortSignal,
+                        providerType
                     });
                 }
                 const recovered = await this._tryAntigravityElasticModel(providerType, requestedModel, options);
@@ -3804,7 +4008,9 @@ export class ProviderPoolManager {
 
             const immediateFallback = await attemptModels({ includeSource: false });
             if (immediateFallback) return immediateFallback;
-            const allModelErrors = [sourceAttempt.error, ...latestErrors];
+            const allModelErrors = sourceModelUsable
+                ? [sourceAttempt.error, ...latestErrors]
+                : [...latestErrors];
             if (this._shouldFastFailAntigravityModels(allModelErrors, models)) {
                 throw this._createAntigravityAllModelsUnavailableError(requestedModel, allModelErrors);
             }
@@ -3824,7 +4030,8 @@ export class ProviderPoolManager {
                 const recoveryDelay = nearestRecovery ? Math.max(1, nearestRecovery - now) : remainingMs;
                 await this._waitForGeminiElasticWake({
                     timeoutMs: Math.min(remainingMs, recoveryDelay, this.coordination ? 1000 : remainingMs),
-                    abortSignal: options.abortSignal
+                    abortSignal: options.abortSignal,
+                    providerType
                 });
                 this.invalidateAntigravityAvailability(canonicalRequestedModel);
                 const selected = await attemptModels({ includeSource: false });

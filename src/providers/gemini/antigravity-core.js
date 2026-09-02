@@ -947,6 +947,7 @@ export class AntigravityApiService {
         });
 
         this.availableModels = [];
+        this._lastModelProbeSucceeded = false;
         this.isInitialized = false;
         this.initializationPromise = null;
         this.initializationFailure = null;
@@ -1554,11 +1555,30 @@ export class AntigravityApiService {
         this.modelProbeCache = null;
     }
 
+    // Routing filters read the model list from the provider pool, so a probe
+    // result that only lives on this service instance would never reach them.
+    _publishAvailableModelsToPool() {
+        // A failed probe falls back to the full static list, which must not be
+        // recorded as an upstream-verified set.
+        if (this._lastModelProbeSucceeded !== true) return;
+        if (!this.uuid || !this.availableModels?.length) return;
+        try {
+            getProviderPoolManager()?.recordAntigravityAvailableModels?.(
+                this.config.MODEL_PROVIDER || MODEL_PROVIDER.ANTIGRAVITY,
+                this.uuid,
+                this.availableModels
+            );
+        } catch (error) {
+            logger.warn(`[Antigravity] Failed to publish probed model list to the provider pool: ${error.message}`);
+        }
+    }
+
     async fetchAvailableModels() {
         const identity = this._getModelProbeCacheIdentity();
         const now = Date.now();
         if (this.modelProbeCache?.identity === identity && this.modelProbeCache.expiresAt > now) {
             this.availableModels = [...this.modelProbeCache.models];
+            this._publishAvailableModelsToPool();
             return;
         }
         if (this.modelProbePromise) return this.modelProbePromise;
@@ -1570,6 +1590,7 @@ export class AntigravityApiService {
                     models: [...this.availableModels],
                     expiresAt: Date.now() + this._getModelProbeCacheTtlMs()
                 };
+                this._publishAvailableModelsToPool();
             })
             .finally(() => {
                 this.modelProbePromise = null;
@@ -1619,6 +1640,7 @@ export class AntigravityApiService {
                         cached: false,
                         modelCount: this.availableModels.length
                     })}`);
+                    this._lastModelProbeSucceeded = true;
                     return;
                 }
             } catch (error) {
@@ -1627,6 +1649,7 @@ export class AntigravityApiService {
         }
 
         logger.warn('[Antigravity] Failed to fetch models from all endpoints. Using default models.');
+        this._lastModelProbeSucceeded = false;
         this.availableModels = ANTIGRAVITY_MODELS;
         logger.info(`[Gemini Diagnostics] ${JSON.stringify({
             event: 'provider_model_list_probe',
@@ -2210,7 +2233,17 @@ export class AntigravityApiService {
             ? this.availableModels.includes(selectedModel)
             : isKnownAntigravityModel(selectedModel);
         if (!modelIsAvailable) {
-            throw new Error(`[Antigravity] 模型不存在: ${model}`);
+            // The client asked for a model this provider does not serve, which
+            // is a request error rather than an internal failure.
+            const error = new Error(`[Antigravity] 模型不存在: ${model}`);
+            error.status = 400;
+            error.statusCode = 400;
+            error.code = 'MODEL_NOT_SUPPORTED';
+            error.response = { status: 400 };
+            error.retryable = false;
+            error.shouldSwitchCredential = false;
+            error.skipErrorCount = true;
+            throw error;
         }
 
         const actualModelName = resolveAntigravityUpstreamModel(selectedModel);

@@ -37,6 +37,26 @@ stage_done() {
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+# Commit cec016f shipped two failing suites straight to production, so routing
+# and runtime regressions now gate the build. Set SKIP_TEST_GATE=1 only for an
+# emergency rebuild of an already-verified commit.
+if [ "${SKIP_TEST_GATE:-0}" != "1" ]; then
+  test_started=$(stage_start)
+  echo "running required regression suites"
+  # Several pool suites share the real configs/usage-cache.json fixture, so they
+  # race against each other when Jest runs them in parallel workers.
+  # runtime-usage-event-store needs a compiled better-sqlite3 binding, which is
+  # absent on the Windows build host; it is covered inside the image instead.
+  npx jest tests/provider-pool- tests/antigravity- tests/runtime- --runInBand \
+    --testPathIgnorePatterns 'tests/runtime-usage-event-store.test.js' --silent || {
+    echo "regression suites failed; refusing to build $IMAGE_TAG" >&2
+    exit 1
+  }
+  stage_done test-gate "$test_started"
+else
+  echo "WARNING: test gate skipped via SKIP_TEST_GATE=1" >&2
+fi
+
 export_started=$(stage_start)
 echo "exporting $GIT_REF ($COMMIT) to $TMP_DIR"
 git archive "$GIT_REF" | tar -x -C "$TMP_DIR"

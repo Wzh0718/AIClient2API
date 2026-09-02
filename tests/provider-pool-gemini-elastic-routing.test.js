@@ -19,7 +19,6 @@ const secondFallback = 'gemini-3.1-flash-lite';
 const thirdFallback = 'gemini-3-flash';
 const fourthFallback = 'gemini-3.6-flash-medium';
 const fifthFallback = 'gemini-3.7-flash-medium';
-const sixthFallback = 'gemini-3.7-flash-medium';
 
 function coolingUntil(delayMs) {
     return {
@@ -87,18 +86,18 @@ describe('Antigravity elastic queue and model fallback', () => {
     });
 
     test('only falls forward to stronger models when the requested model is in the middle', () => {
-        const configured = [firstFallback, secondFallback, thirdFallback, fourthFallback, fifthFallback, sixthFallback];
+        const configured = [firstFallback, secondFallback, thirdFallback, fourthFallback, fifthFallback];
         expect(getAntigravityElasticFallbackModels(sourceModel, configured)).toEqual([
             firstFallback, secondFallback, thirdFallback, fourthFallback, fifthFallback
         ]);
         expect(getAntigravityElasticFallbackModels(firstFallback, configured)).toEqual([
-            secondFallback, thirdFallback, fourthFallback, fifthFallback, sixthFallback
+            secondFallback, thirdFallback, fourthFallback, fifthFallback
         ]);
         expect(getAntigravityElasticFallbackModels(secondFallback, configured)).toEqual([
-            thirdFallback, fourthFallback, fifthFallback, sixthFallback
+            thirdFallback, fourthFallback, fifthFallback
         ]);
+        expect(getAntigravityElasticFallbackModels(fourthFallback, configured)).toEqual([fifthFallback]);
         expect(getAntigravityElasticFallbackModels(fifthFallback, configured)).toEqual([]);
-        expect(getAntigravityElasticFallbackModels(sixthFallback, configured)).toEqual([]);
     });
 
     test('waits for a short source-model cooldown and keeps the requested model', async () => {
@@ -380,5 +379,19 @@ describe('Antigravity elastic queue and model fallback', () => {
         expect(results.filter(result => result.status === 'rejected' && result.reason?.status === 500)).toHaveLength(0);
         expect(results.every(result => result.status === 'fulfilled')).toBe(true);
         expect(manager.getGeminiElasticQueueSnapshot()).toMatchObject({ waiting: 0, queuedBytes: 0 });
+    });
+
+    test('only wakes queued waiters of the provider whose slot was released', async () => {
+        const manager = createManager([provider('gemini-a')]);
+        let woken = false;
+        const wait = manager._waitForGeminiElasticWake({ timeoutMs: 5000, providerType }).then(() => { woken = true; });
+
+        manager.releaseSlot('openai-codex-oauth', 'codex-1');
+        await new Promise(resolve => setImmediate(resolve));
+        expect(woken).toBe(false);
+
+        manager.releaseSlot(providerType, 'gemini-a');
+        await wait;
+        expect(woken).toBe(true);
     });
 });

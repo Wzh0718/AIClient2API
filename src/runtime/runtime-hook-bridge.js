@@ -68,7 +68,8 @@ function compactTemporaryModelRoute(route) {
 
 function compactMetadata(context = {}) {
     const allowedStages = new Set([
-        'providerFilterMs', 'redisLeaseMs', 'identityReadMs', 'identityPersistLockWaitMs',
+        'providerFilterMs', 'keyQueueWaitMs', 'selectionComputeMs',
+        'redisLeaseMs', 'identityReadMs', 'identityPersistLockWaitMs',
         'identityPersistIoMs', 'requestConvertMs', 'systemPromptPersistMs',
         'upstreamFirstByteMs', 'upstreamCompleteMs', 'responseFinalizeMs', 'complete'
     ]);

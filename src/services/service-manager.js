@@ -1,4 +1,4 @@
-import { getServiceAdapter, invalidateServiceAdapter, serviceInstances } from '../providers/adapter.js';
+﻿import { getServiceAdapter, invalidateServiceAdapter, serviceInstances } from '../providers/adapter.js';
 import logger from '../utils/logger.js';
 import {
     ProviderPoolManager,
@@ -33,11 +33,11 @@ import { getCodexRoutingConsistencyStatus } from './codex-routing-integrity.js';
 import { resolveCodexEntryModel } from '../providers/openai/codex-model-routing.js';
 import { performance } from 'node:perf_hooks';
 import { runtimeMetrics } from '../runtime/runtime-metrics.js';
-import requestContext from '../utils/context.js';
+import requestContext, { accumulateRoutingWait, readRoutingWaits } from '../utils/context.js';
 import { PotluckKeyConcurrencyLimiter } from '../plugins/api-potluck/key-concurrency-limiter.js';
 import { buildGeminiSelectionDiagnostic } from '../utils/gemini-diagnostics.js';
 
-// 存储 ProviderPoolManager 实例
+// 瀛樺偍 ProviderPoolManager 瀹炰緥
 let providerPoolManager = null;
 const potluckKeyConcurrencyLimiter = new PotluckKeyConcurrencyLimiter({
     onEvent: event => logger.info(`[Potluck Key Concurrency] ${event.event} key=${event.keyId} active=${event.active ?? 0} waiting=${event.waiting ?? 0}`)
@@ -450,6 +450,50 @@ function getOrderedCredentialGroups(groups, requestedPrimaryGroupId, pinnedGroup
     return ordered;
 }
 
+// Key concurrency used to apply only to routingMode=pool, so the vast majority
+// of keys (routingMode=auto) advertised a limit in the UI that was never
+// enforced. Auto keys are now limited too, but only when they actually declare
+// a positive limit, which keeps unconfigured keys on the previous path.
+async function acquireCodexKeyConcurrencyLease(config, keyRouting, selectionDiagnostics, useAcquire) {
+    const keyId = config.potluckKeyData?.id || null;
+    if (!useAcquire || !keyId) return false;
+    if (requestContext.get('potluckKeyConcurrencyLease') || requestContext.get('edgeAdmissionLease')) return false;
+    const keyData = config.potluckKeyData || {};
+    const routingMode = keyRouting?.routingMode || 'auto';
+    if (routingMode !== 'pool' && !(Number(keyData.concurrencyLimit) > 0)) return false;
+
+    const keyQueueStartedAt = Date.now();
+    try {
+        const lease = await potluckKeyConcurrencyLimiter.acquire(keyId, {
+            maxConcurrency: keyData.concurrencyLimit,
+            queueLimit: keyData.queueLimit,
+            queueTimeoutMs: keyData.queueTimeoutMs,
+            mode: keyData.concurrencyMode,
+            coordination: providerPoolManager?.coordination || null
+        });
+        requestContext.set('potluckKeyConcurrencyLease', lease);
+        requestContext.set('potluckKeyConcurrencyKeyId', keyId);
+        selectionDiagnostics.keyQueueOutcome = lease.shadow ? 'shadow' : 'admitted';
+        selectionDiagnostics.keyCapacityExhausted = lease.capacityExhausted === true;
+        selectionDiagnostics.keyQueueWaitMs = Math.max(0, Date.now() - keyQueueStartedAt);
+        accumulateRoutingWait('keyQueueWaitMs', selectionDiagnostics.keyQueueWaitMs);
+        return true;
+    } catch (error) {
+        const reason = error?.details?.reason || 'key_capacity_exhausted';
+        selectionDiagnostics.keyQueueOutcome = reason;
+        selectionDiagnostics.keyQueueWaitMs = Math.max(0, Date.now() - keyQueueStartedAt);
+        accumulateRoutingWait('keyQueueWaitMs', selectionDiagnostics.keyQueueWaitMs);
+        selectionDiagnostics.keyCapacityExhausted = true;
+        updateCodexRoutingDiagnostics(config, {
+            routingMode,
+            keyQueueWaitMs: selectionDiagnostics.keyQueueWaitMs,
+            keyQueueOutcome: reason,
+            keyCapacityExhausted: true
+        });
+        throw error;
+    }
+}
+
 async function selectCodexCredentialGroupProvider(config, providerType, requestedModel, options = {}, selectionDiagnostics = {}) {
     const context = await resolveCodexCredentialGroupContext(config, providerType);
     if (!context.handled) return context;
@@ -536,42 +580,14 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
         }
     }
 
+    await acquireCodexKeyConcurrencyLease(config, keyRouting, selectionDiagnostics, useAcquire);
+
     if (keyRouting.routingMode === 'pool') {
         const keyHash = config.potluckKeyData?.id
             ? `sha256:${crypto.createHash('sha256').update(String(config.potluckKeyData.id)).digest('hex').slice(0, 16)}`
             : 'none';
         logger.info(`[Codex Routing] pool selection key=${keyHash} mode=pool revision=${keyRouting.routingConfigRevision || 0}`);
         const poolKeyId = config.potluckKeyData?.id || null;
-        if (useAcquire && poolKeyId && !requestContext.get('potluckKeyConcurrencyLease') && !requestContext.get('edgeAdmissionLease')) {
-            const keyData = config.potluckKeyData || {};
-            const keyQueueStartedAt = Date.now();
-            try {
-                const lease = await potluckKeyConcurrencyLimiter.acquire(poolKeyId, {
-                    maxConcurrency: keyData.concurrencyLimit,
-                    queueLimit: keyData.queueLimit,
-                    queueTimeoutMs: keyData.queueTimeoutMs,
-                    mode: keyData.concurrencyMode,
-                    coordination: providerPoolManager?.coordination || null
-                });
-                requestContext.set('potluckKeyConcurrencyLease', lease);
-                requestContext.set('potluckKeyConcurrencyKeyId', poolKeyId);
-                selectionDiagnostics.keyQueueOutcome = lease.shadow ? 'shadow' : 'admitted';
-                selectionDiagnostics.keyCapacityExhausted = lease.capacityExhausted === true;
-                selectionDiagnostics.keyQueueWaitMs = Math.max(0, Date.now() - keyQueueStartedAt);
-            } catch (error) {
-                const reason = error?.details?.reason || 'key_capacity_exhausted';
-                selectionDiagnostics.keyQueueOutcome = reason;
-                selectionDiagnostics.keyQueueWaitMs = Math.max(0, Date.now() - keyQueueStartedAt);
-                selectionDiagnostics.keyCapacityExhausted = true;
-                updateCodexRoutingDiagnostics(config, {
-                    routingMode: 'pool',
-                    keyQueueWaitMs: selectionDiagnostics.keyQueueWaitMs,
-                    keyQueueOutcome: reason,
-                    keyCapacityExhausted: true
-                });
-                throw error;
-            }
-        }
         const poolOptions = {
             ...options,
             selectionDiagnostics,
@@ -647,7 +663,10 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
                 const selectedResult = await selectFromPool(groupOptions);
                 if (selectedResult) return { selectedResult, group };
             } catch (error) {
-                if (!isCredentialAvailabilityError(error)) throw error;
+                if (!isCredentialAvailabilityError(error)) {
+                    await releasePotluckKeyConcurrencyLease();
+                    throw error;
+                }
                 availabilityError = error;
             }
         }
@@ -677,6 +696,7 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
     }
 
     if (!selected) {
+        await releasePotluckKeyConcurrencyLease();
         return { handled: true, selectedResult: null, availabilityError };
     }
 
@@ -716,6 +736,24 @@ async function releasePotluckKeyConcurrencyLease() {
     }
 }
 
+// providerFilterMs alone cannot distinguish "queued behind a Key limit" from
+// "the routing loop is slow"; the credential lease share is already reported as
+// redisLeaseMs, so the remainder is genuine selection computation.
+function recordProviderFilterStages(startedAt) {
+    const totalMs = performance.now() - startedAt;
+    const { keyQueueWaitMs, credentialLeaseWaitMs } = readRoutingWaits();
+    const selectionComputeMs = Math.max(0, totalMs - keyQueueWaitMs - credentialLeaseWaitMs);
+    runtimeMetrics.recordStage('providerFilterMs', totalMs);
+    const runtimeRequest = requestContext.get('runtimeRequest');
+    if (runtimeRequest?.recordStage) {
+        runtimeRequest.recordStage('keyQueueWaitMs', keyQueueWaitMs);
+        runtimeRequest.recordStage('selectionComputeMs', selectionComputeMs);
+    } else {
+        runtimeMetrics.recordStage('keyQueueWaitMs', keyQueueWaitMs);
+        runtimeMetrics.recordStage('selectionComputeMs', selectionComputeMs);
+    }
+}
+
 async function acquirePotluckKeyConcurrencyLeaseIfNeeded(config, providerType, options, selectionDiagnostics) {
     if (options.acquireSlot !== true || !config?.potluckKeyData?.id || requestContext.get('edgeAdmissionLease')) return false;
     if (!isGeminiProviderType(providerType)) return false;
@@ -736,11 +774,13 @@ async function acquirePotluckKeyConcurrencyLeaseIfNeeded(config, providerType, o
         selectionDiagnostics.keyQueueOutcome = lease.shadow ? 'shadow' : 'admitted';
         selectionDiagnostics.keyCapacityExhausted = lease.capacityExhausted === true;
         selectionDiagnostics.keyQueueWaitMs = Math.max(0, Date.now() - startedAt);
+        accumulateRoutingWait('keyQueueWaitMs', selectionDiagnostics.keyQueueWaitMs);
         return true;
     } catch (error) {
         const reason = error?.details?.reason || 'key_capacity_exhausted';
         selectionDiagnostics.keyQueueOutcome = reason;
         selectionDiagnostics.keyQueueWaitMs = Math.max(0, Date.now() - startedAt);
+        accumulateRoutingWait('keyQueueWaitMs', selectionDiagnostics.keyQueueWaitMs);
         selectionDiagnostics.keyCapacityExhausted = true;
         throw error;
     }
@@ -811,20 +851,20 @@ function restoreProviderPoolsAfterFailedPersist(config, originalProviderPools) {
 }
 
 /**
- * 扫描 configs 目录并自动关联未关联的配置文件到对应的提供商
- * @param {Object} config - 服务器配置对象
- * @param {Object} options - 可选参数
- * @param {boolean} options.onlyCurrentCred - 为 true 时，只自动关联当前凭证
- * @param {string} options.credPath - 当前凭证的路径（当 onlyCurrentCred 为 true 时必需）
- * @param {boolean} options.throwOnPersistError - 为 true 时，写盘失败回滚内存并抛错
- * @returns {Promise<Object>} 更新后的 providerPools 对象
+ * 鎵弿 configs 鐩綍骞惰嚜鍔ㄥ叧鑱旀湭鍏宠仈鐨勯厤缃枃浠跺埌瀵瑰簲鐨勬彁渚涘晢
+ * @param {Object} config - 鏈嶅姟鍣ㄩ厤缃璞?
+ * @param {Object} options - 鍙€夊弬鏁?
+ * @param {boolean} options.onlyCurrentCred - 涓?true 鏃讹紝鍙嚜鍔ㄥ叧鑱斿綋鍓嶅嚟璇?
+ * @param {string} options.credPath - 褰撳墠鍑瘉鐨勮矾寰勶紙褰?onlyCurrentCred 涓?true 鏃跺繀闇€锛?
+ * @param {boolean} options.throwOnPersistError - 涓?true 鏃讹紝鍐欑洏澶辫触鍥炴粴鍐呭瓨骞舵姏閿?
+ * @returns {Promise<Object>} 鏇存柊鍚庣殑 providerPools 瀵硅薄
  */
 export async function autoLinkProviderConfigs(config, options = {}) {
     const previousProviderPools = JSON.parse(JSON.stringify(config.providerPools || {}));
     const originalProviderPools = options.throwOnPersistError
         ? JSON.parse(JSON.stringify(previousProviderPools))
         : null;
-    // 确保 providerPools 对象存在
+    // 纭繚 providerPools 瀵硅薄瀛樺湪
     if (!config.providerPools) {
         config.providerPools = {};
     }
@@ -833,7 +873,7 @@ export async function autoLinkProviderConfigs(config, options = {}) {
     let updatedExistingProviders = 0;
     const allNewProviders = {};
     
-    // 如果只关联当前凭证
+    // 濡傛灉鍙叧鑱斿綋鍓嶅嚟璇?
     if (options.onlyCurrentCred && options.credPath) {
         const result = await linkSingleCredential(config, options.credPath, options.providerDefaults || {});
         if (result) {
@@ -844,17 +884,17 @@ export async function autoLinkProviderConfigs(config, options = {}) {
             throw new Error(`Failed to link current credential: ${options.credPath}`);
         }
     } else {
-        // 遍历所有提供商映射
+        // 閬嶅巻鎵€鏈夋彁渚涘晢鏄犲皠
         for (const mapping of PROVIDER_MAPPINGS) {
             const configsPath = path.join(process.cwd(), 'configs', mapping.dirName);
             const { providerType, credPathKey, defaultCheckModel, displayName, needsProjectId } = mapping;
             
-            // 确保提供商类型数组存在
+            // 纭繚鎻愪緵鍟嗙被鍨嬫暟缁勫瓨鍦?
             if (!config.providerPools[providerType]) {
                 config.providerPools[providerType] = [];
             }
             
-            // 检查目录是否存在
+            // 妫€鏌ョ洰褰曟槸鍚﹀瓨鍦?
             if (!fs.existsSync(configsPath)) {
                 continue;
             }
@@ -865,16 +905,16 @@ export async function autoLinkProviderConfigs(config, options = {}) {
                 credPathKey
             );
             
-            // 获取已关联的配置文件路径集合
+            // 鑾峰彇宸插叧鑱旂殑閰嶇疆鏂囦欢璺緞闆嗗悎
             const linkedPaths = new Set();
             for (const provider of config.providerPools[providerType]) {
                 if (provider[credPathKey]) {
-                    // 使用公共方法添加路径的所有变体格式
+                    // 浣跨敤鍏叡鏂规硶娣诲姞璺緞鐨勬墍鏈夊彉浣撴牸寮?
                     addToUsedPaths(linkedPaths, provider[credPathKey]);
                 }
             }
             
-            // 递归扫描目录
+            // 閫掑綊鎵弿鐩綍
             const newProviders = [];
             await scanProviderDirectory(configsPath, linkedPaths, newProviders, {
                 providerType,
@@ -884,7 +924,7 @@ export async function autoLinkProviderConfigs(config, options = {}) {
                 existingProviders: config.providerPools[providerType]
             });
             
-            // 如果有新的配置文件需要关联
+            // 濡傛灉鏈夋柊鐨勯厤缃枃浠堕渶瑕佸叧鑱?
             if (newProviders.length > 0) {
                 config.providerPools[providerType].push(...newProviders);
                 totalNewProviders += newProviders.length;
@@ -893,7 +933,7 @@ export async function autoLinkProviderConfigs(config, options = {}) {
         }
     }
     
-    // 如果有新的配置文件需要关联，保存更新后的 provider_pools.json
+    // 濡傛灉鏈夋柊鐨勯厤缃枃浠堕渶瑕佸叧鑱旓紝淇濆瓨鏇存柊鍚庣殑 provider_pools.json
     let persistedProviderChanges = false;
     if (totalNewProviders > 0 || updatedExistingProviders > 0) {
         const filePath = config.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
@@ -906,7 +946,7 @@ export async function autoLinkProviderConfigs(config, options = {}) {
             for (const [displayName, providers] of Object.entries(allNewProviders)) {
                 logger.info(`  ${displayName}: ${providers.length} config(s)`);
                 providers.forEach(p => {
-                    // 获取凭据路径键（支持 _CREDS_FILE_PATH 和 _TOKEN_FILE_PATH 两种格式）
+                    // 鑾峰彇鍑嵁璺緞閿紙鏀寔 _CREDS_FILE_PATH 鍜?_TOKEN_FILE_PATH 涓ょ鏍煎紡锛?
                     const credKey = Object.keys(p).find(k =>
                         k.endsWith('_CREDS_FILE_PATH') || k.endsWith('_TOKEN_FILE_PATH')
                     );
@@ -1055,10 +1095,10 @@ export async function replaceProviderCredentialPath(config, options = {}) {
 }
 
 /**
- * 关联单个凭证文件到对应的提供商
- * @param {Object} config - 服务器配置对象
- * @param {string} credPath - 凭证文件路径（相对或绝对路径）
- * @returns {Promise<Object|null>} 返回关联结果或 null
+ * 鍏宠仈鍗曚釜鍑瘉鏂囦欢鍒板搴旂殑鎻愪緵鍟?
+ * @param {Object} config - 鏈嶅姟鍣ㄩ厤缃璞?
+ * @param {string} credPath - 鍑瘉鏂囦欢璺緞锛堢浉瀵规垨缁濆璺緞锛?
+ * @returns {Promise<Object|null>} 杩斿洖鍏宠仈缁撴灉鎴?null
  */
 function pickProviderDefaults(providerDefaults = {}) {
     const defaults = {};
@@ -1129,28 +1169,28 @@ async function persistCodexIdentityToProviderPool(config, providerType, provider
 
 async function linkSingleCredential(config, credPath, providerDefaults = {}) {
     try {
-        // 规范化路径
+        // 瑙勮寖鍖栬矾寰?
         const absolutePath = path.isAbsolute(credPath) ? credPath : path.join(process.cwd(), credPath);
         const relativePath = path.relative(process.cwd(), absolutePath);
         
-        // 检查文件是否存在
+        // 妫€鏌ユ枃浠舵槸鍚﹀瓨鍦?
         if (!fs.existsSync(absolutePath)) {
             logger.warn(`[Auto-Link] Credential file not found: ${relativePath}`);
             return null;
         }
         
-        // 检查文件扩展名
+        // 妫€鏌ユ枃浠舵墿灞曞悕
         const ext = path.extname(absolutePath).toLowerCase();
         if (ext !== '.json') {
             logger.warn(`[Auto-Link] Only JSON files are supported: ${relativePath}`);
             return null;
         }
         
-        // 根据文件路径确定提供商类型
+        // 鏍规嵁鏂囦欢璺緞纭畾鎻愪緵鍟嗙被鍨?
         let matchedMapping = null;
         for (const mapping of PROVIDER_MAPPINGS) {
             const configsPath = path.join(process.cwd(), 'configs', mapping.dirName);
-            // 检查文件是否在该提供商的配置目录下
+            // 妫€鏌ユ枃浠舵槸鍚﹀湪璇ユ彁渚涘晢鐨勯厤缃洰褰曚笅
             if (absolutePath.startsWith(configsPath)) {
                 matchedMapping = mapping;
                 break;
@@ -1171,12 +1211,12 @@ async function linkSingleCredential(config, credPath, providerDefaults = {}) {
             ? await readCodexCredentialIdentity(absolutePath)
             : null;
         
-        // 确保提供商类型数组存在
+        // 纭繚鎻愪緵鍟嗙被鍨嬫暟缁勫瓨鍦?
         if (!config.providerPools[providerType]) {
             config.providerPools[providerType] = [];
         }
         
-        // 检查是否已关联
+        // 妫€鏌ユ槸鍚﹀凡鍏宠仈
         const linkedPaths = new Set();
         for (const provider of config.providerPools[providerType]) {
             if (provider[credPathKey]) {
@@ -1218,7 +1258,7 @@ async function linkSingleCredential(config, credPath, providerDefaults = {}) {
             }
         }
         
-        // 创建新的提供商配置
+        // 鍒涘缓鏂扮殑鎻愪緵鍟嗛厤缃?
         let newProvider = {
             ...createProviderConfig({
                 credPathKey,
@@ -1235,7 +1275,7 @@ async function linkSingleCredential(config, credPath, providerDefaults = {}) {
             applyCodexIdentityToProvider(newProvider, codexIdentity);
         }
         
-        // 添加到配置
+        // 娣诲姞鍒伴厤缃?
         config.providerPools[providerType].push(newProvider);
         
         logger.info(`[Auto-Link] Successfully linked credential: ${relativePath} to ${displayName}`);
@@ -1252,14 +1292,14 @@ async function linkSingleCredential(config, credPath, providerDefaults = {}) {
 }
 
 /**
- * 递归扫描提供商配置目录
- * @param {string} dirPath - 目录路径
- * @param {Set} linkedPaths - 已关联的路径集合
- * @param {Array} newProviders - 新提供商配置数组
- * @param {Object} options - 配置选项
- * @param {string} options.credPathKey - 凭据路径键名
- * @param {string} options.defaultCheckModel - 默认检测模型
- * @param {boolean} options.needsProjectId - 是否需要 PROJECT_ID
+ * 閫掑綊鎵弿鎻愪緵鍟嗛厤缃洰褰?
+ * @param {string} dirPath - 鐩綍璺緞
+ * @param {Set} linkedPaths - 宸插叧鑱旂殑璺緞闆嗗悎
+ * @param {Array} newProviders - 鏂版彁渚涘晢閰嶇疆鏁扮粍
+ * @param {Object} options - 閰嶇疆閫夐」
+ * @param {string} options.credPathKey - 鍑嵁璺緞閿悕
+ * @param {string} options.defaultCheckModel - 榛樿妫€娴嬫ā鍨?
+ * @param {boolean} options.needsProjectId - 鏄惁闇€瑕?PROJECT_ID
  */
 async function scanProviderDirectory(dirPath, linkedPaths, newProviders, options) {
     const { providerType, credPathKey, defaultCheckModel, needsProjectId, existingProviders = [] } = options;
@@ -1272,7 +1312,7 @@ async function scanProviderDirectory(dirPath, linkedPaths, newProviders, options
             
             if (file.isFile()) {
                 const ext = path.extname(file.name).toLowerCase();
-                // 只处理 JSON 文件
+                // 鍙鐞?JSON 鏂囦欢
                 if (ext === '.json') {
                     const relativePath = path.relative(process.cwd(), fullPath);
                     const fileName = getFileName(fullPath);
@@ -1283,7 +1323,7 @@ async function scanProviderDirectory(dirPath, linkedPaths, newProviders, options
                         ? await readCodexCredentialIdentity(fullPath)
                         : null;
                     
-                    // 使用与 ui-manager.js 相同的 isPathUsed 函数检查是否已关联
+                    // 浣跨敤涓?ui-manager.js 鐩稿悓鐨?isPathUsed 鍑芥暟妫€鏌ユ槸鍚﹀凡鍏宠仈
                     const isLinked = isPathUsed(relativePath, fileName, linkedPaths);
                     
                     if (!isLinked) {
@@ -1294,7 +1334,7 @@ async function scanProviderDirectory(dirPath, linkedPaths, newProviders, options
                                 continue;
                             }
                         }
-                        // 使用公共方法创建新的提供商配置
+                        // 浣跨敤鍏叡鏂规硶鍒涘缓鏂扮殑鎻愪緵鍟嗛厤缃?
                         let newProvider = createProviderConfig({
                             credPathKey,
                             credPath: formatSystemPath(relativePath),
@@ -1314,7 +1354,7 @@ async function scanProviderDirectory(dirPath, linkedPaths, newProviders, options
                     }
                 }
             } else if (file.isDirectory()) {
-                // 递归扫描子目录（限制深度为 3 层）
+                // 閫掑綊鎵弿瀛愮洰褰曪紙闄愬埗娣卞害涓?3 灞傦級
                 const relativePath = path.relative(process.cwd(), fullPath);
                 const depth = relativePath.split(path.sep).length;
                 if (depth < 5) { // configs/{provider}/subfolder/subsubfolder
@@ -1327,7 +1367,7 @@ async function scanProviderDirectory(dirPath, linkedPaths, newProviders, options
     }
 }
 
-// 注意：isValidOAuthCredentials 已移至 provider-utils.js 公共模块
+// 娉ㄦ剰锛歩sValidOAuthCredentials 宸茬Щ鑷?provider-utils.js 鍏叡妯″潡
 
 /**
  * Initialize API services and provider pool manager
@@ -1369,13 +1409,13 @@ export async function initApiService(config, isReady = false, runtimeOptions = {
 
     if (config.providerPools && Object.keys(config.providerPools).length > 0) {
         if(isReady){
-            // --- V2: 触发系统预热 ---
-            // 预热逻辑是异步的，不会阻塞服务器启动
+            // --- V2: 瑙﹀彂绯荤粺棰勭儹 ---
+            // 棰勭儹閫昏緫鏄紓姝ョ殑锛屼笉浼氶樆濉炴湇鍔″櫒鍚姩
             providerPoolManager.warmupNodes().catch(err => {
                 logger.error(`[Initialization] Warmup failed: ${err.message}`);
             });
 
-            // 检查并刷新即将过期的节点（异步调用，不阻塞启动）
+            // 妫€鏌ュ苟鍒锋柊鍗冲皢杩囨湡鐨勮妭鐐癸紙寮傛璋冪敤锛屼笉闃诲鍚姩锛?
             providerPoolManager.checkAndRefreshExpiringNodes().catch(err => {
                 logger.error(`[Initialization] Check and refresh expiring nodes failed: ${err.message}`);
             });
@@ -1385,19 +1425,19 @@ export async function initApiService(config, isReady = false, runtimeOptions = {
     }
 
     // Initialize all provider pool nodes at startup
-    // 初始化号池中所有提供商的所有节点，以避免首个请求的额外延迟
+    // 鍒濆鍖栧彿姹犱腑鎵€鏈夋彁渚涘晢鐨勬墍鏈夎妭鐐癸紝浠ラ伩鍏嶉涓姹傜殑棰濆寤惰繜
     if (config.providerPools && Object.keys(config.providerPools).length > 0) {
         let totalInitialized = 0;
         let totalFailed = 0;
         
         for (const [providerType, providerConfigs] of Object.entries(config.providerPools)) {
-            // 验证提供商类型是否有效且被包含在 DEFAULT_MODEL_PROVIDERS 中
-            // 如果没设置 DEFAULT_MODEL_PROVIDERS，则允许所有已注册的类型
+            // 楠岃瘉鎻愪緵鍟嗙被鍨嬫槸鍚︽湁鏁堜笖琚寘鍚湪 DEFAULT_MODEL_PROVIDERS 涓?
+            // 濡傛灉娌¤缃?DEFAULT_MODEL_PROVIDERS锛屽垯鍏佽鎵€鏈夊凡娉ㄥ唽鐨勭被鍨?
             const isDefaultProvider = !config.DEFAULT_MODEL_PROVIDERS || 
                                      (Array.isArray(config.DEFAULT_MODEL_PROVIDERS) && config.DEFAULT_MODEL_PROVIDERS.includes(providerType));
             
             if (!isDefaultProvider) {
-                // 进一步检查是否是注册提供商的变体（带后缀）
+                // 杩涗竴姝ユ鏌ユ槸鍚︽槸娉ㄥ唽鎻愪緵鍟嗙殑鍙樹綋锛堝甫鍚庣紑锛?
                 const isVariantOfDefault = Array.isArray(config.DEFAULT_MODEL_PROVIDERS) && 
                                           config.DEFAULT_MODEL_PROVIDERS.some(p => providerType.startsWith(p + '-'));
                 
@@ -1413,31 +1453,31 @@ export async function initApiService(config, isReady = false, runtimeOptions = {
             
             logger.info(`[Initialization] Initializing ${providerConfigs.length} node(s) for provider '${providerType}'...`);
             
-            // 初始化该提供商类型的所有节点
+            // 鍒濆鍖栬鎻愪緵鍟嗙被鍨嬬殑鎵€鏈夎妭鐐?
             for (const providerConfig of providerConfigs) {
-                // 跳过已禁用的节点
+                // 璺宠繃宸茬鐢ㄧ殑鑺傜偣
                 if (providerConfig.isDisabled) {
                     continue;
                 }
                 
                 try {
-                    // 合并全局配置和节点配置
+                    // 鍚堝苟鍏ㄥ眬閰嶇疆鍜岃妭鐐归厤缃?
                     const nodeConfig = deepmerge(config, {
                         ...providerConfig,
                         MODEL_PROVIDER: providerType
                     });
-                    delete nodeConfig.providerPools; // 移除 providerPools 避免递归
+                    delete nodeConfig.providerPools; // 绉婚櫎 providerPools 閬垮厤閫掑綊
                     
-                    // 初始化服务适配器
+                    // 鍒濆鍖栨湇鍔￠€傞厤鍣?
                     getServiceAdapter(nodeConfig);
                     totalInitialized++;
                     
                     const identifier = providerConfig.customName || providerConfig.uuid || 'unknown';
-                    logger.info(`  ✓ Initialized node: ${identifier}`);
+                    logger.info(`  鉁?Initialized node: ${identifier}`);
                 } catch (error) {
                     totalFailed++;
                     const identifier = providerConfig.customName || providerConfig.uuid || 'unknown';
-                    logger.warn(`  ✗ Failed to initialize node ${identifier}: ${error.message}`);
+                    logger.warn(`  鉁?Failed to initialize node ${identifier}: ${error.message}`);
                 }
             }
         }
@@ -1450,7 +1490,7 @@ export async function initApiService(config, isReady = false, runtimeOptions = {
 }
 
 /**
- * [路由解析层] 负责前置处理前缀和 AUTO 模式转换
+ * [璺敱瑙ｆ瀽灞俔 璐熻矗鍓嶇疆澶勭悊鍓嶇紑鍜?AUTO 妯″紡杞崲
  * @private
  * @returns {Promise<Object>} { effectiveProvider, actualModelName }
  */
@@ -1458,11 +1498,11 @@ async function _resolveEffectiveRouting(config, requestedModel, options = {}) {
     let effectiveProvider = config.MODEL_PROVIDER;
     let actualModelName = requestedModel;
 
-    // 1. 处理显式前缀 (无论是否是 AUTO 模式都支持)
+    // 1. 澶勭悊鏄惧紡鍓嶇紑 (鏃犺鏄惁鏄?AUTO 妯″紡閮芥敮鎸?
     if (requestedModel && requestedModel.includes(':')) {
         const [prefix, ...modelParts] = requestedModel.split(':');
         const modelSuffix = modelParts.join(':');
-        // 检查前缀是否是有效的提供商标识
+        // 妫€鏌ュ墠缂€鏄惁鏄湁鏁堢殑鎻愪緵鍟嗘爣璇?
         if (providerPoolManager && (providerPoolManager.providerStatus[prefix] || config.providerPools?.[prefix])) {
             effectiveProvider = prefix;
             actualModelName = modelSuffix;
@@ -1483,7 +1523,7 @@ async function _resolveEffectiveRouting(config, requestedModel, options = {}) {
         }
     }
 
-    // 2. 严格性检查：在 AUTO 模式下，如果到这里还没解析出具体提供商，则报错 (除非是列出模型场景)
+    // 2. 涓ユ牸鎬ф鏌ワ細鍦?AUTO 妯″紡涓嬶紝濡傛灉鍒拌繖閲岃繕娌¤В鏋愬嚭鍏蜂綋鎻愪緵鍟嗭紝鍒欐姤閿?(闄ら潪鏄垪鍑烘ā鍨嬪満鏅?
     if (effectiveProvider === MODEL_PROVIDER.AUTO && requestedModel) {
         throw new Error(`[API Service] Auto-routing failed: Model name must include a provider prefix (e.g., 'provider:model'). Received: '${requestedModel}'`);
     }
@@ -1500,11 +1540,11 @@ async function _resolveEffectiveRouting(config, requestedModel, options = {}) {
  * @returns {Promise<Object>} The API service adapter
  */
 export async function getApiService(config, requestedModel = null, options = {}) {
-    // 1. 前置路由解析
+    // 1. 鍓嶇疆璺敱瑙ｆ瀽
     const { effectiveProvider, actualModelName } = await _resolveEffectiveRouting(config, requestedModel, options);
     config.MODEL_PROVIDER = effectiveProvider;
 
-    // 模型列表特殊场景：AUTO 且无模型名
+    // 妯″瀷鍒楄〃鐗规畩鍦烘櫙锛欰UTO 涓旀棤妯″瀷鍚?
     if (effectiveProvider === MODEL_PROVIDER.AUTO && !actualModelName) return null;
 
     let serviceConfig = config;
@@ -1533,9 +1573,9 @@ export async function getApiService(config, requestedModel = null, options = {})
                 })
             );
         if (selectedProviderConfig) {
-            // 合并选中的提供者配置到当前请求的 config 中
+            // 鍚堝苟閫変腑鐨勬彁渚涜€呴厤缃埌褰撳墠璇锋眰鐨?config 涓?
             serviceConfig = deepmerge(config, selectedProviderConfig);
-            delete serviceConfig.providerPools; // 移除 providerPools 属性
+            delete serviceConfig.providerPools; // 绉婚櫎 providerPools 灞炴€?
             config.uuid = serviceConfig.uuid;
             config.customName = serviceConfig.customName;
             const customNameDisplay = serviceConfig.customName ? ` (${serviceConfig.customName})` : '';
@@ -1551,10 +1591,10 @@ export async function getApiService(config, requestedModel = null, options = {})
             );
         }
     } else if (effectiveProvider === MODEL_PROVIDER.AUTO && actualModelName) {
-        // 如果在 AUTO 模式下依然没能解析出具体提供商，则报错
+        // 濡傛灉鍦?AUTO 妯″紡涓嬩緷鐒舵病鑳借В鏋愬嚭鍏蜂綋鎻愪緵鍟嗭紝鍒欐姤閿?
         throw new Error(`[API Service] Auto-routing failed: Model name must include a provider prefix (e.g., 'provider:model'). Received: '${actualModelName}'`);
     }
-    runtimeMetrics.recordStage('providerFilterMs', performance.now() - providerFilterStartedAt);
+    recordProviderFilterStages(providerFilterStartedAt);
     await ensureCodexIdentityForServiceConfig(serviceConfig, config.MODEL_PROVIDER);
     return getServiceAdapter(serviceConfig);
 }
@@ -1567,7 +1607,7 @@ export async function getApiService(config, requestedModel = null, options = {})
  * @returns {Promise<Object>} Object containing service adapter and metadata
  */
 export async function getApiServiceWithFallback(config, requestedModel = null, options = {}) {
-    // 1. 前置路由解析
+    // 1. 鍓嶇疆璺敱瑙ｆ瀽
     const { effectiveProvider, actualModelName } = await _resolveEffectiveRouting(config, requestedModel, options);
     config.MODEL_PROVIDER = effectiveProvider;
 
@@ -1601,7 +1641,7 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         return result;
     }
 
-    // 模型列表特殊场景：AUTO 且无模型名
+    // 妯″瀷鍒楄〃鐗规畩鍦烘櫙锛欰UTO 涓旀棤妯″瀷鍚?
     if (effectiveProvider === MODEL_PROVIDER.AUTO && !actualModelName) {
         return { service: null, serviceConfig: config, actualProviderType: effectiveProvider, isFallback: false, uuid: null, actualModel: null };
     }
@@ -1623,8 +1663,8 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
     
     const isPoolable = PROVIDER_MAPPINGS.some(m => m.providerType === config.MODEL_PROVIDER);
     if (providerPoolManager && ((config.providerPools && config.providerPools[config.MODEL_PROVIDER]) || isPoolable)) {
-        // selectProviderWithFallback 现在是异步的，使用链式锁确保并发安全
-        // 如果开启了并发限制，则使用 acquireSlot 进行选择和占位
+        // selectProviderWithFallback 鐜板湪鏄紓姝ョ殑锛屼娇鐢ㄩ摼寮忛攣纭繚骞跺彂瀹夊叏
+        // 濡傛灉寮€鍚簡骞跺彂闄愬埗锛屽垯浣跨敤 acquireSlot 杩涜閫夋嫨鍜屽崰浣?
         const useAcquire = options.acquireSlot === true;
         let selectedResult;
         let availabilityError = null;
@@ -1729,7 +1769,7 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                 throw error;
             }
 
-            // 过载 UUID 只是软排除；如果没有其他可用节点，撤销该排除并允许继续使用唯一/原凭证。
+            // 杩囪浇 UUID 鍙槸杞帓闄わ紱濡傛灉娌℃湁鍏朵粬鍙敤鑺傜偣锛屾挙閿€璇ユ帓闄ゅ苟鍏佽缁х画浣跨敤鍞竴/鍘熷嚟璇併€?
             if (!selectedResult && pendingExcludedUuid) {
                 logger.info(`[Codex Overload] No alternative provider available; retrying selection with previous provider allowed: ${pendingExcludedUuid}`);
                 const fallbackSelectionOptions = withStickyProviderAffinity(config, config.MODEL_PROVIDER, {
@@ -1746,9 +1786,9 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                 }
             }
 
-            // 请求内瞬态错误重试会先排除已尝试的凭证以优先覆盖其他账号。
-            // 若全部已尝试凭证仍然满足标准号池调度条件，则允许重新进入选择器循环；
-            // 不直接指定凭证，因此健康、额度、冷却、模型支持和并发限制仍会完整生效。
+            // 璇锋眰鍐呯灛鎬侀敊璇噸璇曚細鍏堟帓闄ゅ凡灏濊瘯鐨勫嚟璇佷互浼樺厛瑕嗙洊鍏朵粬璐﹀彿銆?
+            // 鑻ュ叏閮ㄥ凡灏濊瘯鍑瘉浠嶇劧婊¤冻鏍囧噯鍙锋睜璋冨害鏉′欢锛屽垯鍏佽閲嶆柊杩涘叆閫夋嫨鍣ㄥ惊鐜紱
+            // 涓嶇洿鎺ユ寚瀹氬嚟璇侊紝鍥犳鍋ュ悍銆侀搴︺€佸喎鍗淬€佹ā鍨嬫敮鎸佸拰骞跺彂闄愬埗浠嶄細瀹屾暣鐢熸晥銆?
             if (!selectedResult && options.allowExcludedProviderFallback === true && originalExcludedUuids.length > 0) {
                 logger.info(`[Credential Retry] No untried provider available; retrying standard selection with previously tried providers eligible again`);
                 const retrySelectionOptions = withStickyProviderAffinity(config, config.MODEL_PROVIDER, {
@@ -1791,7 +1831,7 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                 queueOutcome = null
             } = selectedResult;
             
-            // 合并选中的提供者配置到当前请求的 config 中
+            // 鍚堝苟閫変腑鐨勬彁渚涜€呴厤缃埌褰撳墠璇锋眰鐨?config 涓?
             serviceConfig = deepmerge(config, selectedProviderConfig);
             delete serviceConfig.providerPools;
             
@@ -1812,7 +1852,7 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                 queueOutcome: queueOutcome || null
             };
 
-            // mixed pool/fallback 可能跨 providerType 命中真实节点，需要切到真实 adapter。
+            // mixed pool/fallback 鍙兘璺?providerType 鍛戒腑鐪熷疄鑺傜偣锛岄渶瑕佸垏鍒扮湡瀹?adapter銆?
             if (actualProviderType && actualProviderType !== config.MODEL_PROVIDER) {
                 serviceConfig.MODEL_PROVIDER = actualProviderType;
             }
@@ -1826,10 +1866,10 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
             );
         }
     } else if (effectiveProvider === MODEL_PROVIDER.AUTO && actualModelName) {
-        // 如果在 AUTO 模式下依然没能解析出具体提供商，则报错
+        // 濡傛灉鍦?AUTO 妯″紡涓嬩緷鐒舵病鑳借В鏋愬嚭鍏蜂綋鎻愪緵鍟嗭紝鍒欐姤閿?
         throw new Error(`[API Service] Auto-routing failed: Model name must include a provider prefix (e.g., 'provider:model'). Received: '${actualModelName}'`);
     }
-    runtimeMetrics.recordStage('providerFilterMs', performance.now() - providerFilterStartedAt);
+    recordProviderFilterStages(providerFilterStartedAt);
 
     await ensureCodexIdentityForServiceConfig(serviceConfig, actualProviderType, selectedUuid);
     if (selectedUuid && serviceConfig.codexAccountKey) {
@@ -1969,7 +2009,7 @@ export async function getProviderStatus(config, options = {}) {
         logger.warn('[API Service] Failed to load provider pools:', error.message);
     }
 
-    // providerPoolsSlim 只保留顶级 key 及部分字段
+    // providerPoolsSlim 鍙繚鐣欓《绾?key 鍙婇儴鍒嗗瓧娈?
     const slimFields = [
         'uuid',
         'customName',
@@ -1979,7 +2019,7 @@ export async function getProviderStatus(config, options = {}) {
         'lastErrorMessage',
         'needsRefresh'
     ];
-    // identify 字段映射表
+    // identify 瀛楁鏄犲皠琛?
     const identifyFieldMap = {
         'openai-custom': 'OPENAI_BASE_URL',
         'atlascloud': 'OPENAI_BASE_URL',
@@ -2008,7 +2048,7 @@ export async function getProviderStatus(config, options = {}) {
         
         let identifyField = identifyFieldMap[key] || null;
         if (!identifyField) {
-            // 尝试通过前缀查找 identifyField (例如 openai-custom-1 -> openai-custom)
+            // 灏濊瘯閫氳繃鍓嶇紑鏌ユ壘 identifyField (渚嬪 openai-custom-1 -> openai-custom)
             for (const [prefix, field] of Object.entries(identifyFieldMap)) {
                 if (key.startsWith(prefix + '-')) {
                     identifyField = field;
@@ -2032,7 +2072,7 @@ export async function getProviderStatus(config, options = {}) {
                     }
                     slim[f] = val;
                 }
-                // identify 字段
+                // identify 瀛楁
                 if (identifyField && item.hasOwnProperty(identifyField)) {
                     let tmpCustomName = item.customName ? `${item.customName}` : (slim.uuid || 'NoUUID');
                     let identifyStr = `${tmpCustomName}::${key}`;
@@ -2041,7 +2081,7 @@ export async function getProviderStatus(config, options = {}) {
                     slim.identify = null;
                 }
                 slim.provider = key;
-                // 统计
+                // 缁熻
                 count++;
                 if (slim.isHealthy === false) {
                     unhealthyCount++;

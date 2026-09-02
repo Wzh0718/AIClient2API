@@ -1,4 +1,4 @@
-import { EventEmitter } from 'events';
+﻿import { EventEmitter } from 'events';
 import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
 
 const mockGetApiServiceWithFallback = jest.fn();
@@ -212,7 +212,7 @@ describe('temporary model route fallback', () => {
 
     test('keeps unary credential retries inside the temporary target provider', async () => {
         jest.spyOn(Math, 'random').mockReturnValue(0);
-        const targetError = Object.assign(new Error('No capacity available'), {
+        const targetError = Object.assign(new Error('No capacity available for model gemini-2.5-flash on the server'), {
             response: { status: 503 }
         });
         const firstService = {
@@ -259,7 +259,7 @@ describe('temporary model route fallback', () => {
 
     test('keeps stream credential retries inside the temporary target provider', async () => {
         jest.spyOn(Math, 'random').mockReturnValue(0);
-        const targetError = Object.assign(new Error('No capacity available'), {
+        const targetError = Object.assign(new Error('No capacity available for model gemini-2.5-flash on the server'), {
             response: { status: 503 }
         });
         const firstService = {

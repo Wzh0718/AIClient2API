@@ -706,4 +706,43 @@ describe('Service Manager Codex credential-group routing', () => {
         expect(selectSpy.mock.calls[0]).toEqual(expect.arrayContaining([providerType, 'gpt-5.4-mini']));
         expect(selectSpy.mock.calls[0][2]).toMatchObject({ disableProviderFallback: true });
     });
+
+    test('enforces Key concurrency for auto routing when the Key declares a limit', async () => {
+        writeGroupConfig({
+            groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
+            keyAssignments: [{ keyId: 'key-1', routingMode: 'auto', primaryGroupId: 'group-a' }]
+        });
+        const config = createConfig({
+            providers: [provider('codex-a')],
+            keyData: {
+                routingMode: 'auto',
+                concurrencyLimit: 1,
+                queueLimit: 0,
+                concurrencyMode: 'enforce'
+            }
+        });
+        await initialize(config);
+
+        const first = await getApiServiceWithFallback(config, 'gpt-5.4-mini', { acquireSlot: true });
+        expect(first).toBeTruthy();
+
+        await expect(
+            getApiServiceWithFallback(config, 'gpt-5.4-mini', { acquireSlot: true })
+        ).rejects.toMatchObject({ details: expect.objectContaining({ reason: 'key_capacity_exhausted' }) });
+    });
+
+    test('leaves auto routing unlimited when the Key declares no concurrency limit', async () => {
+        writeGroupConfig({
+            groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
+            keyAssignments: [{ keyId: 'key-1', routingMode: 'auto', primaryGroupId: 'group-a' }]
+        });
+        const config = createConfig({
+            providers: [provider('codex-a')],
+            keyData: { routingMode: 'auto', concurrencyMode: 'enforce' }
+        });
+        await initialize(config);
+
+        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini', { acquireSlot: true })).resolves.toBeTruthy();
+        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini', { acquireSlot: true })).resolves.toBeTruthy();
+    });
 });

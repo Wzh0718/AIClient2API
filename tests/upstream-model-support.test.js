@@ -21,8 +21,10 @@ function loadEnsureToolCallIds() {
 }
 
 describe('upstream model registrations', () => {
-    test('registers canonical Gemini 3.5 Flash models for Antigravity', () => {
-        expect(getProviderModels('gemini-antigravity')).toEqual(expect.arrayContaining([
+    test('no longer advertises Gemini 3.5 Flash for Antigravity', () => {
+        // Antigravity does not host these; advertising them produced tens of
+        // thousands of upstream 404s before the list was converged.
+        expect(getProviderModels('gemini-antigravity')).toEqual(expect.not.arrayContaining([
             'gemini-3.5-flash',
             'gemini-3.5-flash-lite'
         ]));
@@ -40,19 +42,20 @@ describe('upstream model registrations', () => {
         expect(getProviderModels('gemini-cli-oauth')).toEqual(expect.arrayContaining([
             'gemini-3.6-flash'
         ]));
+        // Antigravity only serves the explicit effort tiers, not the bare alias.
         expect(getProviderModels('gemini-antigravity')).toEqual(expect.arrayContaining([
-            'gemini-3.6-flash',
             'gemini-3.6-flash-low',
-            'gemini-3.6-flash-high'
+            'gemini-3.6-flash-medium',
+            'gemini-3.6-flash-high',
+            'gemini-3.6-flash-tiered'
         ]));
     });
 
     test('registers Gemini 3.7 Flash aliases for Gemini and Antigravity providers', () => {
         expect(getProviderModels('gemini-cli-oauth')).toContain('gemini-3.7-flash');
         expect(getProviderModels('gemini-antigravity')).toEqual(expect.arrayContaining([
-            'gemini-3.7-flash',
-            'gemini-3.7-flash-low',
-            'gemini-3.7-flash-high'
+            'gemini-3.7-flash-medium',
+            'gemini-3.7-flash-tiered'
         ]));
     });
 

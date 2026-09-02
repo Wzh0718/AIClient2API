@@ -63,7 +63,7 @@ describe('runtime batch configuration', () => {
             config: {}
         })).toMatchObject({
             waitMs: 1000,
-            statusPollMs: 1000,
+            statusPollMs: 5000,
             claimIntervalMs: 5000
         });
     });

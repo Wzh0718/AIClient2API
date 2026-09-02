@@ -147,9 +147,10 @@ function normalizeEdgeAdmissionConfig(keyData = {}) {
         if (Object.prototype.hasOwnProperty.call(keyData, canonicalField)
             && Object.prototype.hasOwnProperty.call(keyData, legacyField)
             && String(keyData[canonicalField]) !== String(keyData[legacyField])) {
-            const warningKey = `${keyData.id || 'unknown'}:${canonicalField}`;
-            if (!edgeAdmissionConflictWarnings.has(warningKey)) {
-                edgeAdmissionConflictWarnings.add(warningKey);
+            // The message carries no key identity, so a per-key dedup only
+            // multiplied the same line across the whole store on every start.
+            if (!edgeAdmissionConflictWarnings.has(canonicalField)) {
+                edgeAdmissionConflictWarnings.add(canonicalField);
                 logger.warn(`[Potluck Key] Edge Admission canonical field overrides legacy mirror: ${canonicalField}`);
             }
         }

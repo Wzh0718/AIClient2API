@@ -1034,6 +1034,25 @@ export class RedisLeaseCoordinator {
         return true;
     }
 
+    // Model-level negative caches describe upstream facts (a model simply does
+    // not exist) rather than transient pool state, so they need a much longer
+    // lifetime than the 30s ceiling that applies to runtime snapshots.
+    async setModelNegativeCache(scope, value, { ttlMs = 60 * 60 * 1000 } = {}) {
+        const normalizedScope = String(scope || '').trim();
+        if (!normalizedScope) return false;
+        const safeTtlMs = Math.max(60_000, Math.min(6 * 60 * 60 * 1000, Number(ttlMs) || 60 * 60 * 1000));
+        await this._eval('set-runtime-snapshot', SET_RUNTIME_SNAPSHOT_SCRIPT, [
+            hashAffinityKey(normalizedScope),
+            JSON.stringify(value || {}),
+            String(safeTtlMs)
+        ]);
+        return true;
+    }
+
+    async getModelNegativeCache(scope) {
+        return this.getRuntimeSnapshot(scope);
+    }
+
     async deleteRuntimeSnapshot(scope) {
         const normalizedScope = String(scope || '').trim();
         if (!normalizedScope) return false;

@@ -4,6 +4,7 @@ import {
     getRetryAfterMs,
     handleUnaryRequest
 } from '../src/utils/common.js';
+import requestContext from '../src/utils/context.js';
 
 const mockGetApiServiceWithFallback = jest.fn();
 
@@ -436,5 +437,127 @@ describe('Antigravity model quota cooldown', () => {
 
         expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
         expect(providerPoolManager.markProviderUnhealthyImmediately).not.toHaveBeenCalled();
+    });
+
+    test('records an upstream 404 as a model-level miss without switching credentials', async () => {
+        mockGetApiServiceWithFallback.mockReset();
+        const error = new Error('Requested entity was not found.');
+        error.response = { status: 404, data: { error: { code: 404, message: error.message } } };
+        const service = { generateContent: jest.fn().mockRejectedValue(error) };
+        const providerPoolManager = {
+            markAntigravityModelNotFound: jest.fn(),
+            markAntigravityModelQuotaUnhealthy: jest.fn(),
+            markAntigravityModelCapacityUnavailable: jest.fn(),
+            markProviderUnhealthy: jest.fn(),
+            markProviderUnhealthyImmediately: jest.fn(),
+            recordAntigravityRoutingEvent: jest.fn(),
+            releaseSlot: jest.fn()
+        };
+        const res = new FakeResponse();
+
+        await handleUnaryRequest(
+            res,
+            service,
+            'gemini-3.6-flash-medium',
+            { contents: [] },
+            'gemini',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-pro-1',
+            'Provider Pro 1',
+            { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 5 }, maxRetries: 5 }
+        );
+
+        expect(providerPoolManager.markAntigravityModelNotFound).toHaveBeenCalledWith(
+            'gemini-antigravity',
+            'gemini-3.6-flash-medium',
+            'Requested entity was not found.'
+        );
+        expect(mockGetApiServiceWithFallback).not.toHaveBeenCalled();
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+        expect(res.statusCode).toBe(404);
+    });
+
+    test('attributes a failed request to the routed provider, not the default one', async () => {
+        mockGetApiServiceWithFallback.mockReset();
+        const error = new Error('Requested entity was not found.');
+        error.response = { status: 404, data: { error: { code: 404, message: error.message } } };
+        const service = { generateContent: jest.fn().mockRejectedValue(error) };
+        const metadata = {};
+        const runtimeRequest = {
+            setMetadata: update => Object.assign(metadata, update),
+            mark: jest.fn(),
+            recordStage: jest.fn()
+        };
+
+        await requestContext.run({ requestId: 'attribution-test', runtimeRequest }, () => handleUnaryRequest(
+            new FakeResponse(),
+            service,
+            'gemini-3.6-flash-medium',
+            { contents: [] },
+            'gemini',
+            'gemini-antigravity',
+            'none',
+            null,
+            { releaseSlot: jest.fn() },
+            'provider-pro-1',
+            'Provider Pro 1',
+            { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 0 }, maxRetries: 0 }
+        ));
+
+        expect(metadata).toMatchObject({
+            providerType: 'gemini-antigravity',
+            model: 'gemini-3.6-flash-medium',
+            stream: false
+        });
+    });
+
+    test('caps upstream attempts per request even when more credentials are healthy', async () => {
+        jest.spyOn(Math, 'random').mockReturnValue(0);
+        mockGetApiServiceWithFallback.mockReset();
+        const upstreamCalls = [];
+        const makeService = uuid => ({
+            generateContent: jest.fn(() => {
+                upstreamCalls.push(uuid);
+                return Promise.reject(createCapacityError());
+            })
+        });
+        mockGetApiServiceWithFallback.mockImplementation(async () => ({
+            service: makeService(`retry-${upstreamCalls.length}`),
+            uuid: `provider-retry-${upstreamCalls.length}`,
+            actualModel: 'gemini-3.1-flash-image',
+            actualProviderType: 'gemini-antigravity',
+            serviceConfig: {}
+        }));
+        const providerPoolManager = {
+            markAntigravityModelCapacityUnavailable: jest.fn(),
+            markAntigravityModelQuotaUnhealthy: jest.fn(),
+            markProviderUnhealthyWithRecoveryTime: jest.fn(),
+            markProviderUnhealthy: jest.fn(),
+            markProviderUnhealthyImmediately: jest.fn(),
+            markProviderHealthy: jest.fn(),
+            recordAntigravityRoutingEvent: jest.fn(),
+            recordGeminiSchedulingEvent: jest.fn(),
+            releaseSlot: jest.fn()
+        };
+
+        await requestContext.run({ requestId: 'attempt-cap-test' }, () => handleUnaryRequest(
+            new FakeResponse(),
+            makeService('provider-initial'),
+            'gemini-3.1-flash-image',
+            { contents: [] },
+            'gemini',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-initial',
+            'Provider Initial',
+            { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 5 }, maxRetries: 5 }
+        ));
+
+        expect(upstreamCalls).toHaveLength(3);
     });
 });

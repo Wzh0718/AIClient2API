@@ -71,6 +71,29 @@ function logGeminiCleanupDiagnostic({ mode, model, providerType, providerUuid, c
     } catch {}
 }
 
+// A single client request must not be able to fan out into a long chain of
+// upstream calls: cascading model and credential retries were the main
+// amplifier behind the CPU saturation and the 404 storm.
+const DEFAULT_MAX_UPSTREAM_ATTEMPTS_PER_REQUEST = 3;
+
+function getMaxUpstreamAttempts(config) {
+    const configured = Number(config?.MAX_UPSTREAM_ATTEMPTS_PER_REQUEST);
+    return Number.isInteger(configured) && configured >= 1
+        ? configured
+        : DEFAULT_MAX_UPSTREAM_ATTEMPTS_PER_REQUEST;
+}
+
+function recordUpstreamAttempt() {
+    const store = requestContext.getStore();
+    store.upstreamAttempts = (Number(store.upstreamAttempts) || 0) + 1;
+    return store.upstreamAttempts;
+}
+
+function hasUpstreamAttemptBudget(config) {
+    const store = requestContext.getStore();
+    return (Number(store.upstreamAttempts) || 0) < getMaxUpstreamAttempts(config);
+}
+
 function updateGeminiRequestMetadata({ retryCount, fallbackCount, providerUuid } = {}) {
     const runtimeRequest = requestContext.get('runtimeRequest');
     if (!runtimeRequest?.setMetadata) return;
@@ -288,9 +311,45 @@ function normalizeAntigravityCapacityExhaustion(error, providerType, requestedMo
     return true;
 }
 
+/**
+ * Upstream Antigravity answers a request for a model it does not host with a
+ * 404 `Requested entity was not found`. That is a model-level fact, not a
+ * credential problem: retrying it across credentials produced a 404 storm in
+ * production, so it must be classified separately and cached negatively.
+ */
+export function isAntigravityModelNotFoundError(error, providerType) {
+    if (providerType !== MODEL_PROVIDER.ANTIGRAVITY) return false;
+    if (error?.code === 'MODEL_NOT_FOUND') return true;
+    const status = Number(getErrorStatusCode(error));
+    const errorText = [
+        error?.message,
+        extractReadableErrorText(error?.response?.data)
+    ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+    if (status === 404) return true;
+    return errorText.includes('requested entity was not found');
+}
+
+function normalizeAntigravityModelNotFound(error, requestedModel) {
+    error.code = 'MODEL_NOT_FOUND';
+    error.status = 404;
+    error.statusCode = 404;
+    error.retryable = false;
+    error.shouldSwitchCredential = false;
+    error.skipErrorCount = true;
+    error.quotaScope = 'model';
+    error.quotaKey = error.quotaKey || requestedModel || null;
+    error.response = error.response || {};
+    error.response.status = 404;
+    return error;
+}
+
 function isTerminalAntigravityModelUnavailable(error, providerType) {
     return providerType === MODEL_PROVIDER.ANTIGRAVITY
         && (error?.code === 'ALL_MODELS_UNAVAILABLE'
+            || isAntigravityModelNotFoundError(error, providerType)
             || (error?.quotaScope === 'model' && error?.code === 'QUEUE_WAIT_TIMEOUT'));
 }
 
@@ -318,6 +377,9 @@ function getRetryAuditKind(error) {
 }
 
 function getClientFacingErrorMessage(error, fallbackMessage) {
+    if (error?.code === 'MODEL_NOT_SUPPORTED') {
+        return fallbackMessage;
+    }
     if (error?.isAntigravityModelCapacity === true) {
         return '[上游 Antigravity] 所选模型当前容量不足，已自动重试可用账号后仍不可用，请稍后重试';
     }
@@ -1727,6 +1789,14 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         const needsConversion = getProtocolPrefix(fromProvider) !== getProtocolPrefix(toProvider);
         requestBody.model = model;
         assertCodexRoutingIntegrity(CONFIG || {}, pooluuid);
+        // Attribute the request to the routed provider before the upstream call,
+        // otherwise a failure is reported against the default provider.
+        requestContext.get('runtimeRequest')?.setMetadata?.({
+            model,
+            providerType: toProvider,
+            stream: true
+        });
+        recordUpstreamAttempt();
         const nativeStream = await service.generateContentStream(model, requestBody);
         
         // 如果提供者内部发生了模型回退（如 Antigravity 自动降级），同步更新本地 model 变量
@@ -1934,6 +2004,10 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         const status = getErrorStatusCode(error);
         
         // 检查是否应该跳过错误计数（用于 429/5xx 等需要直接切换凭证的情况）
+        if (isAntigravityModelNotFoundError(error, toProvider)) {
+            normalizeAntigravityModelNotFound(error, model);
+            providerPoolManager?.markAntigravityModelNotFound?.(toProvider, model, error.message);
+        }
         const isAntigravityTransientCapacity = isAntigravityTransientCapacityError(error, toProvider);
         const isTerminalAntigravityUnavailable = isTerminalAntigravityModelUnavailable(error, toProvider);
         // Antigravity request/model errors must not quarantine the whole OAuth
@@ -1992,7 +2066,12 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         
         // 凭证已被标记为不健康后，尝试切换到新凭证重试
         // 不再依赖状态码判断，只要凭证被标记不健康且可以重试，就尝试切换
-        if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
+        const upstreamBudgetAvailable = hasUpstreamAttemptBudget(CONFIG);
+        if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && !upstreamBudgetAvailable) {
+            providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
+            logger.warn(`[Retry] Upstream attempt cap (${getMaxUpstreamAttempts(CONFIG)}) reached for ${toProvider}/${model}; not switching credential again.`);
+        }
+        if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && upstreamBudgetAvailable && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
             const isCodexTransient = isCodexTransientCredentialError(error);
             const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity;
             if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
@@ -2116,7 +2195,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
 
         if (!anyDataSent && !isTerminalAntigravityUnavailable) {
             try {
-                const fallback = await tryTemporaryRouteFallback(retryContext);
+                const fallback = hasUpstreamAttemptBudget(CONFIG) ? await tryTemporaryRouteFallback(retryContext) : null;
                 if (fallback?.service) {
                     providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
                     updateGeminiRequestMetadata({ fallbackCount: (retryContext?.geminiFallbackCount || 0) + 1 });
@@ -2239,6 +2318,14 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         requestBody.model = model;
         // fs.writeFile('oldRequest'+Date.now()+'.json', JSON.stringify(requestBody));
         assertCodexRoutingIntegrity(CONFIG || {}, pooluuid);
+        // Attribute the request to the routed provider before the upstream call,
+        // otherwise a failure is reported against the default provider.
+        requestContext.get('runtimeRequest')?.setMetadata?.({
+            model,
+            providerType: toProvider,
+            stream: false
+        });
+        recordUpstreamAttempt();
         const nativeResponse = await service.generateContent(model, requestBody);
         
         // 如果提供者内部发生了模型回退（如 Antigravity 自动降级），同步更新本地 model 变量
@@ -2317,6 +2404,10 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         const status = getErrorStatusCode(error);
         
         // 检查是否应该跳过错误计数（用于 429/5xx 等需要直接切换凭证的情况）
+        if (isAntigravityModelNotFoundError(error, toProvider)) {
+            normalizeAntigravityModelNotFound(error, model);
+            providerPoolManager?.markAntigravityModelNotFound?.(toProvider, model, error.message);
+        }
         const isAntigravityTransientCapacity = isAntigravityTransientCapacityError(error, toProvider);
         const isTerminalAntigravityUnavailable = isTerminalAntigravityModelUnavailable(error, toProvider);
         // Antigravity request/model errors must not quarantine the whole OAuth
@@ -2375,7 +2466,12 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         
         // 凭证已被标记为不健康后，尝试切换到新凭证重试
         // 不再依赖状态码判断，只要凭证被标记不健康且可以重试，就尝试切换
-        if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
+        const upstreamBudgetAvailable = hasUpstreamAttemptBudget(CONFIG);
+        if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && !upstreamBudgetAvailable) {
+            providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
+            logger.warn(`[Retry] Upstream attempt cap (${getMaxUpstreamAttempts(CONFIG)}) reached for ${toProvider}/${model}; not switching credential again.`);
+        }
+        if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && upstreamBudgetAvailable && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
             const isCodexTransient = isCodexTransientCredentialError(error);
             const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity;
             if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
@@ -2503,7 +2599,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 await handleUnifiedResponse(res, JSON.stringify(terminalResponse), false, terminalStatus, getErrorResponseHeaders(error, terminalStatus));
                 return;
             }
-            const fallback = await tryTemporaryRouteFallback(retryContext);
+            const fallback = hasUpstreamAttemptBudget(CONFIG) ? await tryTemporaryRouteFallback(retryContext) : null;
             if (fallback?.service) {
                 providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
                 updateGeminiRequestMetadata({ fallbackCount: (retryContext?.geminiFallbackCount || 0) + 1 });
@@ -3051,6 +3147,8 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     };
     requestContext.get('runtimeRequest')?.setMetadata?.({
         ...(CONFIG._geminiSelectionDiagnostic ? { geminiSelection: CONFIG._geminiSelectionDiagnostic } : {}),
+        providerType: toProvider,
+        model,
         geminiRetryCount: 0,
         geminiFallbackCount: 0,
         ...(actualUuid ? { geminiFinalProviderUuidHash: buildGeminiRetryDiagnostic({ providerUuid: actualUuid }).providerUuidHash } : {})

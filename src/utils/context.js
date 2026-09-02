@@ -51,4 +51,28 @@ class RequestContext {
 }
 
 const requestContext = new RequestContext();
+
+/**
+ * providerFilterMs mixes queueing with routing computation, which made a
+ * seconds-long p50 look like a CPU hotspot. These accumulators keep the two
+ * kinds of waiting separable for the request that is currently in flight.
+ * @param {'keyQueueWaitMs'|'credentialLeaseWaitMs'} kind
+ * @param {number} waitMs
+ */
+export function accumulateRoutingWait(kind, waitMs) {
+    const value = Math.max(0, Number(waitMs) || 0);
+    if (value === 0) return;
+    const store = requestContext.getStore();
+    if (!store.routingWaits) store.routingWaits = { keyQueueWaitMs: 0, credentialLeaseWaitMs: 0 };
+    store.routingWaits[kind] = (store.routingWaits[kind] || 0) + value;
+}
+
+export function readRoutingWaits() {
+    const waits = requestContext.getStore().routingWaits;
+    return {
+        keyQueueWaitMs: Math.max(0, Number(waits?.keyQueueWaitMs) || 0),
+        credentialLeaseWaitMs: Math.max(0, Number(waits?.credentialLeaseWaitMs) || 0)
+    };
+}
+
 export default requestContext;

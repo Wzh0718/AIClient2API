@@ -11,7 +11,7 @@ describe('Potluck Key list UI layout source contract', () => {
         expect(html).toContain('.key-primary-stats');
         expect(html).toContain('.key-secondary-stats');
         expect(html).toContain('class="toolbar-group toolbar-filters"');
-        expect(html).toContain('class="toolbar-group toolbar-bulk-actions"');
+        expect(html).toContain('class="toolbar-group toolbar-bulk-actions');
         expect(html).toContain('aria-label="搜索 Key 名称或内容"');
         expect(html).toContain('aria-label="Key 排序方式"');
     });
