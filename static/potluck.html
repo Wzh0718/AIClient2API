@@ -1616,57 +1616,46 @@
                     <label for="routingFixedCredential">固定凭据</label>
                     <select id="routingFixedCredential" class="sort-select" style="width:100%"></select>
                 </div>
-                <div class="pool-concurrency-section" id="poolConcurrencySection" hidden>
+                <div class="pool-concurrency-section" id="edgeAdmissionSection">
                     <div class="pool-concurrency-heading">
                         <div>
-                            <div class="pool-concurrency-title"><i class="fas fa-gauge-high" aria-hidden="true"></i> Pool Key 限流</div>
-                            <div class="pool-concurrency-help">仅对全池加权模式生效；Shadow 只观测，Enforce 才会排队和限流。</div>
+                            <div class="pool-concurrency-title"><i class="fas fa-shield-halved" aria-hidden="true"></i> Edge Admission 入口限流</div>
+                            <div class="pool-concurrency-help">在 Nginx/edge-auth 入口完成 Key 并发和排队，避免超限请求先进入 Node。</div>
                         </div>
-                        <span class="key-routing-summary is-pool">pool</span>
+                        <span class="key-routing-summary is-pool">edge</span>
                     </div>
                     <div class="pool-concurrency-grid">
                         <div class="form-group">
-                            <label for="concurrencyMode">并发模式</label>
-                            <select id="concurrencyMode" class="sort-select" style="width:100%" onchange="updateConcurrencyFields()">
-                                <option value="shadow">Shadow 观测</option>
+                            <label for="edgeAdmissionMode">Edge Admission 模式</label>
+                            <select id="edgeAdmissionMode" class="sort-select" style="width:100%" onchange="updateEdgeAdmissionFields()">
+                                <option value="disabled">关闭</option>
                                 <option value="enforce">Enforce 生效</option>
                             </select>
                         </div>
                         <div class="form-group">
-                            <label for="concurrencyLimit">Key 并发上限</label>
-                            <input id="concurrencyLimit" class="sort-select" type="number" min="0" step="1" inputmode="numeric" placeholder="0 = 不限制">
-                            <small class="pool-concurrency-field-help">0 表示不限制</small>
+                            <label for="edgeAdmissionConcurrencyLimit">Edge 入口并发上限</label>
+                            <input id="edgeAdmissionConcurrencyLimit" class="sort-select" type="number" min="0" step="1" inputmode="numeric" placeholder="0 = 不限制">
+                            <small class="pool-concurrency-field-help">仅限制该 Key 进入 Node/provider 的活动请求数</small>
                         </div>
                         <div class="form-group">
-                            <label for="queueLimit">排队上限</label>
-                            <input id="queueLimit" class="sort-select" type="number" min="0" step="1" inputmode="numeric" placeholder="0 = 不排队">
-                            <small class="pool-concurrency-field-help">0 表示不排队</small>
+                            <label for="edgeAdmissionQueueLimit">Edge 入口排队上限</label>
+                            <input id="edgeAdmissionQueueLimit" class="sort-select" type="number" min="0" step="1" inputmode="numeric" placeholder="0 = 不排队">
+                            <small class="pool-concurrency-field-help">排队发生在 edge-auth，不进入 Node</small>
                         </div>
                         <div class="form-group">
-                            <label for="queueTimeoutSeconds">最大排队等待</label>
+                            <label for="edgeAdmissionQueueTimeoutSeconds">Edge 最大排队等待</label>
                             <div class="pool-concurrency-input-with-suffix">
-                                <input id="queueTimeoutSeconds" class="sort-select" type="number" min="1" step="1" inputmode="numeric">
+                                <input id="edgeAdmissionQueueTimeoutSeconds" class="sort-select" type="number" min="1" step="1" inputmode="numeric">
                                 <span>秒</span>
                             </div>
                         </div>
-                    </div>
-                    <div class="pool-concurrency-mode-note" id="concurrencyModeNote" role="status"></div>
-                </div>
-                <div class="pool-concurrency-section" id="edgeAuthSection">
-                    <div class="pool-concurrency-heading">
-                        <div>
-                            <div class="pool-concurrency-title"><i class="fas fa-shield-halved" aria-hidden="true"></i> Edge RPM 入口保护</div>
-                            <div class="pool-concurrency-help">适用于所有 active Key；不改变 Node 并发和排队语义。</div>
-                        </div>
-                    </div>
-                    <div class="pool-concurrency-grid">
                         <div class="form-group">
                             <label for="edgeAuthRpmLimit">Edge RPM 入口上限</label>
                             <input id="edgeAuthRpmLimit" class="sort-select" type="number" min="0" step="1" inputmode="numeric" placeholder="0 = 使用默认大阈值">
-                            <small class="pool-concurrency-field-help">0 表示使用默认大阈值；独立于 Node 并发/队列。</small>
+                            <small class="pool-concurrency-field-help">0 表示使用默认大阈值</small>
                         </div>
                     </div>
-                    <div class="pool-concurrency-mode-note" id="edgeAuthRpmNote" role="status">Edge RPM 是独立入口上限，可能早于 Node 限制生效；提高 Node 并发不会自动提高 Edge RPM。</div>
+                    <div class="pool-concurrency-mode-note" id="edgeAdmissionModeNote" role="status"></div>
                 </div>
                 <button id="saveRoutingButton" type="button" class="btn btn-primary btn-block" onclick="updateRouting()" aria-busy="false">
                     <i class="fas fa-save"></i> <span id="saveRoutingButtonLabel">保存路由</span>
@@ -3375,20 +3364,16 @@
             return `<span class="key-routing-summary is-auto" title="${escapeHtml(summary)}" aria-label="${escapeHtml(summary)}">${escapeHtml(compactLabel)}${lockIcon}</span>`;
         }
 
-        function renderKeyConcurrencySummary(key) {
-            if (key?.routingMode !== 'pool') return '';
-            const mode = key?.concurrencyMode === 'enforce' ? 'Enforce' : 'Shadow';
-            const limit = Number(key?.concurrencyLimit || 0);
-            const configuredQueueLimit = Number(key.queueLimit || 0);
-            const queue = configuredQueueLimit;
+        function renderEdgeAdmissionSummary(key) {
+            const mode = key?.edgeAdmissionMode === 'enforce' ? 'Enforce' : '关闭';
+            const limit = Number(key?.edgeAdmissionConcurrencyLimit || 0);
+            const queue = Number(key?.edgeAdmissionQueueLimit || 0);
+            const rpm = Number(key?.edgeAuthRpmLimit || 0);
             const suffix = mode === 'Enforce'
-                ? ` · ${limit > 0 ? limit : '不限'}${queue > 0 ? `/${queue}` : ''}`
-                : '';
-            const title = mode === 'Enforce'
-                ? `Pool Key 限流：Enforce；并发上限 ${limit > 0 ? limit : '不限'}；排队上限 ${queue > 0 ? queue : '不排队'}`
-                : `Pool Key 限流：Shadow 观测；并发上限 ${limit > 0 ? limit : '不限'}；排队上限 ${queue > 0 ? queue : '不排队'}`;
-            const modeLabel = mode === 'Enforce' ? 'Pool · Enforce' : 'Pool · Shadow';
-            return `<span class="key-routing-summary key-concurrency-summary${mode === 'Enforce' ? ' is-enforce' : ''}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${modeLabel}${escapeHtml(suffix)}</span>`;
+                ? ` · ${limit > 0 ? limit : '不限'}${queue > 0 ? `/${queue}` : ''}${rpm > 0 ? ` · RPM ${rpm}` : ''}`
+                : (rpm > 0 ? ` · RPM ${rpm}` : '');
+            const title = `Edge Admission：${mode}；入口并发 ${limit > 0 ? limit : '不限'}；入口排队 ${queue > 0 ? queue : '不排队'}；RPM ${rpm > 0 ? rpm : '默认'}`;
+            return `<span class="key-routing-summary key-concurrency-summary${mode === 'Enforce' ? ' is-enforce' : ''}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">Edge · ${mode}${escapeHtml(suffix)}</span>`;
         }
 
         function renderKeys(keys) {
@@ -3435,7 +3420,7 @@
 
                 return `<div class="key-card ${key.enabled ? '' : 'disabled'}">
                     <div class="key-info">
-                        <div class="key-name"><span class="key-name-text">${escapeHtml(key.name)}</span><button class="btn-copy" style="padding: 2px 6px;" onclick="openEditName('${key.id}', '${escapeHtml(key.name).replace(/'/g, "\\'")}')" title="修改名称"><i class="fas fa-edit"></i></button>${renderKeyRoutingSummary(key)}${renderKeyConcurrencySummary(key)}</div>
+                        <div class="key-name"><span class="key-name-text">${escapeHtml(key.name)}</span><button class="btn-copy" style="padding: 2px 6px;" onclick="openEditName('${key.id}', '${escapeHtml(key.name).replace(/'/g, "\\'")}')" title="修改名称"><i class="fas fa-edit"></i></button>${renderKeyRoutingSummary(key)}${renderEdgeAdmissionSummary(key)}</div>
                         <div class="key-id">${key.maskedKey} <button class="btn-copy" onclick="copyKeyFromDetail('${key.id}')" title="按需获取并复制完整 Key"><i class="fas fa-copy"></i></button></div>
                         ${providerBadges ? `<div class="key-dist-mini">${providerBadges}</div>` : ''}
                         ${dailyUsage}
@@ -3937,12 +3922,9 @@
             const mode = document.getElementById('routingMode').value;
             document.getElementById('routingGroupField').hidden = mode !== 'auto';
             document.getElementById('routingCredentialField').hidden = mode !== 'fixed';
-            const concurrencySection = document.getElementById('poolConcurrencySection');
-            if (concurrencySection) {
-                concurrencySection.hidden = mode !== 'pool';
-                if (mode !== 'pool' && concurrencySection.contains(document.activeElement)) document.activeElement.blur();
-            }
-            updateConcurrencyFields();
+            const edgeSection = document.getElementById('edgeAdmissionSection');
+            if (edgeSection) edgeSection.hidden = false;
+            updateEdgeAdmissionFields();
         }
 
         async function copyKeyFromDetail(keyId) {
@@ -3956,19 +3938,17 @@
             }
         }
 
-        function updateConcurrencyFields() {
-            const mode = document.getElementById('concurrencyMode')?.value || 'shadow';
-            const note = document.getElementById('concurrencyModeNote');
+        function updateEdgeAdmissionFields() {
+            const mode = document.getElementById('edgeAdmissionMode')?.value || 'disabled';
+            const note = document.getElementById('edgeAdmissionModeNote');
             if (!note) return;
             note.classList.toggle('is-enforce', mode === 'enforce');
             note.textContent = mode === 'enforce'
-                ? '达到并发上限后进入短队列；队列满或超过最大等待时间才返回 429。'
-                : 'Shadow 只记录理论并发、排队长度和等待时间，不会拦截请求。';
-            const edgeNote = document.getElementById('edgeAuthRpmNote');
-            if (edgeNote) edgeNote.textContent = 'Edge RPM 是独立入口上限，可能早于 Node 限制生效；提高 Node 并发不会自动提高 Edge RPM。';
+                ? '达到入口并发上限后在 edge-auth 排队；队列满或超时返回 429，Node 不会解析这些请求。'
+                : '入口限流关闭；该 Key 不建立 Edge Admission lease。';
         }
 
-        function readPoolConcurrencyForm() {
+        function readEdgeAdmissionForm() {
             const readInteger = (id, label, min = 0) => {
                 const value = Number(document.getElementById(id)?.value);
                 if (!Number.isInteger(value) || value < min) {
@@ -3977,19 +3957,19 @@
                 }
                 return value;
             };
-            const concurrencyLimit = readInteger('concurrencyLimit', '并发上限');
-            if (concurrencyLimit === null) return null;
-            const queueLimit = readInteger('queueLimit', '排队上限');
-            if (queueLimit === null) return null;
-            const queueTimeoutSeconds = readInteger('queueTimeoutSeconds', '最大排队等待', 1);
+            const edgeAdmissionConcurrencyLimit = readInteger('edgeAdmissionConcurrencyLimit', 'Edge 入口并发上限');
+            if (edgeAdmissionConcurrencyLimit === null) return null;
+            const edgeAdmissionQueueLimit = readInteger('edgeAdmissionQueueLimit', 'Edge 入口排队上限');
+            if (edgeAdmissionQueueLimit === null) return null;
+            const queueTimeoutSeconds = readInteger('edgeAdmissionQueueTimeoutSeconds', 'Edge 最大排队等待', 1);
             if (queueTimeoutSeconds === null) return null;
             const edgeAuthRpmLimit = readInteger('edgeAuthRpmLimit', 'Edge RPM', 0);
             if (edgeAuthRpmLimit === null) return null;
             return {
-                concurrencyLimit,
-                queueLimit,
-                queueTimeoutMs: queueTimeoutSeconds * 1000,
-                concurrencyMode: document.getElementById('concurrencyMode')?.value === 'enforce' ? 'enforce' : 'shadow',
+                edgeAdmissionMode: document.getElementById('edgeAdmissionMode')?.value === 'enforce' ? 'enforce' : 'disabled',
+                edgeAdmissionConcurrencyLimit,
+                edgeAdmissionQueueLimit,
+                edgeAdmissionQueueTimeoutMs: queueTimeoutSeconds * 1000,
                 edgeAuthRpmLimit
             };
         }
@@ -4001,10 +3981,10 @@
             const currentFixedCredentialRef = currentKey?.fixedCredential?.credentialRef || '';
             document.getElementById('editRoutingKeyId').value = keyId;
             document.getElementById('routingMode').value = currentMode === 'fixed' || currentMode === 'auto' ? currentMode : 'pool';
-            document.getElementById('concurrencyMode').value = currentKey?.concurrencyMode === 'enforce' ? 'enforce' : 'shadow';
-            document.getElementById('concurrencyLimit').value = Number(currentKey?.concurrencyLimit || 0);
-            document.getElementById('queueLimit').value = Number(currentKey?.queueLimit || 0);
-            document.getElementById('queueTimeoutSeconds').value = Math.max(1, Math.round(Number(currentKey?.queueTimeoutMs || 300000) / 1000));
+            document.getElementById('edgeAdmissionMode').value = currentKey?.edgeAdmissionMode === 'enforce' ? 'enforce' : 'disabled';
+            document.getElementById('edgeAdmissionConcurrencyLimit').value = Number(currentKey?.edgeAdmissionConcurrencyLimit || 0);
+            document.getElementById('edgeAdmissionQueueLimit').value = Number(currentKey?.edgeAdmissionQueueLimit || 0);
+            document.getElementById('edgeAdmissionQueueTimeoutSeconds').value = Math.max(1, Math.round(Number(currentKey?.edgeAdmissionQueueTimeoutMs || 300000) / 1000));
             document.getElementById('edgeAuthRpmLimit').value = Number(currentKey?.edgeAuthRpmLimit || 0);
             try {
                 const result = await apiRequest(`${API_BASE}/credential-groups/options`);
@@ -4049,8 +4029,8 @@
                 if (!credentialRef) { showToast('请选择固定凭据', 'error'); return; }
                 body.fixedCredential = { providerType: 'openai-codex-oauth', credentialRef };
             }
-            const concurrency = routingMode === 'pool' ? readPoolConcurrencyForm() : null;
-            if (routingMode === 'pool' && !concurrency) return;
+                const edgeAdmission = readEdgeAdmissionForm();
+                if (!edgeAdmission) return;
             routingSaveInFlight = true;
             setRoutingSaveState(true);
             try {
@@ -4060,19 +4040,19 @@
                 });
                 if (result && result.success) {
                     let finalResult = result;
-                    if (concurrency) {
-                        finalResult = await apiRequest(`${API_BASE}/keys/${encodeURIComponent(keyId)}/concurrency`, {
+                    if (edgeAdmission) {
+                        finalResult = await apiRequest(`${API_BASE}/keys/${encodeURIComponent(keyId)}/edge-admission`, {
                             method: 'PUT',
-                            body: JSON.stringify(concurrency)
+                            body: JSON.stringify(edgeAdmission)
                         });
                         if (!finalResult?.success) {
-                            showToast(finalResult?.error?.message || '路由已更新，但并发配置保存失败', 'warning');
+                            showToast(finalResult?.error?.message || '路由已更新，但 Edge Admission 配置保存失败', 'warning');
                             await loadData();
                             return;
                         }
                     }
                     closeModal('editRoutingModal');
-                    handleManagementMutationResult(finalResult, concurrency ? '凭据路由与并发配置已更新' : '凭据路由已更新');
+                    handleManagementMutationResult(finalResult, edgeAdmission ? '凭据路由与 Edge Admission 已更新' : '凭据路由已更新');
                 } else {
                     showToast(result?.error?.message || '操作失败', 'error');
                 }

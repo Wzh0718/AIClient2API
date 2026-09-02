@@ -4,28 +4,29 @@ import path from 'node:path';
 const read = file => fs.readFileSync(path.join(process.cwd(), file), 'utf8').replace(/\r\n/g, '\n');
 
 describe('Potluck Key concurrency UI source contract', () => {
-    test('renders pool-only concurrency controls inside routing modal and submits concurrency payload', () => {
+    test('renders Edge Admission controls and submits edge-admission payload', () => {
         const html = read('static/potluck.html');
 
-        expect(html).toContain('id="poolConcurrencySection"');
-        expect(html).toContain('id="concurrencyMode"');
-        expect(html).toContain('id="concurrencyLimit"');
-        expect(html).toContain('id="queueLimit"');
-        expect(html).toContain('id="queueTimeoutSeconds"');
-        expect(html).toContain('function updateConcurrencyFields()');
+        expect(html).toContain('id="edgeAdmissionSection"');
+        expect(html).toContain('id="edgeAdmissionMode"');
+        expect(html).toContain('id="edgeAdmissionConcurrencyLimit"');
+        expect(html).toContain('id="edgeAdmissionQueueLimit"');
+        expect(html).toContain('id="edgeAdmissionQueueTimeoutSeconds"');
+        expect(html).toContain('function updateEdgeAdmissionFields()');
         expect(html).toContain('PUT',);
-        expect(html).toContain('/concurrency');
-        expect(html).toContain('concurrencyMode');
-        expect(html).toContain('queueTimeoutMs');
+        expect(html).toContain('/edge-admission');
+        expect(html).toContain('edgeAdmissionMode');
+        expect(html).toContain('edgeAdmissionQueueTimeoutMs');
+        expect(html).not.toContain('id="concurrencyMode"');
+        expect(html).not.toContain('id="concurrencyLimit"');
     });
 
     test('adds a compact concurrency badge without inventing live active counts', () => {
         const html = read('static/potluck.html');
 
-        expect(html).toContain('function renderKeyConcurrencySummary(key)');
-        expect(html).toContain('Pool · Shadow');
-        expect(html).toContain('Pool · Enforce');
-        expect(html).toContain('key.queueLimit');
+        expect(html).toContain('function renderEdgeAdmissionSummary(key)');
+        expect(html).toContain('Edge ·');
+        expect(html).toContain('edgeAdmissionQueueLimit');
         expect(html).not.toContain('key.activeConcurrency');
     });
 });

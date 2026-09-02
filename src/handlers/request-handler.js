@@ -17,6 +17,7 @@ import { handleGrokAssetsProxy } from '../utils/grok-assets-proxy.js';
 import { instrumentResponseForAudit } from '../utils/request-audit-lifecycle.js';
 import { runtimeMetrics } from '../runtime/runtime-metrics.js';
 import { formatSuccessLog } from '../runtime/success-log.js';
+import { extractApiKey, hashKeyId } from '../edge-auth/edge-auth-service.js';
 
 /**
  * Generate a collision-resistant server-side request ID.
@@ -74,6 +75,80 @@ function isAuditableModelRequest(method, path) {
     return /^\/v1beta\/models\/.+?:(?:generateContent|streamGenerateContent)$/.test(route);
 }
 
+function isEdgeAdmissionProtectedRequest(method, path) {
+    if (method !== 'POST') return false;
+    const route = String(path || '').replace(/^\/(?:[^/]+)\/(?=v1(?:beta)?\/)/, '/');
+    return route === '/v1/chat/completions'
+        || route === '/v1/responses'
+        || route === '/v1/messages'
+        || route === '/v1/images/generations'
+        || route === '/v1/images/edits'
+        || /^\/v1beta\/models\/[^/]+:(?:generateContent|streamGenerateContent)$/.test(route);
+}
+
+function edgeAdmissionRequired() {
+    return process.env.EDGE_ADMISSION_ENABLED === 'true' && process.env.EDGE_ADMISSION_REQUIRED === 'true';
+}
+
+function validateEdgeAdmissionHeaders(req, method, path) {
+    if (!edgeAdmissionRequired() || !isEdgeAdmissionProtectedRequest(method, path)) return null;
+    const keyHash = String(req.headers['x-edge-key-hash'] || '');
+    const leaseId = String(req.headers['x-edge-lease-id'] || '');
+    const requestId = String(req.headers['x-edge-request-id'] || req.headers['x-request-id'] || '');
+    const apiKey = extractApiKey(req.headers, req.url);
+    if (!keyHash || !/^(?:sha256:)?[a-f0-9]{16,64}$/i.test(keyHash) || !leaseId || leaseId.length > 128 || !requestId) {
+        return { statusCode: 403, body: { error: { message: 'Valid Edge Admission lease is required', code: 'EDGE_LEASE_REQUIRED' } } };
+    }
+    const expectedHash = hashKeyId(apiKey || '').toLowerCase();
+    const normalizedHash = keyHash.replace(/^sha256:/i, '').toLowerCase();
+    if (apiKey?.startsWith('maki_') && expectedHash !== normalizedHash && expectedHash.slice(0, 16) !== normalizedHash) {
+        return { statusCode: 403, body: { error: { message: 'Edge Admission key mismatch', code: 'EDGE_LEASE_KEY_MISMATCH' } } };
+    }
+    return { keyHash, leaseId, requestId, mode: String(req.headers['x-edge-lease-mode'] || 'enforce') };
+}
+
+async function validateEdgeAdmissionLease(lease) {
+    if (!lease?.leaseId) return lease;
+    const base = process.env.EDGE_AUTH_INTERNAL_URL || 'http://127.0.0.1:18081';
+    try {
+        const response = await fetch(`${base}/status?keyHash=${encodeURIComponent(lease.keyHash)}&leaseId=${encodeURIComponent(lease.leaseId)}`);
+        if (!response.ok) return { statusCode: 503, body: { error: { message: 'Edge Admission unavailable', code: 'EDGE_LEASE_UNAVAILABLE' } } };
+        const status = await response.json();
+        if (status.status !== 'active' || (status.keyHash && status.keyHash !== lease.keyHash && status.keyHash !== lease.keyHash.replace(/^sha256:/i, '')) || (status.requestId && status.requestId !== lease.requestId)) {
+            return { statusCode: 403, body: { error: { message: 'Edge Admission lease is invalid or expired', code: 'EDGE_LEASE_INVALID' } } };
+        }
+        return lease;
+    } catch {
+        return { statusCode: 503, body: { error: { message: 'Edge Admission unavailable', code: 'EDGE_LEASE_UNAVAILABLE' } } };
+    }
+}
+
+async function releaseEdgeAdmissionLease(lease) {
+    if (!lease?.leaseId || !lease?.keyHash) return false;
+    const base = process.env.EDGE_AUTH_INTERNAL_URL || 'http://127.0.0.1:18081';
+    try {
+        const response = await fetch(`${base}/release`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ keyHash: lease.keyHash, leaseId: lease.leaseId, requestId: lease.requestId })
+        });
+        return response.ok;
+    } catch { return false; }
+}
+
+async function renewEdgeAdmissionLease(lease) {
+    if (!lease?.leaseId || !lease?.keyHash) return false;
+    const base = process.env.EDGE_AUTH_INTERNAL_URL || 'http://127.0.0.1:18081';
+    try {
+        const response = await fetch(`${base}/renew`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ keyHash: lease.keyHash, leaseId: lease.leaseId })
+        });
+        return response.ok;
+    } catch { return false; }
+}
+
 /**
  * Main request handler. It authenticates the request, determines the endpoint type,
  * and delegates to the appropriate specialized handler function.
@@ -87,6 +162,18 @@ export function createRequestHandler(config, providerPoolManager) {
         const requestId = generateRequestId();
         const initialRequestUrl = new URL(req.url, `http://${req.headers.host}`);
         const originalPath = initialRequestUrl.pathname;
+        const edgeLease = validateEdgeAdmissionHeaders(req, req.method, originalPath);
+        if (edgeLease?.statusCode) {
+            res.writeHead(edgeLease.statusCode, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+            res.end(JSON.stringify(edgeLease.body));
+            return;
+        }
+        const validatedEdgeLease = await validateEdgeAdmissionLease(edgeLease);
+        if (validatedEdgeLease?.statusCode) {
+            res.writeHead(validatedEdgeLease.statusCode, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+            res.end(JSON.stringify(validatedEdgeLease.body));
+            return;
+        }
         const workerId = process.env.RUNTIME_WORKER_ID || (process.env.RUNTIME_WORKER_ROLE === 'execution' ? `execution-${process.pid}` : 'standalone');
         const requestKind = /\/images\/(?:generations|edits)/.test(originalPath) ? 'image' : 'model';
         const runtimeRequest = runtimeMetrics.beginRequest({
@@ -98,6 +185,14 @@ export function createRequestHandler(config, providerPoolManager) {
         instrumentResponseMetrics(res, runtimeRequest);
         let runtimeCompletion = null;
         let completionLogged = false;
+        let edgeLeaseReleased = false;
+        let edgeRenewTimer = null;
+        const releaseEdgeLeaseOnce = () => {
+            if (edgeLeaseReleased || !edgeLease?.leaseId) return;
+            edgeLeaseReleased = true;
+            if (edgeRenewTimer) clearInterval(edgeRenewTimer);
+            releaseEdgeAdmissionLease(edgeLease).catch(() => {});
+        };
         const logOnce = statusCode => {
             if (completionLogged) return;
             completionLogged = true;
@@ -113,14 +208,17 @@ export function createRequestHandler(config, providerPoolManager) {
         if (typeof res.once === 'function') {
                 res.once('finish', () => {
                     logOnce(res.statusCode);
+                    releaseEdgeLeaseOnce();
                 });
                 res.once('close', () => {
                     logOnce(res.statusCode || 499);
+                    releaseEdgeLeaseOnce();
             });
         }
 
-        return requestContext.run({ requestId, runtimeRequest, requestAudit: { requestId, ...network, originalPath } }, async () => {
+        return requestContext.run({ requestId, runtimeRequest, requestAudit: { requestId, ...network, originalPath }, edgeAdmissionLease: validatedEdgeLease }, async () => {
             return logger.runWithContext(requestId, async () => {
+                if (validatedEdgeLease?.leaseId) edgeRenewTimer = setInterval(() => { renewEdgeAdmissionLease(validatedEdgeLease).catch(() => {}); }, 30_000);
                 // Deep copy the config for each request to allow dynamic modification
                 const currentConfig = deepmerge({}, config);
                 currentConfig._monitorRequestId = requestId;

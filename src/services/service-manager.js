@@ -542,7 +542,7 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
             : 'none';
         logger.info(`[Codex Routing] pool selection key=${keyHash} mode=pool revision=${keyRouting.routingConfigRevision || 0}`);
         const poolKeyId = config.potluckKeyData?.id || null;
-        if (useAcquire && poolKeyId && !requestContext.get('potluckKeyConcurrencyLease')) {
+        if (useAcquire && poolKeyId && !requestContext.get('potluckKeyConcurrencyLease') && !requestContext.get('edgeAdmissionLease')) {
             const keyData = config.potluckKeyData || {};
             const keyQueueStartedAt = Date.now();
             try {
@@ -717,7 +717,7 @@ async function releasePotluckKeyConcurrencyLease() {
 }
 
 async function acquirePotluckKeyConcurrencyLeaseIfNeeded(config, providerType, options, selectionDiagnostics) {
-    if (options.acquireSlot !== true || !config?.potluckKeyData?.id) return false;
+    if (options.acquireSlot !== true || !config?.potluckKeyData?.id || requestContext.get('edgeAdmissionLease')) return false;
     if (!isGeminiProviderType(providerType)) return false;
     if (config?.potluckKeyData?.routingMode !== 'pool') return false;
     if (requestContext.get('potluckKeyConcurrencyLease')) return true;

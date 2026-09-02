@@ -14,7 +14,7 @@ import {
     toggleKey,
     updateKeyName,
     updateKeyRouting,
-    updateKeyConcurrency,
+    updateKeyEdgeAdmission,
     regenerateKey,
     getStats,
     getAccountUsageSummary,
@@ -104,7 +104,8 @@ const LIST_KEY_FIELDS = [
     'todayReasoningTokens', 'todayTotalTokens', 'todayCachedTokens', 'totalUsage', 'totalPromptTokens',
     'totalCompletionTokens', 'totalReasoningTokens', 'totalTokens', 'totalCachedTokens', 'lastResetDate',
     'lastUsedAt', 'qps', 'tps', 'rpm', 'maxQps', 'maxTps', 'maxRpm', 'routingMode', 'primaryGroupId',
-    'manualLock', 'concurrencyLimit', 'queueLimit', 'queueTimeoutMs', 'concurrencyMode', 'edgeAuthRpmLimit', 'maskedKey',
+    'manualLock', 'edgeAdmissionMode', 'edgeAdmissionConcurrencyLimit', 'edgeAdmissionQueueLimit',
+    'edgeAdmissionQueueTimeoutMs', 'edgeAuthRpmLimit', 'maskedKey',
     'weeklyUsage', 'weeklyPromptTokens', 'weeklyCompletionTokens', 'weeklyReasoningTokens',
     'weeklyTotalTokens', 'weeklyCachedTokens', 'todayCacheHitRatio', 'weeklyCacheHitRatio',
     'totalCacheHitRatio', 'cost'
@@ -239,6 +240,10 @@ function sanitizeKeyManagementData(keyData = {}) {
     const keyRef = hashSecret(keyData.id);
     const result = { ...keyData, id: keyRef, keyRef };
     result.fixedCredential = compactFixedCredential(result.fixedCredential);
+    delete result.concurrencyMode;
+    delete result.concurrencyLimit;
+    delete result.queueLimit;
+    delete result.queueTimeoutMs;
     return result;
 }
 
@@ -283,10 +288,10 @@ function compactKeyManagementMutationData(keyData = {}) {
         primaryGroupId: keyData.primaryGroupId || null,
         fixedCredential: compactFixedCredential(keyData.fixedCredential),
         manualLock: keyData.manualLock === true,
-        concurrencyLimit: Number(keyData.concurrencyLimit || 0),
-        queueLimit: Number(keyData.queueLimit || 0),
-        queueTimeoutMs: Number(keyData.queueTimeoutMs || 300000),
-        concurrencyMode: keyData.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
+        edgeAdmissionMode: keyData.edgeAdmissionMode === 'enforce' ? 'enforce' : 'disabled',
+        edgeAdmissionConcurrencyLimit: Number(keyData.edgeAdmissionConcurrencyLimit ?? keyData.concurrencyLimit ?? 0),
+        edgeAdmissionQueueLimit: Number(keyData.edgeAdmissionQueueLimit ?? keyData.queueLimit ?? 0),
+        edgeAdmissionQueueTimeoutMs: Number(keyData.edgeAdmissionQueueTimeoutMs ?? keyData.queueTimeoutMs ?? 300000),
         edgeAuthRpmLimit: Number(keyData.edgeAuthRpmLimit || 0) || null,
         configSyncEpoch: keyData.configSyncEpoch || null,
         configSyncRevision: keyData.configSyncRevision || null,
@@ -1548,16 +1553,16 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 return true;
             }
 
-            if (method === 'PUT' && subPath === '/concurrency') {
+            if (method === 'PUT' && subPath === '/edge-admission') {
                 const body = await getRequestBody(req, { maxBytes: 1024 * 1024 });
-                const keyData = await updateKeyConcurrency(keyId, body || {});
+                const keyData = await updateKeyEdgeAdmission(keyId, body || {});
                 if (!keyData) {
                     sendJson(res, 404, { success: false, error: { message: '未找到 Key' } });
                     return true;
                 }
                 sendManagementMutationResponse(res, {
                     result: keyData,
-                    message: 'Key 并发配置更新成功',
+                    message: 'Edge Admission 配置更新成功',
                     data: compactKeyManagementMutationData(keyData)
                 });
                 return true;

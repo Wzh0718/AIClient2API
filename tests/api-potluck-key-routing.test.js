@@ -483,12 +483,12 @@ describe('API Potluck key credential routing', () => {
         const concurrencyResponse = await callPotluckRoute(
             apiRoutes.handlePotluckApiRoutes,
             'PUT',
-            `/api/potluck/keys/${encodeURIComponent(created.id)}/concurrency`,
+            `/api/potluck/keys/${encodeURIComponent(created.id)}/edge-admission`,
             {
-                concurrencyLimit: 10,
-                queueLimit: 20,
-                queueTimeoutMs: 300000,
-                concurrencyMode: 'enforce',
+                edgeAdmissionConcurrencyLimit: 10,
+                edgeAdmissionQueueLimit: 20,
+                edgeAdmissionQueueTimeoutMs: 300000,
+                edgeAdmissionMode: 'enforce',
                 edgeAuthRpmLimit: 120
             },
             token
@@ -509,13 +509,95 @@ describe('API Potluck key credential routing', () => {
         const response = await callPotluckRoute(
             apiRoutes.handlePotluckApiRoutes,
             'PUT',
-            `/api/potluck/keys/${encodeURIComponent(created.id)}/concurrency`,
-            { concurrencyLimit: 5, queueLimit: 10, queueTimeoutMs: 300000, concurrencyMode: 'enforce', edgeAuthRpmLimit: 1.5 },
+            `/api/potluck/keys/${encodeURIComponent(created.id)}/edge-admission`,
+            { edgeAdmissionConcurrencyLimit: 5, edgeAdmissionQueueLimit: 10, edgeAdmissionQueueTimeoutMs: 300000, edgeAdmissionMode: 'enforce', edgeAuthRpmLimit: 1.5 },
             token
         );
 
         expect(response.statusCode).toBe(400);
         expect(response.body.success).toBe(false);
+    });
+
+    test('round-trips edge RPM through the overview used by the management UI', async () => {
+        const { keyManager, apiRoutes } = await loadPotluckModules();
+        const token = writeAdminToken();
+        const created = await keyManager.createKey('Edge RPM round trip', 1000);
+
+        const updateResponse = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'PUT',
+            `/api/potluck/keys/${encodeURIComponent(created.id)}/edge-admission`,
+            {
+                edgeAdmissionConcurrencyLimit: 10,
+                edgeAdmissionQueueLimit: 20,
+                edgeAdmissionQueueTimeoutMs: 120000,
+                edgeAdmissionMode: 'enforce',
+                edgeAuthRpmLimit: 120
+            },
+            token
+        );
+        expect(updateResponse.body.data.edgeAuthRpmLimit).toBe(120);
+
+        const overviewResponse = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'GET',
+            '/api/potluck/overview',
+            undefined,
+            token
+        );
+        expect(overviewResponse.statusCode).toBe(200);
+        expect(overviewResponse.body.data.keys).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                id: expect.any(String),
+                edgeAuthRpmLimit: 120
+            })
+        ]));
+    });
+
+    test('updates edge admission through the new management endpoint', async () => {
+        const { keyManager, apiRoutes } = await loadPotluckModules();
+        const token = writeAdminToken();
+        const created = await keyManager.createKey('Edge admission API', 1000);
+
+        const response = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'PUT',
+            `/api/potluck/keys/${encodeURIComponent(created.id)}/edge-admission`,
+            {
+                edgeAdmissionMode: 'enforce',
+                edgeAdmissionConcurrencyLimit: 10,
+                edgeAdmissionQueueLimit: 20,
+                edgeAdmissionQueueTimeoutMs: 120000,
+                edgeAuthRpmLimit: 120
+            },
+            token
+        );
+
+        expect(response.statusCode).toBe(200);
+        expect(response.body).toMatchObject({
+            success: true,
+            data: {
+                edgeAdmissionMode: 'enforce',
+                edgeAdmissionConcurrencyLimit: 10,
+                edgeAdmissionQueueLimit: 20,
+                edgeAdmissionQueueTimeoutMs: 120000,
+                edgeAuthRpmLimit: 120
+            }
+        });
+    });
+
+    test('removes the legacy public concurrency management route', async () => {
+        const { keyManager, apiRoutes } = await loadPotluckModules();
+        const token = writeAdminToken();
+        const created = await keyManager.createKey('Legacy route removed', 1000);
+        const response = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'PUT',
+            `/api/potluck/keys/${encodeURIComponent(created.id)}/concurrency`,
+            { concurrencyLimit: 1, queueLimit: 1, queueTimeoutMs: 1000, concurrencyMode: 'enforce' },
+            token
+        );
+        expect(response.statusCode).toBe(404);
     });
 
     test('updates the authoritative credential-group assignment with Key routing', async () => {

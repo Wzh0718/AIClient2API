@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { EdgeAdmissionCoordinator } from './edge-admission.js';
 
 const RATE_SCRIPT = `
 local count = redis.call('INCR', KEYS[1])
@@ -49,7 +50,11 @@ function normalizePolicy(policy = {}) {
         id: typeof policy.id === 'string' ? policy.id : '',
         status: policy.status || (policy.enabled === false ? 'disabled' : 'active'),
         rpmLimit: positiveNumber(policy.rpmLimit, 100000),
-        concurrencyLimit: positiveNumber(policy.concurrencyLimit, 1000)
+        concurrencyLimit: positiveNumber(policy.concurrencyLimit, 1000),
+        edgeAdmissionMode: policy.edgeAdmissionMode === 'enforce' ? 'enforce' : 'disabled',
+        edgeAdmissionConcurrencyLimit: Math.max(0, Number(policy.edgeAdmissionConcurrencyLimit ?? policy.concurrencyLimit ?? 0)),
+        edgeAdmissionQueueLimit: Math.max(0, Number(policy.edgeAdmissionQueueLimit ?? policy.queueLimit ?? 0)),
+        edgeAdmissionQueueTimeoutMs: Math.max(1, Number(policy.edgeAdmissionQueueTimeoutMs ?? policy.queueTimeoutMs ?? 300000))
     };
 }
 
@@ -62,7 +67,13 @@ export function policiesFromPotluckStore(store = {}) {
             id: hashKeyId(id),
             status: record.enabled === false ? 'disabled' : 'active',
             rpmLimit: record.edgeAuthRpmLimit || record.rpmLimit,
-            concurrencyLimit: record.edgeAuthConcurrencyLimit || record.concurrencyLimit
+            concurrencyLimit: record.edgeAuthConcurrencyLimit || record.concurrencyLimit,
+            edgeAdmissionMode: record.edgeAdmissionMode,
+            edgeAdmissionConcurrencyLimit: record.edgeAdmissionConcurrencyLimit,
+            edgeAdmissionQueueLimit: record.edgeAdmissionQueueLimit,
+            edgeAdmissionQueueTimeoutMs: record.edgeAdmissionQueueTimeoutMs,
+            queueLimit: record.queueLimit,
+            queueTimeoutMs: record.queueTimeoutMs
         })];
     });
 }
@@ -87,6 +98,14 @@ export class EdgeAuthService {
         this.policies = new Map();
         this.localRate = new Map();
         this.redisFailureNotified = false;
+        this.admission = options.admission || (this.redis ? new EdgeAdmissionCoordinator({ redis: this.redis, leaseTtlMs: options.leaseTtlMs }) : null);
+        this.failOpenMaxInFlight = Math.max(1, Number(options.failOpenMaxInFlight || 1));
+        this.failOpenInFlight = new Map();
+        this.failOpenLeases = new Map();
+        this.metrics = {
+            authorize: 0, denied: 0, leaseAcquired: 0, queueRejected: 0,
+            queueTimeouts: 0, failOpen: 0, releaseFailures: 0, renewFailures: 0
+        };
     }
 
     async replacePolicies(policies = []) {
@@ -133,8 +152,9 @@ export class EdgeAuthService {
         return entry.count <= this.failOpenLocalRpm;
     }
 
-    _failOpenDecision(error, clientIp, keyHash, localPolicy) {
+    _failOpenDecision(error, clientIp, keyHash, localPolicy, requestId = null) {
         const allowed = this._localFailOpen(clientIp);
+        this.metrics.failOpen += 1;
         if (!this.redisFailureNotified) {
             this.redisFailureNotified = true;
             this.onFailOpen({ error, clientIp, keyHash });
@@ -143,10 +163,17 @@ export class EdgeAuthService {
         if (['disabled', 'revoked', 'expired'].includes(localPolicy?.status)) {
             return { allowed: false, statusCode: 403, reason: localPolicy.status, failOpen: true };
         }
-        return { allowed: true, statusCode: 204, failOpen: true, keyHash };
+        const inFlight = Number(this.failOpenInFlight.get(keyHash) || 0);
+        if (inFlight >= this.failOpenMaxInFlight) return { allowed: false, statusCode: 429, reason: 'fail_open_concurrency_guard', failOpen: true };
+        this.failOpenInFlight.set(keyHash, inFlight + 1);
+        const leaseId = `fail-open:${keyHash}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+        this.failOpenLeases.set(leaseId, { keyHash, requestId });
+        return { allowed: true, statusCode: 204, failOpen: true, keyHash, failOpenLease: true, leaseId, leaseMode: 'fail-open', requestId };
     }
 
-    async authorize({ headers = {}, clientIp = 'unknown' } = {}) {
+    async authorize({ headers = {}, clientIp = 'unknown', requestId = null, signal = null } = {}) {
+        this.metrics.authorize += 1;
+        requestId ||= `edge-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
         const apiKey = extractApiKey(headers, headers['x-edge-original-uri'] || headers['X-Edge-Original-URI']);
         if (!apiKey) return { allowed: false, statusCode: 401, reason: 'missing_key' };
         if (!apiKey.startsWith(KEY_PREFIX)) return { allowed: false, statusCode: 401, reason: 'invalid_format' };
@@ -155,7 +182,7 @@ export class EdgeAuthService {
         const localPolicy = this.policies.get(keyHash);
         if (!localPolicy) return { allowed: false, statusCode: 401, reason: 'unknown_key' };
         if (!this.redis) {
-            return this._failOpenDecision(new Error('Redis is not configured'), clientIp, keyHash, localPolicy);
+            return this._failOpenDecision(new Error('Redis is not configured'), clientIp, keyHash, localPolicy, requestId);
         }
         let redisHealthy = true;
         let status = null;
@@ -164,7 +191,7 @@ export class EdgeAuthService {
             this.redisFailureNotified = false;
         } catch (error) {
             redisHealthy = false;
-            return this._failOpenDecision(error, clientIp, keyHash, localPolicy);
+            return this._failOpenDecision(error, clientIp, keyHash, localPolicy, requestId);
         }
 
         const localDisabled = ['disabled', 'revoked', 'expired'].includes(localPolicy?.status);
@@ -182,7 +209,7 @@ export class EdgeAuthService {
             ipRate = await this._redisRate('ip-rate', clientIp, this.ipRpm);
             this.redisFailureNotified = false;
         } catch (error) {
-            return this._failOpenDecision(error, clientIp, keyHash, localPolicy);
+            return this._failOpenDecision(error, clientIp, keyHash, localPolicy, requestId);
         }
         const ipWouldReject = ipRate.count > ipRate.limit;
         if (keyRate.count > keyRate.limit) {
@@ -191,6 +218,51 @@ export class EdgeAuthService {
         if (this.ipEnforce && ipWouldReject) {
             return { allowed: false, statusCode: 429, reason: 'ip_rate_exceeded', keyHash };
         }
-        return { allowed: true, statusCode: 204, keyHash, ipWouldReject, redisHealthy, failOpen: false };
+        let lease = null;
+        if (policy.edgeAdmissionMode === 'enforce' && policy.edgeAdmissionConcurrencyLimit > 0) {
+            try {
+                lease = await this.admission.acquire(keyHash, policy, requestId, { signal });
+                this.metrics.leaseAcquired += 1;
+            } catch (error) {
+                if (error.code === 'EDGE_ADMISSION_QUEUE_TIMEOUT') this.metrics.queueTimeouts += 1;
+                if (error.code === 'EDGE_ADMISSION_CAPACITY_EXHAUSTED') this.metrics.queueRejected += 1;
+                if (/redis|socket|coordination|unavailable|timeout/i.test(String(error.message || error.code || ''))) {
+                    return this._failOpenDecision(error, clientIp, keyHash, localPolicy, requestId);
+                }
+                return { allowed: false, statusCode: error.status || 429, reason: error.code || 'edge_admission_rejected', keyHash, ipWouldReject };
+            }
+        }
+        return { allowed: true, statusCode: 204, keyHash, ipWouldReject, redisHealthy, failOpen: false, leaseId: lease?.leaseId || null, leaseMode: lease ? 'enforce' : 'disabled', requestId };
     }
+
+    async release({ keyHash, leaseId, requestId } = {}) {
+        if (leaseId && this.admission) {
+            try { return await this.admission.release(keyHash, leaseId, requestId); }
+            catch { this.metrics.releaseFailures += 1; return false; }
+        }
+        if (leaseId && this.failOpenLeases.has(leaseId)) {
+            this.failOpenLeases.delete(leaseId);
+            const value = Math.max(0, Number(this.failOpenInFlight.get(keyHash) || 1) - 1);
+            if (value) this.failOpenInFlight.set(keyHash, value); else this.failOpenInFlight.delete(keyHash);
+            return true;
+        }
+        if (keyHash && this.failOpenInFlight.has(keyHash)) {
+            const value = Math.max(0, Number(this.failOpenInFlight.get(keyHash)) - 1);
+            if (value) this.failOpenInFlight.set(keyHash, value); else this.failOpenInFlight.delete(keyHash);
+            return true;
+        }
+        return false;
+    }
+
+    async renew({ keyHash, leaseId } = {}) {
+        try { return await (this.admission?.renew(keyHash, leaseId) || false); }
+        catch { this.metrics.renewFailures += 1; return false; }
+    }
+
+    async status(keyHash, leaseId) {
+        if (leaseId && this.failOpenLeases.has(leaseId)) return { redis: false, status: 'active', failOpen: true, keyHash };
+        return { ...(await (this.admission?.status(keyHash, leaseId) || { redis: false })), metrics: this.metrics };
+    }
+
+    getMetrics() { return { ...this.metrics, failOpenInFlight: this.failOpenInFlight.size }; }
 }

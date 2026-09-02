@@ -9,15 +9,27 @@ describe('api potluck keys list compact source', () => {
         expect(mutationHandler?.[0]).toContain('clearStatsCache();');
     });
 
-    test('exposes edge RPM alongside Node concurrency and warns that limits are independent', () => {
+    test('exposes Edge RPM alongside Edge Admission settings', () => {
         const html = fs.readFileSync(path.join(process.cwd(), 'static/potluck.html'), 'utf8').replace(/\r\n/g, '\n');
         const source = fs.readFileSync(path.join(process.cwd(), 'src/plugins/api-potluck/key-manager.js'), 'utf8').replace(/\r\n/g, '\n');
 
         expect(html).toContain('id="edgeAuthRpmLimit"');
         expect(html).toContain('edgeAuthRpmLimit');
         expect(html).toContain('Edge RPM');
-        expect(html).toContain('Edge RPM 是独立入口上限');
+        expect(html).toContain('Edge RPM 入口上限');
         expect(source).toContain('edgeAuthRpmLimit');
+    });
+
+    test('uses Edge Admission wording instead of exposing Pool Key Node controls', () => {
+        const html = fs.readFileSync(path.join(process.cwd(), 'static/potluck.html'), 'utf8').replace(/\r\n/g, '\n');
+        expect(html).toContain('Edge Admission');
+        expect(html).toContain('edgeAdmissionConcurrencyLimit');
+        expect(html).toContain('edgeAdmissionQueueLimit');
+        expect(html).toContain('edgeAdmissionQueueTimeoutMs');
+        expect(html).not.toContain('id="concurrencyMode"');
+        expect(html).not.toContain('id="concurrencyLimit"');
+        expect(html).not.toContain('id="queueLimit"');
+        expect(html).not.toContain('id="queueTimeoutSeconds"');
     });
 
     test('key search includes the visible masked key as well as name and hashed reference', () => {

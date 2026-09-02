@@ -35,6 +35,7 @@ const MODEL_USAGE_STATS_FILE = path.join(process.cwd(), 'configs', 'model-usage-
 const KEY_PREFIX = 'maki_';
 const USAGE_HISTORY_RETENTION_DAYS = 35;
 const LEDGER_KEY_HASH_PATTERN = /^sha256:[a-f0-9]{16}$/i;
+const edgeAdmissionConflictWarnings = new Set();
 
 const DEFAULT_CONFIG = {
     persistInterval: 30_000,
@@ -126,6 +127,58 @@ function normalizeEdgeAuthRpmLimit(value) {
     return Number.isInteger(limit) && limit > 0 ? limit : null;
 }
 
+function normalizeEdgeAdmissionMode(value) {
+    return value === 'enforce' ? 'enforce' : 'disabled';
+}
+
+function resolveEdgeAdmissionValue(keyData = {}, canonicalField, legacyField, fallback = 0) {
+    if (Object.prototype.hasOwnProperty.call(keyData, canonicalField)) return keyData[canonicalField];
+    if (Object.prototype.hasOwnProperty.call(keyData, legacyField)) return keyData[legacyField];
+    return fallback;
+}
+
+function normalizeEdgeAdmissionConfig(keyData = {}) {
+    for (const [canonicalField, legacyField] of [
+        ['edgeAdmissionMode', 'concurrencyMode'],
+        ['edgeAdmissionConcurrencyLimit', 'concurrencyLimit'],
+        ['edgeAdmissionQueueLimit', 'queueLimit'],
+        ['edgeAdmissionQueueTimeoutMs', 'queueTimeoutMs']
+    ]) {
+        if (Object.prototype.hasOwnProperty.call(keyData, canonicalField)
+            && Object.prototype.hasOwnProperty.call(keyData, legacyField)
+            && String(keyData[canonicalField]) !== String(keyData[legacyField])) {
+            const warningKey = `${keyData.id || 'unknown'}:${canonicalField}`;
+            if (!edgeAdmissionConflictWarnings.has(warningKey)) {
+                edgeAdmissionConflictWarnings.add(warningKey);
+                logger.warn(`[Potluck Key] Edge Admission canonical field overrides legacy mirror: ${canonicalField}`);
+            }
+        }
+    }
+    const edgeAdmissionMode = normalizeEdgeAdmissionMode(
+        resolveEdgeAdmissionValue(keyData, 'edgeAdmissionMode', 'concurrencyMode', 'disabled')
+    );
+    const edgeAdmissionConcurrencyLimit = Math.max(0, toNumber(
+        resolveEdgeAdmissionValue(keyData, 'edgeAdmissionConcurrencyLimit', 'concurrencyLimit', 0)
+    ));
+    const edgeAdmissionQueueLimit = Math.max(0, toNumber(
+        resolveEdgeAdmissionValue(keyData, 'edgeAdmissionQueueLimit', 'queueLimit', 0)
+    ));
+    const edgeAdmissionQueueTimeoutMs = Math.max(1, toNumber(
+        resolveEdgeAdmissionValue(keyData, 'edgeAdmissionQueueTimeoutMs', 'queueTimeoutMs', 300000)
+    ) || 300000);
+    return {
+        edgeAdmissionMode,
+        edgeAdmissionConcurrencyLimit,
+        edgeAdmissionQueueLimit,
+        edgeAdmissionQueueTimeoutMs,
+        // Hidden legacy mirrors are deliberately kept for rollback compatibility.
+        concurrencyMode: edgeAdmissionMode === 'enforce' ? 'enforce' : 'shadow',
+        concurrencyLimit: edgeAdmissionConcurrencyLimit,
+        queueLimit: edgeAdmissionQueueLimit,
+        queueTimeoutMs: edgeAdmissionQueueTimeoutMs
+    };
+}
+
 function isValidEdgeAuthRpmLimit(value) {
     return value === undefined || value === null || value === '' || value === 0
         || (Number.isInteger(Number(value)) && Number(value) > 0);
@@ -140,15 +193,13 @@ export function getKeyConfigSyncState() {
 }
 
 function keyConfigSnapshot(keyData) {
+    const edgeAdmission = normalizeEdgeAdmissionConfig(keyData);
     return {
         keyId: keyData.id,
         name: typeof keyData.name === 'string' ? keyData.name : '',
         enabled: keyData.enabled !== false,
         dailyLimit: Math.max(0, toNumber(keyData.dailyLimit)),
-        concurrencyLimit: Math.max(0, toNumber(keyData.concurrencyLimit)),
-        queueLimit: Math.max(0, toNumber(keyData.queueLimit)),
-        queueTimeoutMs: Math.max(1, toNumber(keyData.queueTimeoutMs) || 300000),
-        concurrencyMode: keyData.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
+        ...edgeAdmission,
         edgeAuthRpmLimit: normalizeEdgeAuthRpmLimit(keyData.edgeAuthRpmLimit),
         routingMode: keyData.routingMode || 'pool',
         primaryGroupId: keyData.routingMode === 'auto' ? (keyData.primaryGroupId || null) : null,
@@ -206,10 +257,7 @@ function normalizeKeyConfigRecord(record) {
             name: record.name,
             enabled: record.enabled,
             dailyLimit,
-            concurrencyLimit: Math.max(0, toNumber(record.concurrencyLimit)),
-            queueLimit: Math.max(0, toNumber(record.queueLimit)),
-            queueTimeoutMs: Math.max(1, toNumber(record.queueTimeoutMs) || 300000),
-            concurrencyMode: record.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
+            ...normalizeEdgeAdmissionConfig(record),
             edgeAuthRpmLimit: normalizeEdgeAuthRpmLimit(record.edgeAuthRpmLimit),
             ...normalizeKeyRouting(record, { strict: true })
         };
@@ -261,6 +309,10 @@ export function applyKeyStoreSyncEvent(event = {}) {
                 name: record.name,
                 enabled: record.enabled,
                 dailyLimit: record.dailyLimit,
+                edgeAdmissionMode: record.edgeAdmissionMode,
+                edgeAdmissionConcurrencyLimit: record.edgeAdmissionConcurrencyLimit,
+                edgeAdmissionQueueLimit: record.edgeAdmissionQueueLimit,
+                edgeAdmissionQueueTimeoutMs: record.edgeAdmissionQueueTimeoutMs,
                 concurrencyLimit: record.concurrencyLimit,
                 queueLimit: record.queueLimit,
                 queueTimeoutMs: record.queueTimeoutMs,
@@ -276,6 +328,10 @@ export function applyKeyStoreSyncEvent(event = {}) {
                 name: record.name,
                 createdAt: new Date().toISOString(),
                 dailyLimit: record.dailyLimit,
+                edgeAdmissionMode: record.edgeAdmissionMode,
+                edgeAdmissionConcurrencyLimit: record.edgeAdmissionConcurrencyLimit,
+                edgeAdmissionQueueLimit: record.edgeAdmissionQueueLimit,
+                edgeAdmissionQueueTimeoutMs: record.edgeAdmissionQueueTimeoutMs,
                 concurrencyLimit: record.concurrencyLimit,
                 queueLimit: record.queueLimit,
                 queueTimeoutMs: record.queueTimeoutMs,
@@ -543,13 +599,11 @@ function isSameKeyRouting(keyData, routing) {
 
 function normalizeKeyData(keyData = {}) {
     const routing = normalizeKeyRouting(keyData);
+    const edgeAdmission = normalizeEdgeAdmissionConfig(keyData);
     const normalized = {
         ...keyData,
         ...routing,
-        concurrencyLimit: Math.max(0, toNumber(keyData.concurrencyLimit)),
-        queueLimit: Math.max(0, toNumber(keyData.queueLimit)),
-        queueTimeoutMs: Math.max(1, toNumber(keyData.queueTimeoutMs) || 300000),
-        concurrencyMode: keyData.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
+        ...edgeAdmission,
         edgeAuthRpmLimit: normalizeEdgeAuthRpmLimit(keyData.edgeAuthRpmLimit),
         todayUsage: toNumber(keyData.todayUsage),
         totalUsage: toNumber(keyData.totalUsage),
@@ -1967,6 +2021,10 @@ export async function createKey(name = '', dailyLimit = null) {
         lastResetDate: today,
         lastUsedAt: null,
         enabled: true,
+        edgeAdmissionMode: 'disabled',
+        edgeAdmissionConcurrencyLimit: 0,
+        edgeAdmissionQueueLimit: 0,
+        edgeAdmissionQueueTimeoutMs: 300000,
         concurrencyLimit: 0,
         queueLimit: 0,
         queueTimeoutMs: 300000,
@@ -2292,32 +2350,49 @@ export async function applyKeyRoutingAssignments(assignments) {
     return result;
 }
 
-export async function updateKeyConcurrency(keyId, options = {}) {
+export async function updateKeyEdgeAdmission(keyId, options = {}) {
     ensureLoaded();
     const keyData = keyStore.keys[keyId];
     if (!keyData) return null;
-    const concurrencyLimit = Number(options.concurrencyLimit);
-    const queueLimit = Number(options.queueLimit);
-    const queueTimeoutMs = Number(options.queueTimeoutMs);
+    const edgeAdmissionMode = normalizeEdgeAdmissionMode(options.edgeAdmissionMode);
+    const edgeAdmissionConcurrencyLimit = Number(options.edgeAdmissionConcurrencyLimit);
+    const edgeAdmissionQueueLimit = Number(options.edgeAdmissionQueueLimit);
+    const edgeAdmissionQueueTimeoutMs = Number(options.edgeAdmissionQueueTimeoutMs);
     const edgeAuthRpmLimit = normalizeEdgeAuthRpmLimit(options.edgeAuthRpmLimit);
-    if (!Number.isInteger(concurrencyLimit) || concurrencyLimit < 0 ||
-        !Number.isInteger(queueLimit) || queueLimit < 0 ||
-        !Number.isInteger(queueTimeoutMs) || queueTimeoutMs < 1 ||
+    if (!['disabled', 'enforce'].includes(options.edgeAdmissionMode) ||
+        !Number.isInteger(edgeAdmissionConcurrencyLimit) || edgeAdmissionConcurrencyLimit < 0 ||
+        !Number.isInteger(edgeAdmissionQueueLimit) || edgeAdmissionQueueLimit < 0 ||
+        !Number.isInteger(edgeAdmissionQueueTimeoutMs) || edgeAdmissionQueueTimeoutMs < 1 ||
         !isValidEdgeAuthRpmLimit(options.edgeAuthRpmLimit) ||
-        !['shadow', 'enforce'].includes(options.concurrencyMode || 'shadow')) {
-        throw createInvalidKeyRoutingError('并发配置无效');
+        (edgeAdmissionMode === 'enforce' && edgeAdmissionConcurrencyLimit === 0)) {
+        throw createInvalidKeyRoutingError('Edge Admission 配置无效');
     }
     Object.assign(keyData, {
-        concurrencyLimit,
-        queueLimit,
-        queueTimeoutMs,
-        concurrencyMode: options.concurrencyMode || 'shadow',
+        edgeAdmissionMode,
+        edgeAdmissionConcurrencyLimit,
+        edgeAdmissionQueueLimit,
+        edgeAdmissionQueueTimeoutMs,
+        concurrencyLimit: edgeAdmissionConcurrencyLimit,
+        queueLimit: edgeAdmissionQueueLimit,
+        queueTimeoutMs: edgeAdmissionQueueTimeoutMs,
+        concurrencyMode: edgeAdmissionMode === 'enforce' ? 'enforce' : 'shadow',
         edgeAuthRpmLimit
     });
     const targetVersion = markDirty();
     const result = await buildManagementMutationResult(targetVersion, keyData);
-    publishPersistedKeyConfig(result, 'key-concurrency-updated', targetVersion);
+    publishPersistedKeyConfig(result, 'key-edge-admission-updated', targetVersion);
     return result;
+}
+
+// Internal compatibility helper for old callers; the public management route is removed.
+export async function updateKeyConcurrency(keyId, options = {}) {
+    return updateKeyEdgeAdmission(keyId, {
+        edgeAdmissionMode: options.concurrencyMode === 'enforce' ? 'enforce' : 'disabled',
+        edgeAdmissionConcurrencyLimit: Number(options.concurrencyLimit),
+        edgeAdmissionQueueLimit: Number(options.queueLimit),
+        edgeAdmissionQueueTimeoutMs: Number(options.queueTimeoutMs),
+        edgeAuthRpmLimit: options.edgeAuthRpmLimit
+    });
 }
 
 // 用于防止同一 Key 下同一请求重复入账，保留短窗口覆盖 stream/fallback 重复 finalize。
@@ -2687,6 +2762,7 @@ export async function getStats(options = {}) {
         }
 
         if (includeKeySummaries) {
+            const edgeAdmission = normalizeEdgeAdmissionConfig(key);
             const rates = rateManager.getStats(`key:${key.id}`);
             const summaryHistory = cloneUsageHistorySummaryOnly(
                 key.usageHistory || {},
@@ -2735,6 +2811,12 @@ export async function getStats(options = {}) {
                 routingMode: key.routingMode || 'pool',
                 primaryGroupId: key.primaryGroupId || null,
                 manualLock: key.manualLock === true,
+                edgeAdmissionMode: edgeAdmission.edgeAdmissionMode,
+                edgeAdmissionConcurrencyLimit: toNumber(edgeAdmission.edgeAdmissionConcurrencyLimit),
+                edgeAdmissionQueueLimit: toNumber(edgeAdmission.edgeAdmissionQueueLimit),
+                edgeAdmissionQueueTimeoutMs: toNumber(edgeAdmission.edgeAdmissionQueueTimeoutMs),
+                edgeAuthRpmLimit: normalizeEdgeAuthRpmLimit(key.edgeAuthRpmLimit),
+                // Internal consumers still receive legacy mirrors.
                 concurrencyLimit: toNumber(key.concurrencyLimit),
                 queueLimit: toNumber(key.queueLimit),
                 queueTimeoutMs: toNumber(key.queueTimeoutMs || 300000),

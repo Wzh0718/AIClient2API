@@ -151,6 +151,37 @@ describe('edge auth service', () => {
         })).resolves.toMatchObject({ allowed: true, statusCode: 204, failOpen: false, redisHealthy: true });
     });
 
+    test('acquires Edge Admission lease only for enforced keys and releases idempotently', async () => {
+        const redis = new FakeRedis();
+        const admission = {
+            acquire: jest.fn().mockResolvedValue({ leaseId: 'lease-1' }),
+            release: jest.fn().mockResolvedValue(true),
+            renew: jest.fn().mockResolvedValue(true),
+            status: jest.fn().mockResolvedValue({ redis: true, active: 1, waiting: 0 })
+        };
+        const apiKey = 'maki_edge_admission';
+        const service = new EdgeAuthService({ redis, admission, ipEnforce: false });
+        await service.replacePolicies([activePolicy(apiKey, {
+            edgeAdmissionMode: 'enforce', edgeAdmissionConcurrencyLimit: 2,
+            edgeAdmissionQueueLimit: 3, edgeAdmissionQueueTimeoutMs: 1000
+        })]);
+        const result = await service.authorize({ headers: { authorization: `Bearer ${apiKey}` }, requestId: 'req-1' });
+        expect(result).toMatchObject({ allowed: true, leaseId: 'lease-1', leaseMode: 'enforce' });
+        expect(admission.acquire).toHaveBeenCalledWith(hashKeyId(apiKey), expect.objectContaining({ edgeAdmissionConcurrencyLimit: 2 }), 'req-1', { signal: null });
+        await service.release({ keyHash: hashKeyId(apiKey), leaseId: 'lease-1', requestId: 'req-1' });
+        expect(admission.release).toHaveBeenCalled();
+    });
+
+    test('does not acquire an Edge lease for disabled admission mode', async () => {
+        const redis = new FakeRedis();
+        const admission = { acquire: jest.fn() };
+        const apiKey = 'maki_edge_disabled';
+        const service = new EdgeAuthService({ redis, admission, ipEnforce: false });
+        await service.replacePolicies([activePolicy(apiKey, { edgeAdmissionMode: 'disabled' })]);
+        await service.authorize({ headers: { authorization: `Bearer ${apiKey}` } });
+        expect(admission.acquire).not.toHaveBeenCalled();
+    });
+
     test('returns 429 when a key exceeds its RPM threshold', async () => {
         const redis = new FakeRedis();
         const service = new EdgeAuthService({ redis, ipEnforce: false });

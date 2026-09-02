@@ -19,6 +19,12 @@ function json(res, statusCode, body) {
     res.end(JSON.stringify(body));
 }
 
+async function readJson(req) {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    return body ? JSON.parse(body) : {};
+}
+
 export function createEdgeAuthServer(options = {}) {
     const policyFile = options.policyFile || process.env.EDGE_AUTH_POLICY_FILE || 'configs/api-potluck-keys.json';
     const redis = options.redis || redisFromUrl(options.redisUrl || process.env.REDIS_URL);
@@ -29,6 +35,9 @@ export function createEdgeAuthServer(options = {}) {
         ipRpm: Number(process.env.EDGE_AUTH_DEFAULT_IP_RPM || 100000),
         ipEnforce: process.env.EDGE_AUTH_IP_ENFORCE === 'true',
         failOpenLocalRpm: Number(process.env.EDGE_AUTH_FAIL_OPEN_LOCAL_RPM || 120),
+        failOpenMaxInFlight: Number(process.env.EDGE_AUTH_FAIL_OPEN_MAX_IN_FLIGHT || 1),
+        redisTimeoutMs: Number(process.env.EDGE_AUTH_REDIS_TIMEOUT_MS || 250),
+        leaseTtlMs: Number(process.env.EDGE_AUTH_LEASE_TTL_MS || 120000),
         onFailOpen: event => console.error(JSON.stringify({ event: 'edge_auth_redis_fail_open', ...event, keyHash: event.keyHash }))
     });
     let loadedMtime = 0;
@@ -72,14 +81,43 @@ export function createEdgeAuthServer(options = {}) {
                 return json(res, 500, { ok: false, error: 'policy_reload_failed' });
             }
         }
+        if (req.method === 'POST' && (req.url === '/release' || req.url === '/renew')) {
+            try {
+                const body = await readJson(req);
+                const keyHash = String(body.keyHash || '');
+                const leaseId = String(body.leaseId || '');
+                if (!keyHash || !leaseId) return json(res, 400, { error: 'invalid_lease' });
+                const result = req.url === '/release'
+                    ? await service.release({ keyHash, leaseId, requestId: body.requestId })
+                    : await service.renew({ keyHash, leaseId });
+                return json(res, 200, { ok: Boolean(result) });
+            } catch (error) {
+                return json(res, 503, { error: 'edge_admission_unavailable' });
+            }
+        }
+        if (req.method === 'GET' && req.url.startsWith('/status')) {
+            const parsed = new URL(req.url, 'http://edge-auth.invalid');
+            return json(res, 200, await service.status(parsed.searchParams.get('keyHash'), parsed.searchParams.get('leaseId')));
+        }
         if (req.method !== 'GET' || req.url !== '/authorize') return json(res, 404, { error: 'not_found' });
+        const abortController = new AbortController();
+        const abortRequest = () => { if (!res.writableEnded) abortController.abort(); };
+        req.once('aborted', abortRequest);
+        res.once('close', abortRequest);
         try {
             const result = await service.authorize({
                 headers: req.headers,
-                clientIp: req.headers['x-edge-client-ip'] || req.socket.remoteAddress || 'unknown'
+                clientIp: req.headers['x-edge-client-ip'] || req.socket.remoteAddress || 'unknown',
+                requestId: req.headers['x-request-id'] || req.headers['x-edge-request-id'] || null,
+                signal: abortController.signal
             });
             if (result.allowed) {
-                res.writeHead(204, { 'x-edge-key-hash': result.keyHash || '' });
+                res.writeHead(204, {
+                    'x-edge-key-hash': result.keyHash || '',
+                    'x-edge-lease-id': result.leaseId || '',
+                    'x-edge-lease-mode': result.leaseMode || (result.failOpen ? 'fail-open' : 'disabled'),
+                    'x-edge-request-id': result.requestId || req.headers['x-request-id'] || ''
+                });
                 return res.end();
             }
             if (result.statusCode === 429) {
@@ -93,6 +131,9 @@ export function createEdgeAuthServer(options = {}) {
             return json(res, result.statusCode || 401, { error: result.reason || 'unauthorized' });
         } catch (error) {
             return json(res, 503, { error: 'edge_auth_unavailable' });
+        } finally {
+            req.off('aborted', abortRequest);
+            res.off('close', abortRequest);
         }
     });
 
