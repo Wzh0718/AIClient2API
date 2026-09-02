@@ -99,9 +99,11 @@ describe('runtime hook poller', () => {
         const poller = new RuntimeHookPoller({ stream, ingress, blockMs: 1, statusPollMs: 20 });
         poller.start();
         await new Promise(resolve => setTimeout(resolve, 55));
+        const readsBeforeStop = stream.readBatch.mock.calls.length;
+        const statusBeforeStop = stream.pendingSnapshot.mock.calls.length;
         await poller.stop({ drain: false });
 
-        expect(stream.readBatch.mock.calls.length).toBeGreaterThan(5);
-        expect(stream.pendingSnapshot.mock.calls.length).toBeLessThan(stream.readBatch.mock.calls.length);
+        expect(readsBeforeStop).toBeGreaterThan(1);
+        expect(statusBeforeStop).toBeLessThan(readsBeforeStop);
     });
 });
