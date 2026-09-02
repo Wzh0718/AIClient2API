@@ -123,7 +123,13 @@ prepare_candidate() {
     exit 1
   }
 
-  SNAPSHOT_REQUIRED_BYTES=$(du -sb --exclude='request-audit' --exclude='app-logs' "$CONFIG_DIR" | awk '{print $1}')
+  # usage-events holds a multi-GB SQLite file that the active container keeps
+  # writing, so copying it both wastes disk and yields a torn database: the
+  # candidate then dies at startup with SQLITE_CORRUPT. The candidate creates a
+  # fresh store instead; durable usage data stays with the active container.
+  SNAPSHOT_EXCLUDES="--exclude=request-audit --exclude=app-logs --exclude=usage-events"
+  # shellcheck disable=SC2086
+  SNAPSHOT_REQUIRED_BYTES=$(du -sb $SNAPSHOT_EXCLUDES "$CONFIG_DIR" | awk '{print $1}')
   snapshot_available_bytes=$(df -B1 --output=avail "$STATE_DIR" 2>/dev/null | tail -1 | tr -d ' ')
   if [ -z "$snapshot_available_bytes" ]; then
     snapshot_available_bytes=$(df -B1 --output=avail "$(dirname "$STATE_DIR")" | tail -1 | tr -d ' ')
@@ -140,7 +146,8 @@ prepare_candidate() {
     rm -rf "$SNAPSHOT_DIR"
     mkdir -p "$SNAPSHOT_DIR"
     chmod 700 "$SNAPSHOT_DIR"
-    tar -C "$CONFIG_DIR" --exclude='request-audit' --exclude='app-logs' -cf - . | tar -C "$SNAPSHOT_DIR" -xf -
+    # shellcheck disable=SC2086
+    tar -C "$CONFIG_DIR" $SNAPSHOT_EXCLUDES -cf - . | tar -C "$SNAPSHOT_DIR" -xf -
     if verify_candidate_owner; then docker rm -f "$CANDIDATE_CONTAINER" >/dev/null; fi
   else
     log "[dry-run] create protected config snapshot: $CONFIG_DIR -> $SNAPSHOT_DIR"
@@ -167,7 +174,14 @@ prepare_candidate() {
 
   if [ "$APPLY" = "1" ]; then
     wait_for_health || { docker logs --tail 100 "$CANDIDATE_CONTAINER" >&2; exit 1; }
-    curl -fsS --max-time 5 "http://127.0.0.1:${CANDIDATE_PORT}/api/health" >/dev/null
+    # The container healthcheck flips before the HTTP surface is warm, so a
+    # single 5s probe here reported a false failure on a candidate that was fine.
+    probe=0
+    until curl -fsS --max-time 10 "http://127.0.0.1:${CANDIDATE_PORT}/api/health" >/dev/null; do
+      probe=$((probe + 1))
+      [ "$probe" -lt 12 ] || { echo "candidate did not answer /api/health" >&2; exit 1; }
+      sleep 5
+    done
     runtime_health=$(curl -fsS --max-time 5 "http://127.0.0.1:${CANDIDATE_PORT}/runtime/health")
     printf '%s' "$runtime_health" | grep -Eq '"pendingWorkerCount"[[:space:]]*:[[:space:]]*0' || {
       echo "candidate provider config propagation is still pending" >&2
