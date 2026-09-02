@@ -38,7 +38,10 @@ function normalizeAntigravityElasticRoutingUpdate(incoming, current = {}) {
     if (Array.isArray(incoming.fallbackModels)) {
         next.fallbackModels = incoming.fallbackModels
             .map(model => String(model || '').trim())
-            .filter(model => ['gemini-3.1-flash-lite', 'gemini-2.5-flash'].includes(model));
+            .filter(model => [
+                'gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-3.1-flash-lite',
+                'gemini-3-flash', 'gemini-3.6-flash-medium', 'gemini-3.7-flash-medium'
+            ].includes(model));
     }
     return next;
 }

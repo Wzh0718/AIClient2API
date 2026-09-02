@@ -16,6 +16,7 @@ describe('image capacity admission order', () => {
         expect(generation.indexOf('runtimeImageCapacity.acquire')).toBeGreaterThan(0);
         expect(generation.indexOf('runtimeImageCapacity.acquire')).toBeLessThan(generation.indexOf('getApiServiceWithFallback'));
         expect(generation).toContain('await runtimeImageCapacity.resize(capacityTicket');
+        expect(generation).toContain("slotProviderType !== 'gemini-antigravity'");
 
         expect(edits.indexOf('runtimeImageCapacity.acquire')).toBeGreaterThan(0);
         expect(edits.indexOf('runtimeImageCapacity.acquire')).toBeLessThan(edits.indexOf('buffer.toString(\'base64\')'));

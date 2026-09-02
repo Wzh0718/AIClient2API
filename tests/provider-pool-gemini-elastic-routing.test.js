@@ -17,9 +17,9 @@ const sourceModel = 'gemini-2.5-flash-lite';
 const firstFallback = 'gemini-2.5-flash';
 const secondFallback = 'gemini-3.1-flash-lite';
 const thirdFallback = 'gemini-3-flash';
-const fourthFallback = 'gemini-3.5-flash-lite';
-const fifthFallback = 'gemini-3.5-flash';
-const sixthFallback = 'gemini-3.6-flash';
+const fourthFallback = 'gemini-3.6-flash-medium';
+const fifthFallback = 'gemini-3.7-flash-medium';
+const sixthFallback = 'gemini-3.7-flash-medium';
 
 function coolingUntil(delayMs) {
     return {
@@ -70,16 +70,34 @@ function createCoordinatedManager(providers, coordination, overrides = {}) {
 }
 
 describe('Antigravity elastic queue and model fallback', () => {
+    test('uses one total fallback chain instead of same-series chains', () => {
+        expect(getAntigravityElasticFallbackModels(
+            'gemini-2.5-flash-lite',
+            ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3-flash', 'gemini-3.6-flash-medium', 'gemini-3.7-flash-medium']
+        )).toEqual([
+            'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3-flash', 'gemini-3.6-flash-medium', 'gemini-3.7-flash-medium'
+        ]);
+    });
+
+    test('does not generate a series-specific fallback chain', () => {
+        expect(getAntigravityElasticFallbackModels(
+            'gemini-3.7-flash',
+            ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3-flash', 'gemini-3.6-flash-medium', 'gemini-3.7-flash-medium']
+        )).toEqual([]);
+    });
+
     test('only falls forward to stronger models when the requested model is in the middle', () => {
         const configured = [firstFallback, secondFallback, thirdFallback, fourthFallback, fifthFallback, sixthFallback];
-        expect(getAntigravityElasticFallbackModels(sourceModel, configured)).toEqual(configured);
+        expect(getAntigravityElasticFallbackModels(sourceModel, configured)).toEqual([
+            firstFallback, secondFallback, thirdFallback, fourthFallback, fifthFallback
+        ]);
         expect(getAntigravityElasticFallbackModels(firstFallback, configured)).toEqual([
             secondFallback, thirdFallback, fourthFallback, fifthFallback, sixthFallback
         ]);
         expect(getAntigravityElasticFallbackModels(secondFallback, configured)).toEqual([
             thirdFallback, fourthFallback, fifthFallback, sixthFallback
         ]);
-        expect(getAntigravityElasticFallbackModels(fifthFallback, configured)).toEqual([sixthFallback]);
+        expect(getAntigravityElasticFallbackModels(fifthFallback, configured)).toEqual([]);
         expect(getAntigravityElasticFallbackModels(sixthFallback, configured)).toEqual([]);
     });
 

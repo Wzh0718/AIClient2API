@@ -813,7 +813,7 @@ async function handleImageGenerationRequest(req, res, currentConfig, providerPoo
             })) {
                 credentialMarkedUnhealthy = true;
                 cooldownApplied = true;
-            } else if (!credentialMarkedUnhealthy && !error.skipErrorCount) {
+            } else if (!credentialMarkedUnhealthy && !error.skipErrorCount && slotProviderType !== 'gemini-antigravity') {
                 if (error.response?.status !== 400) {
                     logger.info(`[Provider Pool] Marking ${slotProviderType} as unhealthy due to image generation error (status: ${error.response?.status || 'unknown'})`);
                     providerPoolManager.markProviderUnhealthy(slotProviderType, {uuid: slotUuid}, error.message);

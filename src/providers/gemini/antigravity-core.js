@@ -61,21 +61,17 @@ const ANTIGRAVITY_ERROR_BODY_MAX_BYTES = 1024 * 1024;
 
 // 获取 Antigravity 模型列表
 const ANTIGRAVITY_MODELS = getProviderModels(MODEL_PROVIDER.ANTIGRAVITY);
+// 当前请求必须使用真实存在的上游模型名；fallback 由 provider pool 的总链路负责。
 
 const ANTIGRAVITY_CLIENT_MODEL_THINKING_LEVEL = {
     'gemini-pro-agent': 'high',
-    'gemini-3.1-pro-high': 'high',
     'gemini-3.1-pro-preview': 'high',
     'gemini-3-pro-high': 'high',
     'gemini-3-pro-preview': 'high',
-    'gemini-3.5-flash-high': 'high',
     'gemini-3.6-flash-high': 'high',
-    'gemini-3.7-flash-high': 'high',
     'gemini-3.1-pro-low': 'low',
     'gemini-3-pro-low': 'low',
-    'gemini-3.5-flash-low': 'low',
-    'gemini-3.6-flash-low': 'low',
-    'gemini-3.7-flash-low': 'low'
+    'gemini-3.6-flash-low': 'low'
 };
 
 const ANTIGRAVITY_MODEL_METADATA = {
@@ -88,10 +84,6 @@ const ANTIGRAVITY_MODEL_METADATA = {
         thinking: { min: 1024, max: 64000, zeroAllowed: true, dynamicAllowed: true }
     },
     'gemini-3-flash': {
-        maxOutputTokens: 65536,
-        thinking: { min: 128, max: 32768, dynamicAllowed: true, levels: ['minimal', 'low', 'medium', 'high'] }
-    },
-    'gemini-3-flash-agent': {
         maxOutputTokens: 65536,
         thinking: { min: 128, max: 32768, dynamicAllowed: true, levels: ['minimal', 'low', 'medium', 'high'] }
     },
@@ -110,10 +102,6 @@ const ANTIGRAVITY_MODEL_METADATA = {
         maxOutputTokens: 65535,
         thinking: { min: 1, max: 65535, dynamicAllowed: true, levels: ['low', 'medium', 'high'] }
     },
-    'gemini-3.1-pro-high': {
-        maxOutputTokens: 65535,
-        thinking: { min: 1, max: 65535, dynamicAllowed: true, levels: ['low', 'medium', 'high'] }
-    },
     'gemini-3.1-pro-low': {
         maxOutputTokens: 65535,
         thinking: { min: 1, max: 65535, dynamicAllowed: true, levels: ['low', 'medium', 'high'] }
@@ -124,10 +112,6 @@ const ANTIGRAVITY_MODEL_METADATA = {
     'gemini-3.1-flash-lite': {
         maxOutputTokens: 65535,
         thinking: { min: 1, max: 65535, zeroAllowed: true, dynamicAllowed: true, levels: ['minimal', 'low', 'medium', 'high'] }
-    },
-    'gemini-3.5-flash-low': {
-        maxOutputTokens: 65535,
-        thinking: { min: 1, max: 65535, dynamicAllowed: true, levels: ['low', 'medium', 'high'] }
     },
     'gemini-3.6-flash-low': {
         maxOutputTokens: 65535,
@@ -1618,6 +1602,7 @@ export class AntigravityApiService {
                     const seenModels = new Set();
                     this.availableModels = models
                         .map(modelId => normalizeAntigravityModelId(modelId))
+                        .filter(modelId => ANTIGRAVITY_MODELS.includes(modelId))
                         .filter(modelId => {
                             if (!modelId || seenModels.has(modelId)) return false;
                             seenModels.add(modelId);
@@ -2220,13 +2205,12 @@ export class AntigravityApiService {
 
     buildAntigravityPayload(model, requestBody) {
         let selectedModel = normalizeAntigravityModelId(model);
-        if (!this.availableModels.includes(selectedModel) && !isKnownAntigravityModel(selectedModel)) {
-            if (this.config.MODEL_FALLBACK_ENABLED === false) {
-                throw new Error(`[Antigravity] 模型不存在: ${model}`);
-            }
-            logger.warn(`[Antigravity] Model '${model}' not found. Using default model: 'gemini-3-flash'`);
-            selectedModel = 'gemini-3-flash';
-            requestBody.model = selectedModel;
+        const hasFetchedAvailableModels = Array.isArray(this.availableModels) && this.availableModels.length > 0;
+        const modelIsAvailable = hasFetchedAvailableModels
+            ? this.availableModels.includes(selectedModel)
+            : isKnownAntigravityModel(selectedModel);
+        if (!modelIsAvailable) {
+            throw new Error(`[Antigravity] 模型不存在: ${model}`);
         }
 
         const actualModelName = resolveAntigravityUpstreamModel(selectedModel);

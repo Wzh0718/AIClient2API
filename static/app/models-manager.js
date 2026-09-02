@@ -17,10 +17,8 @@ const ANTIGRAVITY_FLASH_ROUTING_ORDER = [
     'gemini-2.5-flash',
     'gemini-3.1-flash-lite',
     'gemini-3-flash',
-    'gemini-3.5-flash-lite',
-    'gemini-3.5-flash',
-    'gemini-3.6-flash',
-    'gemini-3.7-flash'
+    'gemini-3.6-flash-medium',
+    'gemini-3.7-flash-medium'
 ];
 
 function sortAntigravityModels(models) {

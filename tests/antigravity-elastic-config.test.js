@@ -18,13 +18,12 @@ describe('Antigravity elastic routing config', () => {
             maxQueueWaitMs: 12000,
             preferOriginalWaitMs: 10000,
             fallbackModels: [
+                'gemini-2.5-flash-lite',
                 'gemini-2.5-flash',
                 'gemini-3.1-flash-lite',
                 'gemini-3-flash',
-                'gemini-3.5-flash-lite',
-                'gemini-3.5-flash',
-                'gemini-3.6-flash',
-                'gemini-3.7-flash'
+                'gemini-3.6-flash-medium',
+                'gemini-3.7-flash-medium'
             ],
             globalQueueLimit: 512,
             perKeyModelQueueLimit: 256,

@@ -21,6 +21,23 @@ jest.mock('../src/services/service-manager.js', () => ({
 import { AntigravityApiService } from '../src/providers/gemini/antigravity-core.js';
 
 describe('Antigravity image payloads', () => {
+    test('rejects an absent model instead of mapping it inside the adapter', () => {
+        const service = new AntigravityApiService({
+            MODEL_PROVIDER: 'gemini-antigravity',
+            ANTIGRAVITY_BASE_URL: 'http://127.0.0.1:1',
+            PROJECT_ID: 'test-project'
+        });
+        service.availableModels = ['gemini-3.6-flash-low'];
+
+        const request = {
+            model: 'gemini-3.6-flash',
+            contents: [{ role: 'user', parts: [{ text: 'hello' }] }]
+        };
+        expect(() => service.buildAntigravityPayload('gemini-3.6-flash', request))
+            .toThrow('模型不存在');
+        expect(request.model).toBe('gemini-3.6-flash');
+    });
+
     test('passes the dedicated health-check timeout to the underlying request', async () => {
         const service = new AntigravityApiService({
             MODEL_PROVIDER: 'gemini-antigravity',
