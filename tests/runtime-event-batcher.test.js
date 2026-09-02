@@ -114,4 +114,12 @@ describe('runtime event batcher', () => {
             code: 'RUNTIME_EVENT_DRAIN_TIMEOUT'
         });
     }, 1000);
+
+    test('flushes asynchronously when the timer is explicitly configured as zero', async () => {
+        const flush = jest.fn().mockResolvedValue({ inserted: 1 });
+        const batcher = new RuntimeEventBatcher({ flush, maxSize: 100, flushMs: 0 });
+
+        await expect(batcher.push({ eventId: 'immediate-event' })).resolves.toEqual({ inserted: 1 });
+        expect(flush).toHaveBeenCalledWith([{ eventId: 'immediate-event' }]);
+    });
 });

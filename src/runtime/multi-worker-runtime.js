@@ -162,6 +162,7 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             byWorker: {}
         }
     };
+    let usageBatchWorkersWithCapacity = 0;
     for (const [workerId, snapshot] of workerSnapshots.entries()) {
         result.requests.total += Number(snapshot?.requests?.total || 0);
         result.requests.success += Number(snapshot?.requests?.success || 0);
@@ -213,13 +214,12 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
                 result.usageEventBatch.queueCapacity,
                 Number(batch.queueCapacity || 0)
             );
-            if (result.usageEventBatch.byWorkerCount === undefined) result.usageEventBatch.byWorkerCount = 0;
             if (Number(batch.queueCapacity || 0) > 0) {
                 const available = Number(batch.availableCapacity || 0);
-                result.usageEventBatch.availableCapacity = result.usageEventBatch.byWorkerCount === 0
+                result.usageEventBatch.availableCapacity = usageBatchWorkersWithCapacity === 0
                     ? available
                     : Math.min(result.usageEventBatch.availableCapacity, available);
-                result.usageEventBatch.byWorkerCount += 1;
+                usageBatchWorkersWithCapacity += 1;
             }
             result.usageEventBatch.pollPaused ||= batch.pollPaused === true;
             result.usageEventBatch.lastBatchSize = Math.max(result.usageEventBatch.lastBatchSize, Number(batch.lastBatchSize || 0));
@@ -350,7 +350,6 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
     if (result.usageEventBatch.flushCount > 0) {
         result.usageEventBatch.averageBatchSize = result.usageEventBatch.totalBatchSize / result.usageEventBatch.flushCount;
     }
-    delete result.usageEventBatch.byWorkerCount;
     return result;
 }
 

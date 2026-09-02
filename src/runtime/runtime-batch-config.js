@@ -16,12 +16,12 @@ function hasValue(source, key) {
         && source[key] !== '';
 }
 
-function readInteger(source, keys, fallback, { min = 1, allowZero = false } = {}) {
+function readInteger(source, keys, fallback, { min = 1, allowZero = false, maximum = Number.MAX_SAFE_INTEGER } = {}) {
     for (const key of keys) {
         if (!hasValue(source, key)) continue;
         const value = Number(source[key]);
         const lowerBound = allowZero ? 0 : min;
-        if (Number.isInteger(value) && value >= lowerBound) return value;
+        if (Number.isInteger(value) && value >= lowerBound && value <= maximum) return value;
     }
     return fallback;
 }
@@ -71,7 +71,7 @@ export function resolveRuntimeBatchConfig({ env = process.env, config = {} } = {
         readNonNegative(config, ['USAGE_EVENT_BATCH_FLUSH_MS'], DEFAULTS.flushMs)
     );
     const queueDefault = Math.min(10_000, Math.max(1_000, appendBatchSize * 10));
-    const queueMax = readInteger(
+    const configuredQueueMax = readInteger(
         env,
         ['USAGE_EVENT_INGEST_QUEUE_MAX'],
         readInteger(config, ['USAGE_EVENT_INGEST_QUEUE_MAX'], queueDefault)
@@ -97,7 +97,7 @@ export function resolveRuntimeBatchConfig({ env = process.env, config = {} } = {
         projectionBatchSize,
         waitMs,
         flushMs,
-        queueMax: Math.max(appendBatchSize, queueMax),
+        queueMax: Math.min(10_000, Math.max(appendBatchSize, configuredQueueMax)),
         statusPollMs,
         claimIntervalMs
     };

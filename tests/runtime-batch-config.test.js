@@ -46,5 +46,10 @@ describe('runtime batch configuration', () => {
             flushMs: 1000,
             queueMax: 1000
         });
+
+        expect(resolveRuntimeBatchConfig({
+            env: { USAGE_EVENT_INGEST_QUEUE_MAX: '50000' },
+            config: { USAGE_EVENT_BATCH_SIZE: 500 }
+        }).queueMax).toBe(10000);
     });
 });

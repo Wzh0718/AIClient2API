@@ -63,6 +63,7 @@ export class RuntimeEventBatcher {
         this.entries = [];
         this.timer = null;
         this.retryTimer = null;
+        this.immediateScheduled = false;
         this.running = null;
         this.inFlightEntries = 0;
         this.activeEntries = [];
@@ -171,7 +172,16 @@ export class RuntimeEventBatcher {
     }
 
     _scheduleTimer(delay = this.flushMs, reason = 'timer') {
-        if (this.closed || this.closing || this.timer || this.retryTimer || delay <= 0 || this.entries.length === 0) return;
+        if (this.closed || this.closing || this.timer || this.retryTimer || this.entries.length === 0) return;
+        if (delay <= 0) {
+            if (this.immediateScheduled) return;
+            this.immediateScheduled = true;
+            Promise.resolve().then(() => {
+                this.immediateScheduled = false;
+                if (!this.closed && !this.closing && this.entries.length > 0) this._startFlush(reason);
+            });
+            return;
+        }
         this.timer = this.setTimeoutFn(() => {
             this.timer = null;
             this._startFlush(reason);
