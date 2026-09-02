@@ -5,6 +5,50 @@ function loadPotluckSource() {
     return fs.readFileSync(path.join(process.cwd(), 'static', 'potluck.html'), 'utf8').replace(/\r\n/g, '\n');
 }
 
+function extractBalancedBlock(source, marker) {
+    const start = source.indexOf(marker);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const firstBrace = source.indexOf('{', start);
+    let depth = 0;
+    for (let index = firstBrace; index < source.length; index += 1) {
+        if (source[index] === '{') depth += 1;
+        if (source[index] === '}') {
+            depth -= 1;
+            if (depth === 0) return source.slice(start, index + 1);
+        }
+    }
+    throw new Error(`Could not extract block for ${marker}`);
+}
+
+function loadKeyDetailHelpers() {
+    const source = loadPotluckSource();
+    const rangeBoundsSource = extractBalancedBlock(source, 'function getKeyDetailRangeBounds(range, key, requestedCustomRange)');
+    const summaryValidatorSource = extractBalancedBlock(source, 'function isCompleteKeyRangeSummary(summary)');
+    const coverageSource = extractBalancedBlock(source, 'function hasKeyDetailCoverageGap(key, rangeData, range)');
+    const getTodayDateKey = () => '2026-09-02';
+    const shiftDateKey = (dateKey, deltaDays) => {
+        const date = new Date(`${dateKey}T00:00:00Z`);
+        date.setUTCDate(date.getUTCDate() + deltaDays);
+        return date.toISOString().slice(0, 10);
+    };
+    return new Function(
+        'getTodayDateKey',
+        'shiftDateKey',
+        'currentCustomRange',
+        'currentRangeBounds',
+        'usageCount',
+        'usageTokens',
+        `${rangeBoundsSource}; ${summaryValidatorSource}; ${coverageSource}; return { getKeyDetailRangeBounds, isCompleteKeyRangeSummary, hasKeyDetailCoverageGap };`
+    )(
+        getTodayDateKey,
+        shiftDateKey,
+        { from: '2026-08-20', to: '2026-08-21' },
+        { from: '2026-01-15' },
+        entry => Number(entry?.requestCount || 0),
+        entry => Number(entry?.totalTokens || 0)
+    );
+}
+
 describe('API Potluck admin range and key detail UI source', () => {
     test('admin dashboard exposes a cumulative-default usage range switcher', () => {
         const source = loadPotluckSource();
@@ -38,6 +82,178 @@ describe('API Potluck admin range and key detail UI source', () => {
         expect(source).toContain('用户端视图');
         expect(source).toContain('范围内服务商');
         expect(source).toContain('范围内模型');
+    });
+
+    test('key detail loads a key-scoped range summary for every selected range', () => {
+        const source = loadPotluckSource();
+        const showStart = source.indexOf('async function showKeyDetail(keyId)');
+        const showEnd = source.indexOf('\n        function renderKeyDetailModal(key)', showStart);
+        const showBlock = source.slice(showStart, showEnd);
+
+        expect(source).toContain('function getKeyDetailRangeBounds(range, key, requestedCustomRange)');
+        expect(source).toContain("case 'today':");
+        expect(source).toContain("case '7d':");
+        expect(source).toContain("case '30d':");
+        expect(source).toContain("case 'total':");
+        expect(source).toContain("case 'custom':");
+        expect(showBlock).toContain('const detailRange = getKeyDetailRangeBounds(currentUsageRange, key, requestedCustomRange);');
+        expect(showBlock).toContain(
+            '`${API_BASE}/keys/${encodeURIComponent(keyId)}/range-stats?range=${encodeURIComponent(requestedRange)}&from=${encodeURIComponent(detailRange.from)}&to=${encodeURIComponent(detailRange.to)}&${getCostQuery(requestedConversionModel)}`'
+        );
+        expect(showBlock).not.toContain("if (currentUsageRange === 'custom')");
+        expect(showBlock).toContain('key._detailRangeSummary');
+    });
+
+    test('key detail validates complete range fields instead of treating missing fields as empty data', () => {
+        const source = loadPotluckSource();
+        const showStart = source.indexOf('async function showKeyDetail(keyId)');
+        const showEnd = source.indexOf('\n        function renderKeyDetailModal(key)', showStart);
+        const showBlock = source.slice(showStart, showEnd);
+
+        expect(source).toContain('function isCompleteKeyRangeSummary(summary)');
+        expect(source).toContain("['summary', 'providers', 'models', 'daily']");
+        expect(showBlock).toContain('isCompleteKeyRangeSummary(rangeData.keySummary)');
+        expect(showBlock).toContain('接口返回不完整');
+        expect(showBlock).toContain('renderKeyDetailRangeError(key,');
+        expect(showBlock).toContain('const resolvedDetailRange = {');
+        expect(showBlock).toContain('from: rangeData.from || detailRange.from');
+        expect(showBlock).toContain('to: rangeData.to || detailRange.to');
+        expect(showBlock).toContain('let loadedKey = null;');
+        expect(showBlock).toContain('loadedKey = result.data;');
+        expect(showBlock).toContain('if (loadedKey) renderKeyDetailRangeError(loadedKey,');
+        expect(source).toContain('function renderKeyDetailError(message, retryKeyId)');
+        expect(source).toContain('function renderKeyDetailRangeError(key, message, retryKeyId)');
+        expect(source).toContain('重试');
+    });
+
+    test('key detail treats uncovered dates with known key usage as an incomplete range', () => {
+        const source = loadPotluckSource();
+        const showStart = source.indexOf('async function showKeyDetail(keyId)');
+        const showEnd = source.indexOf('\n        function renderKeyDetailModal(key)', showStart);
+        const showBlock = source.slice(showStart, showEnd);
+
+        expect(source).toContain('function hasKeyDetailCoverageGap(key, rangeData, range)');
+        expect(showBlock).toContain('hasKeyDetailCoverageGap(key, rangeData, requestedRange)');
+        expect(showBlock).toContain('范围明细覆盖不完整');
+    });
+
+    test('key detail range bounds use Beijing date semantics and distinguish empty from incomplete summaries', () => {
+        const { getKeyDetailRangeBounds, isCompleteKeyRangeSummary, hasKeyDetailCoverageGap } = loadKeyDetailHelpers();
+        const key = { usageHistory: { '2026-08-01': {}, '2026-08-18': {} } };
+
+        expect(getKeyDetailRangeBounds('today', key)).toEqual({ from: '2026-09-02', to: '2026-09-02' });
+        expect(getKeyDetailRangeBounds('7d', key)).toEqual({ from: '2026-08-27', to: '2026-09-02' });
+        expect(getKeyDetailRangeBounds('30d', key)).toEqual({ from: '2026-08-04', to: '2026-09-02' });
+        expect(getKeyDetailRangeBounds('total', key)).toEqual({ from: '2026-01-15', to: '2026-09-02' });
+        expect(getKeyDetailRangeBounds('custom', key, { from: '2026-08-20', to: '2026-08-21' }))
+            .toEqual({ from: '2026-08-20', to: '2026-08-21' });
+
+        expect(isCompleteKeyRangeSummary({ summary: {}, providers: {}, models: {}, daily: {} })).toBe(true);
+        expect(isCompleteKeyRangeSummary({ summary: {}, providers: {}, daily: {} })).toBe(false);
+
+        const usedKey = {
+            createdAt: '2026-09-01T00:00:00.000Z',
+            usageHistory: { '2026-09-02': { summary: { requestCount: 1 } } }
+        };
+        expect(hasKeyDetailCoverageGap(usedKey, { missingDates: ['2026-09-02'] }, 'today')).toBe(true);
+        expect(hasKeyDetailCoverageGap(usedKey, { keySummary: null, missingDates: [] }, 'today')).toBe(true);
+        expect(hasKeyDetailCoverageGap(usedKey, { missingDates: ['2026-09-01'] }, 'today')).toBe(false);
+        expect(hasKeyDetailCoverageGap(usedKey, { missingDates: ['2026-08-01'] }, 'custom')).toBe(false);
+        expect(hasKeyDetailCoverageGap(usedKey, { missingDates: ['2026-08-01'] }, 'total')).toBe(false);
+        expect(hasKeyDetailCoverageGap(usedKey, { missingDates: ['2026-09-01'] }, 'custom')).toBe(false);
+        expect(hasKeyDetailCoverageGap(usedKey, { missingDates: ['2026-09-01'] }, 'total')).toBe(false);
+        expect(hasKeyDetailCoverageGap(
+            { ...usedKey, totalUsage: 12 },
+            { missingDates: ['2026-09-01'] },
+            'custom'
+        )).toBe(false);
+        expect(hasKeyDetailCoverageGap(
+            usedKey,
+            { keySummary: { daily: {} }, from: '2026-09-02', to: '2026-09-02' },
+            'today'
+        )).toBe(true);
+        expect(hasKeyDetailCoverageGap(
+            { createdAt: '2026-08-01T00:00:00.000Z', totalUsage: 12, usageHistory: { '2026-08-20': { summary: { requestCount: 1 } } } },
+            { missingDates: ['2026-08-20'] },
+            'custom'
+        )).toBe(true);
+        expect(hasKeyDetailCoverageGap(
+            { ...usedKey, totalUsage: 12, usageHistory: {} },
+            { missingDates: ['2026-09-01'] },
+            'total'
+        )).toBe(false);
+    });
+
+    test('key detail never renders the compact list cache as a detail fallback', () => {
+        const source = loadPotluckSource();
+        const showStart = source.indexOf('async function showKeyDetail(keyId)');
+        const showEnd = source.indexOf('\n        function renderKeyDetailModal(key)', showStart);
+        const showBlock = source.slice(showStart, showEnd);
+        const renderStart = source.indexOf('function renderKeyDetailModal(key)');
+        const renderEnd = source.indexOf('\n        function closeKeyDetailModal()', renderStart);
+        const renderBlock = source.slice(renderStart, renderEnd);
+
+        expect(showBlock).not.toContain('fallbackKey');
+        expect(showBlock).not.toContain('renderKeyDetailModal(fallbackKey)');
+        expect(showBlock).toContain('renderKeyDetailError');
+        expect(renderBlock).toContain('key._detailRangeSummary');
+        expect(renderBlock).toContain('getRangeRateMetrics(rangeSummary, currentUsageRange, key._detailRange)');
+        expect(renderBlock).not.toContain('buildKeyRangeSummaryFromLedger(key, currentUsageRange)');
+        expect(renderBlock).not.toContain('getCustomKeyRangeSummary(key)');
+    });
+
+    test('key detail rejects stale conversion-model responses and refreshes after a model switch', () => {
+        const source = loadPotluckSource();
+        const showStart = source.indexOf('async function showKeyDetail(keyId)');
+        const showEnd = source.indexOf('\n        function renderKeyDetailModal(key)', showStart);
+        const showBlock = source.slice(showStart, showEnd);
+        const loadStart = source.indexOf('async function loadData()');
+        const loadEnd = source.indexOf('\n        function renderCalendar(', loadStart);
+        const loadBlock = source.slice(loadStart, loadEnd);
+
+        expect(source).toContain('function getCostQuery(conversionModel = currentConversionModel)');
+        expect(showBlock).toContain('const requestedConversionModel = currentConversionModel;');
+        expect(showBlock).toContain('getCostQuery(requestedConversionModel)');
+        expect(showBlock).toContain('requestedConversionModel');
+        expect(loadBlock).toContain('if (currentDetailKeyId) showKeyDetail(currentDetailKeyId);');
+    });
+
+    test('key detail reloads after a failed custom-range change rolls the page back', () => {
+        const source = loadPotluckSource();
+        const start = source.indexOf('async function applyCustomRange()');
+        const end = source.indexOf('\n        function getUsageRangeLabel', start);
+        const block = source.slice(start, end);
+        const failureStart = block.indexOf('if (!loaded) {');
+        const failureEnd = block.indexOf("showToast('自定义时间范围加载失败", failureStart);
+        const failureBlock = block.slice(failureStart, failureEnd);
+
+        expect(block).toContain('currentUsageRange = previousRange;');
+        expect(failureBlock).toContain('if (currentDetailKeyId) showKeyDetail(currentDetailKeyId);');
+    });
+
+    test('key detail reloads after a failed conversion-model change rolls the page back', () => {
+        const source = loadPotluckSource();
+        const start = source.indexOf('async function setConversionModel(model)');
+        const end = source.indexOf('\n        function updateLimitModeView', start);
+        const block = source.slice(start, end);
+        const failureStart = block.indexOf('if (!loaded || !rangeLoaded) {');
+        const failureEnd = block.indexOf('setConversionLoading(false);', failureStart);
+        const failureBlock = block.slice(failureStart, failureEnd);
+
+        expect(failureBlock).toContain('currentConversionModel = previousModel;');
+        expect(failureBlock).toContain('if (currentDetailKeyId) showKeyDetail(currentDetailKeyId);');
+    });
+
+    test('range selection rolls back when the global range request fails', () => {
+        const source = loadPotluckSource();
+        const start = source.indexOf('async function setUsageRange(range)');
+        const end = source.indexOf('\n\n        function setLimitControl', start);
+        const block = source.slice(start, end);
+
+        expect(block).toContain('const previousRange = currentUsageRange;');
+        expect(block).toContain('const loaded = await refreshLedgerRangeStats(currentUsageRange, { force: true });');
+        expect(block).toContain('currentUsageRange = previousRange;');
+        expect(block).toContain("showToast('时间范围加载失败', 'error');");
     });
 
     test('admin provider distribution shows token share from the center provider view', () => {

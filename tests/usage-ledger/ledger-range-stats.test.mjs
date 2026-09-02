@@ -312,6 +312,116 @@ test('readLedgerRangeStats uses supplied SQLite key rows without rescanning ledg
   }
 });
 
+test('readLedgerRangeStats scans ledger rows for a target key instead of trusting incomplete SQLite preaggregates', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-range-'));
+  try {
+    const dailyDir = path.join(tmpDir, 'daily');
+    fs.mkdirSync(dailyDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dailyDir, 'usage-2026-01-01.jsonl'),
+      JSON.stringify(row({ date: '2026-01-01', keyHash: 'sha256:target', totalTokens: 100 })) + '\n'
+    );
+
+    const result = await readLedgerRangeStats({
+      ledgerDailyDir: dailyDir,
+      dates: ['2026-01-01'],
+      keyHashToId: new Map([
+        ['sha256:target', 'maki_target'],
+        ['sha256:other', 'maki_other'],
+      ]),
+      includeKeySummaries: true,
+      includeKeyModels: true,
+      targetKeyId: 'maki_target',
+      keySummaryRows: [row({ date: '2026-01-01', keyHash: 'sha256:other', totalTokens: 20 })],
+    });
+
+    assert.equal(result.keySummarySource, 'ledger-scan');
+    assert.equal(result.keySummaries.maki_target.summary.totalTokens, 100);
+    assert.equal(result.keySummaries.maki_target.models['gpt-5.5'].totalTokens, 100);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('readLedgerRangeStats supplements a target date when only SQLite has the target key rows', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-range-'));
+  try {
+    const dailyDir = path.join(tmpDir, 'daily');
+    fs.mkdirSync(dailyDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dailyDir, 'usage-2026-01-01.jsonl'),
+      JSON.stringify(row({ date: '2026-01-01', keyHash: 'sha256:other', totalTokens: 20 })) + '\n'
+    );
+
+    const result = await readLedgerRangeStats({
+      ledgerDailyDir: dailyDir,
+      dates: ['2026-01-01'],
+      keyHashToId: new Map([
+        ['sha256:target', 'maki_target'],
+        ['sha256:other', 'maki_other'],
+      ]),
+      includeKeySummaries: true,
+      includeKeyModels: true,
+      targetKeyId: 'maki_target',
+      keySummaryRows: [row({ date: '2026-01-01', keyHash: 'sha256:target', totalTokens: 80 })],
+    });
+
+    assert.equal(result.keySummaries.maki_target.summary.totalTokens, 80);
+    assert.equal(result.keySummaries.maki_target.models['gpt-5.5'].totalTokens, 80);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('target key range summaries keep model details across fixed and total ranges', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-range-'));
+  try {
+    const dailyDir = path.join(tmpDir, 'daily');
+    fs.mkdirSync(dailyDir, { recursive: true });
+    const targetRow = (date, totalTokens) => row({
+      date,
+      keyHash: 'sha256:target',
+      totalTokens,
+      model: date === '2026-07-22' ? 'gpt-5.4-mini' : 'gpt-5.5',
+    });
+    fs.writeFileSync(
+      path.join(dailyDir, 'usage-2026-07-18.jsonl'),
+      JSON.stringify(targetRow('2026-07-18', 100)) + '\n'
+    );
+    fs.writeFileSync(
+      path.join(dailyDir, 'usage-2026-07-22.jsonl'),
+      JSON.stringify(targetRow('2026-07-22', 50)) + '\n'
+    );
+
+    const now = new Date('2026-07-24T08:00:00.000Z');
+    const options = {
+      ledgerDailyDir: dailyDir,
+      now,
+      keyHashToId: new Map([['sha256:target', 'maki_target']]),
+      includeKeySummaries: true,
+      includeKeyModels: true,
+      targetKeyId: 'maki_target',
+      extraRows: [targetRow('2026-07-24', 25)],
+    };
+    const read = dates => readLedgerRangeStats({ ...options, dates });
+
+    const today = await read(['2026-07-24']);
+    assert.equal(today.keySummaries.maki_target.models['gpt-5.5'].totalTokens, 25);
+
+    const week = await read(['2026-07-18', '2026-07-22', '2026-07-24']);
+    assert.equal(week.keySummaries.maki_target.summary.totalTokens, 175);
+    assert.deepEqual(Object.keys(week.keySummaries.maki_target.models).sort(), ['gpt-5.4-mini', 'gpt-5.5']);
+
+    const month = await read(['2026-07-18', '2026-07-22', '2026-07-24']);
+    assert.equal(month.keySummaries.maki_target.summary.requestCount, 3);
+
+    const total = await read(['2026-07-18', '2026-07-22', '2026-07-24']);
+    assert.equal(total.keySummaries.maki_target.models['gpt-5.4-mini'].totalTokens, 50);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('resolveRangeDates total uses ledger directory contents plus today', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-range-'));
   try {

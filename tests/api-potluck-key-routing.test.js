@@ -219,6 +219,7 @@ describe('API Potluck key credential routing', () => {
             requestCount: 3,
             totalTokens: 100
         });
+        expect(rangeResponse.body.data.keySummaries[publicId]).not.toHaveProperty('models');
         expect(rangeResponse.body.data.keySummaries).not.toHaveProperty(created.id);
         expect(JSON.stringify(rangeResponse.body)).not.toContain(created.id);
 
@@ -234,7 +235,38 @@ describe('API Potluck key credential routing', () => {
             requestCount: 3,
             totalTokens: 100
         });
+        expect(keyRangeResponse.body.data.keySummary.models['gpt-5.5']).toMatchObject({
+            requestCount: 3,
+            totalTokens: 100
+        });
+        expect(keyRangeResponse.body.data.keySummary).toEqual(expect.objectContaining({
+            providers: expect.any(Object),
+            models: expect.any(Object),
+            daily: expect.any(Object)
+        }));
         expect(JSON.stringify(keyRangeResponse.body)).not.toContain(created.id);
+
+        const emptyKey = await keyManager.createKey('Empty Range', 1000);
+        const emptyPublicId = `sha256:${crypto.createHash('sha256').update(emptyKey.id).digest('hex').slice(0, 16)}`;
+        const emptyRangeResponse = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'GET',
+            `/api/potluck/keys/${encodeURIComponent(emptyPublicId)}/range-stats?from=${date}&to=${date}`,
+            undefined,
+            token
+        );
+        expect(emptyRangeResponse.statusCode).toBe(200);
+        expect(emptyRangeResponse.body.data.keySummary).toBeNull();
+
+        const fixedRangeResponse = await callPotluckRoute(
+            apiRoutes.handlePotluckApiRoutes,
+            'GET',
+            `/api/potluck/keys/${encodeURIComponent(publicId)}/range-stats?range=30d&from=2026-07-13&to=2026-08-11`,
+            undefined,
+            token
+        );
+        expect(fixedRangeResponse.statusCode).toBe(200);
+        expect(fixedRangeResponse.body.data.range).toBe('30d');
     });
 
     test('creates new keys with explicit whole-pool routing defaults', async () => {

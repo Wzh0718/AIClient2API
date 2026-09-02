@@ -316,6 +316,7 @@ export function listLedgerDates(ledgerDailyDir) {
 
 /**
  * 读取并聚合指定日期集合的 ledger 日文件。
+ * 目标 Key 查询必须扫描账本行，避免用不完整的 SQLite 预聚合覆盖目标明细。
  * @returns {{availableDates: string[], missingDates: string[], summary, providers, models, accounts, conversionModel, pricingVersion}}
  */
 export async function readLedgerRangeStats({
@@ -326,6 +327,7 @@ export async function readLedgerRangeStats({
     keyHashToId = null,
     includeKeySummaries = false,
     includeKeyModels = false,
+    targetKeyId = null,
     keyDailyLimit = 35,
     extraRows = [],
     keySummaryRows = []
@@ -366,9 +368,15 @@ export async function readLedgerRangeStats({
         .filter(result => result.available && result.rows.length > 0)
         .map(result => result.date);
     const useKeyPreaggregate = includeKeySummaries
+        && targetKeyId === null
         && Array.isArray(keySummaryRows)
         && keySummaryRows.length > 0
         && ledgerDatesWithRows.every(date => preaggregateDates.has(date));
+    const targetKeyHashes = targetKeyId !== null && keyHashToId instanceof Map
+        ? new Set([...keyHashToId.entries()]
+            .filter(([, mappedKeyId]) => mappedKeyId === targetKeyId)
+            .map(([keyHash]) => keyHash))
+        : null;
     const aggregator = createLedgerRangeAggregator({
         conversionModel,
         keyHashToId,
@@ -379,7 +387,14 @@ export async function readLedgerRangeStats({
     for (const result of fileResults) {
         if (result.available) {
             const date = result.date;
-            result.rows.forEach(row => aggregator.addRow(row));
+            let rows = result.rows || [];
+            if (targetKeyHashes?.size > 0 && !rows.some(row => targetKeyHashes.has(row?.keyHash))) {
+                const supplementalRows = (keySummaryRows || []).filter(row => (
+                    row?.date === date && targetKeyHashes.has(row?.keyHash)
+                ));
+                if (supplementalRows.length > 0) rows = rows.concat(supplementalRows);
+            }
+            rows.forEach(row => aggregator.addRow(row));
             availableDates.push(date);
         } else {
             const date = result.date;

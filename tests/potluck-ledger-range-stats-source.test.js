@@ -43,12 +43,24 @@ describe('API Potluck ledger range stats surface', () => {
 
     test('range-stats route queries SQLite once for range key summaries', () => {
         const source = loadSource('src/plugins/api-potluck/api-routes.js');
+        const ledgerSource = loadSource('src/plugins/api-potluck/ledger-range-stats.js');
         expect(source).toContain('const sqliteRows = readSqliteRowsForDates(sqlitePath, includeKeySummaries ? dates : missingCandidates, store);');
         expect(source).toContain('keySummaryRows = sqliteRows;');
         expect(source).toContain('keySummaryRows');
         expect(source).toContain('performance.now()');
         expect(source).toContain('sqliteMs=');
         expect(source).toContain('aggregationMs=');
+        expect(source).toContain('targetKeyId: options.targetKeyId || null');
+        expect(ledgerSource).toContain('targetKeyId === null');
+    });
+
+    test('key-scoped range stats preserves fixed range semantics outside custom date validation', () => {
+        const source = loadSource('src/plugins/api-potluck/api-routes.js');
+
+        expect(source).toContain("const requestedRange = url.searchParams.get('range');");
+        expect(source).toContain("const detailRange = ['total', '30d', '7d', 'today'].includes(requestedRange)");
+        expect(source).toContain("from: detailRange === 'custom' ? url.searchParams.get('from') : undefined");
+        expect(source).toContain("targetKeyId: keyId");
     });
 
     test('admin dashboard prefers ledger range stats without verbose data-source title', () => {

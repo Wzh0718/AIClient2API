@@ -922,6 +922,17 @@
             font-size: 13px;
             padding: 10px 0;
         }
+        .detail-error {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            padding: 12px;
+            border: 1px solid rgba(239, 68, 68, 0.25);
+            border-radius: var(--radius-md);
+            background: rgba(239, 68, 68, 0.06);
+        }
+        .detail-error .detail-empty { padding: 0; color: var(--danger-color); }
         .calendar-day.out-of-range {
             opacity: 0.28;
         }
@@ -1737,6 +1748,7 @@
         const ACTUAL_VALUE_MODE = 'actual';
         let currentConversionModel = ACTUAL_VALUE_MODE;
         let currentDetailKeyId = null;
+        let detailRequestSerial = 0;
         let filterRequestSerial = 0;
         let filterDebounceTimer = null;
         let systemConfig = { defaultDailyLimit: 500 };
@@ -1847,8 +1859,11 @@
             if (!cost) return '';
             return `<span class="cost-inline">${formatUsd(getDisplayCostUsd(cost))}</span>`;
         }
-        function getCostQuery() {
-            return `conversionModel=${encodeURIComponent(currentConversionModel)}`;
+        function getCostQuery(conversionModel = currentConversionModel) {
+            if (conversionModel === currentConversionModel) {
+                return `conversionModel=${encodeURIComponent(currentConversionModel)}`;
+            }
+            return `conversionModel=${encodeURIComponent(conversionModel)}`;
         }
         function populateConversionModels(pricing) {
             const select = document.getElementById('conversionModelSelect');
@@ -1989,6 +2004,7 @@
                     renderCalendar(currentStats.usageHistory || {});
                 }
                 applyFilterAndSort();
+                if (currentDetailKeyId) showKeyDetail(currentDetailKeyId);
                 showToast('自定义时间范围加载失败', 'error');
                 return;
             }
@@ -2222,8 +2238,8 @@
             return buildRangeMetricsFromSummary(rangeSummary);
         }
 
-        function getRangeRateSeconds(range = currentUsageRange, rangeSummary = {}) {
-            const ledgerStats = getLedgerRangeStatsFor(range);
+        function getRangeRateSeconds(range = currentUsageRange, rangeSummary = {}, rangeBounds = null) {
+            const ledgerStats = rangeBounds ? null : getLedgerRangeStatsFor(range);
             const summaryDates = Array.isArray(rangeSummary?.dates) ? rangeSummary.dates.filter(Boolean).sort() : [];
             const ledgerDates = [
                 ...(ledgerStats?.availableDates || []),
@@ -2232,7 +2248,10 @@
             const todayKey = getTodayDateKey();
             let from = todayKey;
             let to = todayKey;
-            if (range === 'custom' && currentCustomRange.from && currentCustomRange.to) {
+            if (rangeBounds?.from && rangeBounds?.to) {
+                from = rangeBounds.from;
+                to = rangeBounds.to;
+            } else if (range === 'custom' && currentCustomRange.from && currentCustomRange.to) {
                 from = currentCustomRange.from;
                 to = currentCustomRange.to;
             } else if (range === '7d') {
@@ -2250,9 +2269,9 @@
             return Math.max(1, (endMs - startMs) / 1000);
         }
 
-        function getRangeRateMetrics(rangeSummary = {}, range = currentUsageRange) {
+        function getRangeRateMetrics(rangeSummary = {}, range = currentUsageRange, rangeBounds = null) {
             const requestCount = Number(rangeSummary?.summary?.requestCount || 0);
-            const seconds = getRangeRateSeconds(range, rangeSummary);
+            const seconds = getRangeRateSeconds(range, rangeSummary, rangeBounds);
             const qps = requestCount / seconds;
             return {
                 qps,
@@ -2415,6 +2434,7 @@
                 await refreshLedgerRangeStats(currentUsageRange, { force: true });
                 // 首次加载也要渲染日历；切换时间范围时 setUsageRange 会再次触发这里。
                 renderCalendar(currentStats?.usageHistory || {});
+                if (currentDetailKeyId) showKeyDetail(currentDetailKeyId);
                 return true;
             } catch (error) {
                 showToast('加载失败', 'error');
@@ -3125,6 +3145,9 @@
         }
 
         async function setUsageRange(range) {
+            const previousRange = currentUsageRange;
+            const previousCustomRange = { ...currentCustomRange };
+            const previousLedgerRangeStats = ledgerRangeStats;
             currentUsageRange = ['total', '30d', '7d', 'today'].includes(range) ? range : 'total';
             closeCustomRangePanel();
             updateUsageRangeButtons();
@@ -3137,7 +3160,21 @@
                 }
                 renderCalendar(currentStats.usageHistory || {});
             }
-            await refreshLedgerRangeStats(currentUsageRange, { force: true });
+            const loaded = await refreshLedgerRangeStats(currentUsageRange, { force: true });
+            if (!loaded) {
+                currentUsageRange = previousRange;
+                currentCustomRange = previousCustomRange;
+                ledgerRangeStats = previousLedgerRangeStats;
+                updateUsageRangeButtons();
+                if (currentStats) {
+                    renderUsageHistory(currentStats.usageHistory || {}, currentUsageRange);
+                    renderCalendar(currentStats.usageHistory || {});
+                }
+                applyFilterAndSort();
+                if (currentDetailKeyId) showKeyDetail(currentDetailKeyId);
+                showToast('时间范围加载失败', 'error');
+                return;
+            }
             applyFilterAndSort();
 
             if (currentDetailKeyId) {
@@ -3166,10 +3203,12 @@
             currentConversionModel = nextModel;
             setConversionLoading(true);
             const loaded = await loadData();
-            if (!loaded) {
+            const rangeLoaded = Boolean(getLedgerRangeStatsFor(currentUsageRange));
+            if (!loaded || !rangeLoaded) {
                 currentConversionModel = previousModel;
                 const select = document.getElementById('conversionModelSelect');
                 if (select) select.value = previousModel;
+                if (currentDetailKeyId) showKeyDetail(currentDetailKeyId);
             }
             setConversionLoading(false);
         }
@@ -3513,6 +3552,150 @@
             }
         }
 
+        function getKeyDetailRangeBounds(range, key, requestedCustomRange) {
+            requestedCustomRange = requestedCustomRange || currentCustomRange;
+            const todayKey = getTodayDateKey();
+            switch (range) {
+                case 'today':
+                    return { from: todayKey, to: todayKey };
+                case '7d':
+                    return { from: shiftDateKey(todayKey, -6), to: todayKey };
+                case '30d':
+                    return { from: shiftDateKey(todayKey, -29), to: todayKey };
+                case 'total': {
+                    const historyDates = Object.keys(key?.usageHistory || {}).sort();
+                    return {
+                        from: currentRangeBounds.from || historyDates[0] || todayKey,
+                        to: todayKey
+                    };
+                }
+                case 'custom':
+                    return {
+                        from: requestedCustomRange?.from || '',
+                        to: requestedCustomRange?.to || ''
+                    };
+                default:
+                    return { from: todayKey, to: todayKey };
+            }
+        }
+
+        function isCompleteKeyRangeSummary(summary) {
+            if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return false;
+            return ['summary', 'providers', 'models', 'daily'].every(field => {
+                const value = summary[field];
+                return value && typeof value === 'object' && !Array.isArray(value);
+            });
+        }
+
+        function normalizeKeyDetailRangeSummary(summary, rangeData = {}) {
+            const daily = {};
+            Object.entries(summary?.daily || {}).forEach(([date, usage]) => {
+                daily[date] = { summary: usage };
+            });
+            return {
+                dates: Object.keys(daily).sort(),
+                summary: summary?.summary || createUsageSummaryBucket(),
+                providers: summary?.providers || {},
+                models: summary?.models || {},
+                daily,
+                dataSource: rangeData?.source || 'key-range-stats'
+            };
+        }
+
+        function hasKeyDetailCoverageGap(key, rangeData, range) {
+            const missingDates = Array.isArray(rangeData?.missingDates)
+                ? rangeData.missingDates.filter(Boolean)
+                : [];
+
+            const createdAtMs = Date.parse(key?.createdAt || '');
+            const createdDate = Number.isFinite(createdAtMs)
+                ? new Date(createdAtMs + (8 * 60 * 60 * 1000)).toISOString().slice(0, 10)
+                : '';
+            const history = key?.usageHistory || {};
+            const fallbackRange = getKeyDetailRangeBounds(range, key);
+            const detailRange = {
+                from: rangeData?.from || fallbackRange.from,
+                to: rangeData?.to || fallbackRange.to
+            };
+            const hasUsage = day => {
+                const buckets = [
+                    day?.summary,
+                    ...Object.values(day?.models || {}),
+                    ...Object.values(day?.providers || {})
+                ];
+                return buckets.some(bucket => usageCount(bucket) > 0 || usageTokens(bucket) > 0);
+            };
+            const historyUsageDates = Object.entries(history)
+                .filter(([date, day]) => date >= detailRange.from && date <= detailRange.to && hasUsage(day))
+                .map(([date]) => date);
+            const keySummary = rangeData?.keySummary;
+            if (keySummary === null && historyUsageDates.length > 0) return true;
+            if (keySummary && historyUsageDates.some(date => !Object.prototype.hasOwnProperty.call(keySummary.daily || {}, date))) {
+                return true;
+            }
+            if (missingDates.length === 0) return false;
+
+            return missingDates.some(date => {
+                if (createdDate && date < createdDate) return false;
+                const day = history[date];
+                if (!day) return false;
+                return hasUsage(day);
+            });
+        }
+
+        function isCurrentKeyDetailRequest(requestSerial, keyId, range, requestedCustomRange, requestedConversionModel) {
+            return requestSerial === detailRequestSerial
+                && currentDetailKeyId === keyId
+                && currentUsageRange === range
+                && currentConversionModel === requestedConversionModel
+                && (range !== 'custom'
+                    || (currentCustomRange.from === requestedCustomRange.from
+                        && currentCustomRange.to === requestedCustomRange.to));
+        }
+
+        function renderKeyDetailError(message, retryKeyId) {
+            retryKeyId = retryKeyId || currentDetailKeyId;
+            const body = document.getElementById('keyDetailBody');
+            if (!body) return;
+            const safeKeyId = retryKeyId ? escapeHtml(String(retryKeyId)) : '';
+            const retryMarkup = safeKeyId
+                ? `<button class="btn btn-secondary btn-sm" type="button" onclick="showKeyDetail('${safeKeyId}')">重试</button>`
+                : '';
+            body.innerHTML = `
+                <div class="detail-error" role="alert" aria-live="polite">
+                    <div class="detail-empty">${escapeHtml(message || '详情加载失败')}</div>
+                    ${retryMarkup}
+                </div>
+            `;
+        }
+
+        function renderKeyDetailRangeError(key, message, retryKeyId) {
+            retryKeyId = retryKeyId || key?.id || currentDetailKeyId;
+            const body = document.getElementById('keyDetailBody');
+            if (!body) return;
+            const maskedKey = key?.maskedKey || `${String(key?.id || '').substring(0, 12)}...${String(key?.id || '').slice(-4)}`;
+            const statusText = key?.enabled ? '启用' : '禁用';
+            const rangeLabel = getUsageRangeLabel(currentUsageRange);
+            const safeKeyId = retryKeyId ? escapeHtml(String(retryKeyId)) : '';
+            const retryMarkup = safeKeyId
+                ? `<button class="btn btn-secondary btn-sm" type="button" onclick="showKeyDetail('${safeKeyId}')">重试</button>`
+                : '';
+            body.innerHTML = `
+                <div class="detail-meta">
+                    <span>用户端视图：<strong>${escapeHtml(key?.name || '未命名 Key')}</strong></span>
+                    <span>Key：<strong>${escapeHtml(maskedKey)}</strong></span>
+                    <span>状态：<strong>${statusText}</strong></span>
+                    <span>最后调用：<strong>${formatTime(key?.lastUsedAt)}</strong></span>
+                    <span>创建时间：<strong>${formatTime(key?.createdAt)}</strong></span>
+                    <span>当前范围：<strong>${rangeLabel}</strong></span>
+                </div>
+                <div class="detail-error" role="alert" aria-live="polite">
+                    <div class="detail-empty">${escapeHtml(message || '范围明细加载失败')}</div>
+                    ${retryMarkup}
+                </div>
+            `;
+        }
+
         function renderKeyDetailDistribution(data = {}) {
             const sorted = Object.entries(data)
                 .sort(([, a], [, b]) => usageTokens(b) - usageTokens(a))
@@ -3554,50 +3737,82 @@
         }
 
         async function showKeyDetail(keyId) {
+            const requestSerial = ++detailRequestSerial;
+            const requestedRange = currentUsageRange;
+            const requestedCustomRange = { ...currentCustomRange };
+            const requestedConversionModel = currentConversionModel;
             currentDetailKeyId = keyId;
             document.getElementById('keyDetailBody').innerHTML = '<div class="detail-empty">正在加载...</div>';
             openModal('keyDetailModal');
+            let loadedKey = null;
 
-            const result = await apiRequest(`${API_BASE}/keys/${encodeURIComponent(keyId)}?${getCostQuery()}`);
-            if (result && result.success) {
-                const key = result.data;
-                if (currentUsageRange === 'custom') {
-                    const rangeResult = await apiRequest(
-                        `${API_BASE}/keys/${encodeURIComponent(keyId)}/range-stats?from=${encodeURIComponent(currentCustomRange.from)}&to=${encodeURIComponent(currentCustomRange.to)}&${getCostQuery()}`
-                    );
-                    if (rangeResult?.success) {
-                        key._customRangeSummary = buildCustomKeyRangeSummary(
-                            key,
-                            rangeResult.data.keySummary,
-                            rangeResult.data
-                        );
-                    } else {
-                        showToast('Key 长期明细加载失败，已显示可用摘要', 'error');
-                    }
+            const isCurrent = () => isCurrentKeyDetailRequest(
+                requestSerial,
+                keyId,
+                requestedRange,
+                requestedCustomRange,
+                requestedConversionModel
+            );
+
+            try {
+                const result = await apiRequest(`${API_BASE}/keys/${encodeURIComponent(keyId)}?${getCostQuery(requestedConversionModel)}`);
+                if (!isCurrent()) return;
+                if (!result?.success || !result.data || typeof result.data !== 'object') {
+                    renderKeyDetailError(result?.error?.message || 'Key 详情加载失败', keyId);
+                    return;
                 }
+
+                const key = result.data;
+                loadedKey = result.data;
+                const detailRange = getKeyDetailRangeBounds(currentUsageRange, key, requestedCustomRange);
+                if (!detailRange.from || !detailRange.to) {
+                    renderKeyDetailError('当前详情范围无效，请重新选择范围', keyId);
+                    return;
+                }
+
+                const rangeResult = await apiRequest(
+                    `${API_BASE}/keys/${encodeURIComponent(keyId)}/range-stats?range=${encodeURIComponent(requestedRange)}&from=${encodeURIComponent(detailRange.from)}&to=${encodeURIComponent(detailRange.to)}&${getCostQuery(requestedConversionModel)}`
+                );
+                if (!isCurrent()) return;
+                if (!rangeResult?.success) {
+                    renderKeyDetailRangeError(key, rangeResult?.error?.message || '范围明细加载失败', keyId);
+                    return;
+                }
+
+                const rangeData = rangeResult.data || {};
+                if (hasKeyDetailCoverageGap(key, rangeData, requestedRange)) {
+                    renderKeyDetailRangeError(key, '范围明细覆盖不完整，请重试', keyId);
+                    return;
+                }
+                if (rangeData.keySummary !== null && !isCompleteKeyRangeSummary(rangeData.keySummary)) {
+                    renderKeyDetailRangeError(key, '范围明细接口返回不完整，请重试', keyId);
+                    return;
+                }
+
+                const resolvedDetailRange = {
+                    from: rangeData.from || detailRange.from,
+                    to: rangeData.to || detailRange.to
+                };
+                key._detailRange = resolvedDetailRange;
+                key._detailRangeSummary = normalizeKeyDetailRangeSummary(rangeData.keySummary, rangeData);
                 renderKeyDetailModal(key);
-                return;
+            } catch (error) {
+                if (!isCurrent()) return;
+                if (loadedKey) renderKeyDetailRangeError(loadedKey, error?.message || '范围明细加载失败', keyId);
+                else renderKeyDetailError(error?.message || '详情加载失败', keyId);
             }
-
-            const fallbackKey = allKeys.find(key => key.id === keyId);
-            if (fallbackKey) {
-                renderKeyDetailModal(fallbackKey);
-                showToast('详情接口读取失败，已显示列表缓存', 'error');
-                return;
-            }
-
-            document.getElementById('keyDetailBody').innerHTML = '<div class="detail-empty">未找到该 Key</div>';
         }
 
         function renderKeyDetailModal(key) {
             currentDetailKeyId = key.id;
             const rangeLabel = getUsageRangeLabel(currentUsageRange);
-            const rangeSummary = currentUsageRange === 'custom'
-                ? getCustomKeyRangeSummary(key)
-                : (buildKeyRangeSummaryFromLedger(key, currentUsageRange)
-                    || summarizeUsageHistoryForRange(key.usageHistory || {}, currentUsageRange));
-            const rangeMetrics = getKeyRangeMetrics(key, currentUsageRange);
-            const rangeRate = getRangeRateMetrics(rangeSummary, currentUsageRange);
+            const rangeSummary = key._detailRangeSummary;
+            if (!rangeSummary) {
+                renderKeyDetailError('范围明细尚未加载，请重试', key.id);
+                return;
+            }
+            const rangeMetrics = buildRangeMetricsFromSummary(rangeSummary.summary);
+            const rangeRate = getRangeRateMetrics(rangeSummary, currentUsageRange, key._detailRange);
             const maskedKey = key.maskedKey || `${key.id.substring(0, 12)}...${key.id.substring(key.id.length - 4)}`;
             const dailyLimit = Number(key.dailyLimit || 0);
             const isUnlimited = dailyLimit <= 0;
@@ -3648,7 +3863,7 @@
                     </div>
                     <div class="detail-section">
                         <h4><i class="fas fa-calendar-day"></i> 最近用量</h4>
-                        ${renderKeyDetailDailyUsage(currentUsageRange === 'custom' ? rangeSummary.daily : (key.usageHistory || {}))}
+                        ${renderKeyDetailDailyUsage(rangeSummary.daily)}
                     </div>
                     <div class="detail-section">
                         <h4><i class="fas fa-gauge-high"></i> 峰值速率</h4>

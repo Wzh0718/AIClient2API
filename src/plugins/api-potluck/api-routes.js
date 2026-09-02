@@ -915,6 +915,7 @@ async function loadLedgerRangeStatsForRange(range, conversionModel, options = {}
         keyHashToId,
         includeKeySummaries,
         includeKeyModels: Boolean(options.targetKeyId),
+        targetKeyId: options.targetKeyId || null,
         keyDailyLimit: options.targetKeyId ? Number.POSITIVE_INFINITY : 35,
         extraRows,
         keySummaryRows
@@ -1366,9 +1367,14 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 }
                 const url = new URL(req.url || '', 'http://localhost');
                 const conversionModel = url.searchParams.get('conversionModel') || undefined;
-                const data = await loadLedgerRangeStatsForRange('custom', conversionModel, {
-                    from: url.searchParams.get('from'),
-                    to: url.searchParams.get('to'),
+                // 固定范围交给服务端按北京时间解析；不带 range 时兼容原有 from/to 自定义调用。
+                const requestedRange = url.searchParams.get('range');
+                const detailRange = ['total', '30d', '7d', 'today'].includes(requestedRange)
+                    ? requestedRange
+                    : 'custom';
+                const data = await loadLedgerRangeStatsForRange(detailRange, conversionModel, {
+                    from: detailRange === 'custom' ? url.searchParams.get('from') : undefined,
+                    to: detailRange === 'custom' ? url.searchParams.get('to') : undefined,
                     targetKeyId: keyId
                 });
                 sendJson(res, 200, {
