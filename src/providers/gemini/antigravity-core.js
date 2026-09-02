@@ -21,6 +21,7 @@ import { getProviderPoolManager } from '../../services/service-manager.js';
 import { MODEL_PROVIDER } from '../../utils/common.js';
 import { normalizeAntigravityToolConfig } from './antigravity-tool-config.js';
 import { classifyProviderInitializationError, hashDiagnosticIdentifier } from '../../utils/gemini-diagnostics.js';
+import { upstreamErrorLogSampler } from '../../utils/upstream-error-sampler.js';
 
 // --- Constants ---
 const CREDENTIALS_DIR = '.antigravity';
@@ -1736,7 +1737,17 @@ export class AntigravityApiService {
             // 检查是否为可重试的网络错误
             const isNetworkError = isRetryableNetworkError(error);
             
-            logger.error(`[Antigravity API] Error calling (Status: ${status}, Code: ${errorCode}):`, error.message);
+            const transientLogDecision = upstreamErrorLogSampler.record({
+                scope: 'Antigravity API',
+                providerType: MODEL_PROVIDER.ANTIGRAVITY,
+                model: body?.model || body?.modelName || method,
+                status
+            });
+            if (transientLogDecision.log) {
+                logger.error(`[Antigravity API] Error calling (Status: ${status}, Code: ${errorCode}):`, error.message);
+            } else if (transientLogDecision.summary) {
+                logger.warn(`[Antigravity API] transient error summary model=${body?.model || body?.modelName || method} count=${transientLogDecision.count}`);
+            }
 
             if ((status === 401) && !isRetry) {
                 logger.info('[Antigravity API] Received 401 Unauthorized. Triggering background refresh via PoolManager...');
@@ -1762,7 +1773,7 @@ export class AntigravityApiService {
                 const retryAfter = getRetryAfterMs(error);
                 if (retryAfter !== null) {
                     await normalizeProviderErrorMessage(error, { status: 429, context: 'callApi' });
-                    logger.warn(`[Antigravity API] Received 429 with Retry-After: ${retryAfter}ms. Throwing to upper layer.`);
+                    if (transientLogDecision.log) logger.warn(`[Antigravity API] Received 429 with Retry-After: ${retryAfter}ms. Throwing to upper layer.`);
                     throw error;
                 }
                 if (baseURLIndex + 1 < this.baseURLs.length) {
@@ -1891,7 +1902,17 @@ export class AntigravityApiService {
             // 检查是否为可重试的网络错误
             const isNetworkError = isRetryableNetworkError(error);
 
-            logger.error(`[Antigravity API] Error during stream (Status: ${status}, Code: ${errorCode}):`, error.message);
+            const transientLogDecision = upstreamErrorLogSampler.record({
+                scope: 'Antigravity API stream',
+                providerType: MODEL_PROVIDER.ANTIGRAVITY,
+                model: body?.model || body?.modelName || method,
+                status
+            });
+            if (transientLogDecision.log) {
+                logger.error(`[Antigravity API] Error during stream (Status: ${status}, Code: ${errorCode}):`, error.message);
+            } else if (transientLogDecision.summary) {
+                logger.warn(`[Antigravity API stream] transient error summary model=${body?.model || body?.modelName || method} count=${transientLogDecision.count}`);
+            }
 
             // 已经产出内容后禁止 provider 内部重试，避免重复生成或拼接错位。
             if (hasYielded) {
@@ -1923,7 +1944,7 @@ export class AntigravityApiService {
                 const retryAfter = getRetryAfterMs(error);
                 if (retryAfter !== null) {
                     await normalizeProviderErrorMessage(error, { status: 429, context: 'stream' });
-                    logger.warn(`[Antigravity API] Received 429 with Retry-After: ${retryAfter}ms during stream. Throwing to upper layer.`);
+                    if (transientLogDecision.log) logger.warn(`[Antigravity API] Received 429 with Retry-After: ${retryAfter}ms during stream. Throwing to upper layer.`);
                     throw error;
                 }
                 if (baseURLIndex + 1 < this.baseURLs.length) {

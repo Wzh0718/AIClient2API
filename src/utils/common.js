@@ -39,6 +39,9 @@ import {
 } from './gemini-diagnostics.js';
 import { getCachedModelList } from '../services/model-list-cache.js';
 import { hasCodexRetryBudget } from '../providers/openai/codex-retry-policy.js';
+import { UpstreamErrorLogSampler } from './upstream-error-sampler.js';
+
+const upstreamErrorLogSampler = new UpstreamErrorLogSampler();
 
 function isGeminiDiagnosticsProvider(providerType) {
     return providerType === MODEL_PROVIDER.GEMINI_CLI || providerType === MODEL_PROVIDER.ANTIGRAVITY;
@@ -283,6 +286,12 @@ function normalizeAntigravityCapacityExhaustion(error, providerType, requestedMo
         error.retryAfterSeconds = Math.ceil(cooldownMs / 1000);
     }
     return true;
+}
+
+function isTerminalAntigravityModelUnavailable(error, providerType) {
+    return providerType === MODEL_PROVIDER.ANTIGRAVITY
+        && (error?.code === 'ALL_MODELS_UNAVAILABLE'
+            || (error?.quotaScope === 'model' && error?.code === 'QUEUE_WAIT_TIMEOUT'));
 }
 
 function getCodexRetryAuditFields(config, error) {
@@ -765,9 +774,22 @@ export function getSafeUpstreamResponseSummary(error) {
     };
 }
 
-function logUpstreamResponse(error, scope) {
+function getUpstreamErrorLogDecision(error, scope, providerType = null, model = null) {
+    return upstreamErrorLogSampler.record({
+        scope,
+        providerType: providerType || error?.providerType || 'unknown',
+        model: model || error?.model || 'unknown',
+        status: getErrorStatusCode(error)
+    });
+}
+
+function logUpstreamResponse(error, scope, providerType = null, model = null, decision = null) {
+    const logDecision = decision || getUpstreamErrorLogDecision(error, scope, providerType, model);
+    if (!logDecision.log) return logDecision;
     const summary = getSafeUpstreamResponseSummary(error);
     if (summary) logger.error(`[${scope}] Upstream response: ${JSON.stringify(summary)}`);
+    if (logDecision.summary) logger.warn(`[${scope}] transient upstream error summary count=${logDecision.count} provider=${providerType || 'unknown'} model=${model || 'unknown'}`);
+    return logDecision;
 }
 
 function getCodexRateLimitCooldownRecoveryTime(error, config = {}, now = Date.now()) {
@@ -1874,8 +1896,9 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         });
 
     }  catch (error) {
-        logger.error('\n[Server] Error during stream processing:', error.stack);
-        logUpstreamResponse(error, 'Server');
+        const upstreamLogDecision = getUpstreamErrorLogDecision(error, 'Server', toProvider, model);
+        if (upstreamLogDecision.log) logger.error('\n[Server] Error during stream processing:', error.stack);
+        logUpstreamResponse(error, 'Server', toProvider, model, upstreamLogDecision);
 
         if (error.recordProviderForNextRequest && pooluuid && CONFIG?._codexOverloadFailoverKey) {
             codexOverloadFailoverStore.recordFailure(CONFIG._codexOverloadFailoverKey, pooluuid);
@@ -1912,9 +1935,18 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         
         // 检查是否应该跳过错误计数（用于 429/5xx 等需要直接切换凭证的情况）
         const isAntigravityTransientCapacity = isAntigravityTransientCapacityError(error, toProvider);
-        const skipErrorCount = error.skipErrorCount === true || isAntigravityTransientCapacity;
+        const isTerminalAntigravityUnavailable = isTerminalAntigravityModelUnavailable(error, toProvider);
+        // Antigravity request/model errors must not quarantine the whole OAuth
+        // credential; model capacity is tracked separately at model scope.
+        const skipErrorCount = error.skipErrorCount === true
+            || isAntigravityTransientCapacity
+            || toProvider === MODEL_PROVIDER.ANTIGRAVITY;
         // 检查是否应该切换凭证（用于 429/5xx/402/403 等情况）
-        const shouldSwitchCredential = error.shouldSwitchCredential === true || isAntigravityTransientCapacity;
+        const shouldSwitchCredential = !isTerminalAntigravityUnavailable
+            && (error.shouldSwitchCredential === true || isAntigravityTransientCapacity);
+        if (isTerminalAntigravityUnavailable) {
+            providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
+        }
         
         // 检查凭证是否已在底层被标记为不健康（避免重复标记）
         let credentialMarkedUnhealthy = error.credentialMarkedUnhealthy === true;
@@ -1960,7 +1992,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         
         // 凭证已被标记为不健康后，尝试切换到新凭证重试
         // 不再依赖状态码判断，只要凭证被标记不健康且可以重试，就尝试切换
-        if (credentialMarkedUnhealthy && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
+        if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
             const isCodexTransient = isCodexTransientCredentialError(error);
             const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity;
             if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
@@ -2082,7 +2114,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             }
         }
 
-        if (!anyDataSent) {
+        if (!anyDataSent && !isTerminalAntigravityUnavailable) {
             try {
                 const fallback = await tryTemporaryRouteFallback(retryContext);
                 if (fallback?.service) {
@@ -2272,8 +2304,9 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             accountEmail
         });
     } catch (error) {
-        logger.error('\n[Server] Error during unary processing:', error.stack);
-        logUpstreamResponse(error, 'Server');
+        const upstreamLogDecision = getUpstreamErrorLogDecision(error, 'Server', toProvider, model);
+        if (upstreamLogDecision.log) logger.error('\n[Server] Error during unary processing:', error.stack);
+        logUpstreamResponse(error, 'Server', toProvider, model, upstreamLogDecision);
 
         if (error.recordProviderForNextRequest && pooluuid && CONFIG?._codexOverloadFailoverKey) {
             codexOverloadFailoverStore.recordFailure(CONFIG._codexOverloadFailoverKey, pooluuid);
@@ -2285,9 +2318,18 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         
         // 检查是否应该跳过错误计数（用于 429/5xx 等需要直接切换凭证的情况）
         const isAntigravityTransientCapacity = isAntigravityTransientCapacityError(error, toProvider);
-        const skipErrorCount = error.skipErrorCount === true || isAntigravityTransientCapacity;
+        const isTerminalAntigravityUnavailable = isTerminalAntigravityModelUnavailable(error, toProvider);
+        // Antigravity request/model errors must not quarantine the whole OAuth
+        // credential; model capacity is tracked separately at model scope.
+        const skipErrorCount = error.skipErrorCount === true
+            || isAntigravityTransientCapacity
+            || toProvider === MODEL_PROVIDER.ANTIGRAVITY;
         // 检查是否应该切换凭证（用于 429/5xx/402/403 等情况）
-        const shouldSwitchCredential = error.shouldSwitchCredential === true || isAntigravityTransientCapacity;
+        const shouldSwitchCredential = !isTerminalAntigravityUnavailable
+            && (error.shouldSwitchCredential === true || isAntigravityTransientCapacity);
+        if (isTerminalAntigravityUnavailable) {
+            providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
+        }
         
         // 检查凭证是否已在底层被标记为不健康（避免重复标记）
         let credentialMarkedUnhealthy = error.credentialMarkedUnhealthy === true;
@@ -2333,7 +2375,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         
         // 凭证已被标记为不健康后，尝试切换到新凭证重试
         // 不再依赖状态码判断，只要凭证被标记不健康且可以重试，就尝试切换
-        if (credentialMarkedUnhealthy && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
+        if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
             const isCodexTransient = isCodexTransientCredentialError(error);
             const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity;
             if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
@@ -2454,6 +2496,13 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         }
 
         try {
+            if (isTerminalAntigravityUnavailable) {
+                normalizeAntigravityCapacityExhaustion(error, toProvider, model);
+                const terminalResponse = createErrorResponse(error, fromProvider);
+                const terminalStatus = ensureValidStatusCode(error.status || error.code || 429);
+                await handleUnifiedResponse(res, JSON.stringify(terminalResponse), false, terminalStatus, getErrorResponseHeaders(error, terminalStatus));
+                return;
+            }
             const fallback = await tryTemporaryRouteFallback(retryContext);
             if (fallback?.service) {
                 providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');

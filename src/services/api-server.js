@@ -318,6 +318,8 @@ function buildRuntimeMetricsSnapshot() {
         temporaryRouting: getTemporaryRouteScheduleDiagnostics(),
         providerCoordination: getProviderPoolManager()?.coordination?.getStatus?.() || null,
         codexQuotaFilter: getProviderPoolManager()?.getCodexQuotaFilterMetrics?.() || null,
+        antigravityAvailability: getProviderPoolManager()?.getAntigravityAvailabilityMetrics?.() || null,
+        antigravityRouting: getProviderPoolManager()?.getAntigravityRoutingMetrics?.() || null,
         potluckQuota: getPotluckQuotaMetrics(),
         requestAudit: getRequestAuditMetrics(),
         usageEventBatch: runtimeEventBatcher?.snapshot?.() || null,

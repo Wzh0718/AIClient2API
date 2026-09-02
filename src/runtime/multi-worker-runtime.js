@@ -248,6 +248,33 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             cacheHitRatio: 0,
             byWorker: {}
         },
+        antigravityAvailability: {
+            cacheHits: 0,
+            cacheMisses: 0,
+            negativeCacheHits: 0,
+            singleFlightHits: 0,
+            providersScanned: 0,
+            refreshMs: 0,
+            invalidations: 0,
+            allModelsUnavailable: 0,
+            cacheHitRatio: 0,
+            negativeCacheHitRatio: 0,
+            singleFlightHitRatio: 0,
+            activeSnapshots: 0,
+            byWorker: {}
+        },
+        antigravityRouting: {
+            sourceAttempts: 0,
+            fallbackAttempts: 0,
+            fallbackSuccesses: 0,
+            skippedByNegativeCache: 0,
+            allModelsUnavailable: 0,
+            queueEnqueued: 0,
+            queueWaitMs: 0,
+            queueTimeouts: 0,
+            retrySuppressed: 0,
+            byWorker: {}
+        },
         potluckQuota: {
             localDegradedRequests: 0,
             localRejected: 0,
@@ -450,6 +477,43 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
                 Number(sanitizedQuota.codexQuotaSnapshotAgeMs ?? sanitizedQuota.snapshotAgeMs ?? 0)
             );
         }
+        if (snapshot?.antigravityAvailability) {
+            const availability = snapshot.antigravityAvailability;
+            result.antigravityAvailability.byWorker[workerId] = availability;
+            for (const field of [
+                'cacheHits',
+                'cacheMisses',
+                'negativeCacheHits',
+                'singleFlightHits',
+                'providersScanned',
+                'refreshMs',
+                'invalidations',
+                'allModelsUnavailable'
+            ]) {
+                result.antigravityAvailability[field] += Number(availability[field] || 0);
+            }
+            result.antigravityAvailability.activeSnapshots = Math.max(
+                result.antigravityAvailability.activeSnapshots,
+                Number(availability.activeSnapshots || 0)
+            );
+        }
+        if (snapshot?.antigravityRouting) {
+            const routing = snapshot.antigravityRouting;
+            result.antigravityRouting.byWorker[workerId] = routing;
+            for (const field of [
+                'sourceAttempts',
+                'fallbackAttempts',
+                'fallbackSuccesses',
+                'skippedByNegativeCache',
+                'allModelsUnavailable',
+                'queueEnqueued',
+                'queueWaitMs',
+                'queueTimeouts',
+                'retrySuppressed'
+            ]) {
+                result.antigravityRouting[field] += Number(routing[field] || 0);
+            }
+        }
         if (snapshot?.potluckQuota) {
             result.potluckQuota.byWorker[workerId] = snapshot.potluckQuota;
             for (const field of ['localDegradedRequests', 'localRejected', 'coordinationErrors', 'finalizeErrors', 'localReservations', 'pendingUsage']) {
@@ -480,6 +544,16 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
     const quotaCalls = result.codexQuotaFilter.codexQuotaFilterCalls;
     result.codexQuotaFilter.cacheHitRatio = quotaCalls > 0
         ? result.codexQuotaFilter.codexQuotaFilterCacheHits / quotaCalls
+        : 0;
+    const availabilityCalls = result.antigravityAvailability.cacheHits + result.antigravityAvailability.cacheMisses;
+    result.antigravityAvailability.cacheHitRatio = availabilityCalls > 0
+        ? result.antigravityAvailability.cacheHits / availabilityCalls
+        : 0;
+    result.antigravityAvailability.negativeCacheHitRatio = availabilityCalls > 0
+        ? result.antigravityAvailability.negativeCacheHits / availabilityCalls
+        : 0;
+    result.antigravityAvailability.singleFlightHitRatio = availabilityCalls > 0
+        ? result.antigravityAvailability.singleFlightHits / availabilityCalls
         : 0;
     if (result.usageEventBatch.flushCount > 0) {
         result.usageEventBatch.averageBatchSize = result.usageEventBatch.totalBatchSize / result.usageEventBatch.flushCount;

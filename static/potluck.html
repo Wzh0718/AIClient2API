@@ -499,15 +499,26 @@
             flex-direction: column;
             gap: 12px;
         }
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
         .key-card {
             background: var(--bg-primary);
             border: 1px solid var(--border-color);
             border-radius: var(--radius-xl);
-            padding: 18px;
+            padding: 16px 18px;
             display: grid;
             grid-template-columns: 260px minmax(560px, 1fr) 312px;
             column-gap: 22px;
-            row-gap: 18px;
+            row-gap: 14px;
             align-items: center;
             transition: var(--transition);
             box-shadow: var(--shadow-sm);
@@ -517,8 +528,37 @@
             box-shadow: var(--shadow-md);
         }
         .key-card.disabled { opacity: 0.6; }
+        .key-card-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 10px;
+            min-width: 0;
+        }
+        .key-card-header .key-name { flex: 1; min-width: 0; }
+        .key-status-badge {
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 8px;
+            border-radius: var(--radius-full);
+            font-size: 11px;
+            font-weight: 700;
+            line-height: 1.2;
+            color: var(--success-color);
+            background: color-mix(in srgb, var(--success-color) 10%, transparent);
+            border: 1px solid color-mix(in srgb, var(--success-color) 28%, var(--border-color));
+            white-space: nowrap;
+        }
+        .key-status-badge.is-disabled {
+            color: var(--danger-color);
+            background: color-mix(in srgb, var(--danger-color) 8%, transparent);
+            border-color: color-mix(in srgb, var(--danger-color) 26%, var(--border-color));
+        }
         .key-info {
             min-width: 0;
+            grid-row: span 2;
         }
         .key-name {
             display: flex;
@@ -654,10 +694,19 @@
         .key-stats {
             display: grid;
             grid-template-columns: repeat(4, minmax(135px, 1fr));
-            gap: 24px 20px;
+            gap: 12px 16px;
             align-items: flex-start;
             min-width: 0;
         }
+        .key-primary-stats,
+        .key-secondary-stats { min-width: 0; }
+        .key-primary-stats,
+        .key-secondary-stats { grid-column: 2; }
+        .key-primary-stats { margin-bottom: 2px; }
+        .key-secondary-stats { opacity: 0.9; }
+        .key-primary-stats .key-stat { min-height: 62px; }
+        .key-primary-stats .key-stat .value { font-size: 15px; }
+        .key-primary-stats .key-stat:first-child { border-left: none; }
         .key-stat {
             min-width: 0;
             padding: 4px 8px;
@@ -759,13 +808,38 @@
             justify-content: flex-end;
             align-content: center;
             min-width: 0;
+            grid-column: 3;
+            grid-row: 1 / span 2;
         }
         .key-actions .btn-sm {
             width: 92px;
             padding-left: 10px;
             padding-right: 10px;
             justify-content: center;
+            min-height: 40px;
         }
+        .key-actions .key-action-secondary { opacity: 0.82; }
+        .key-actions .key-action-secondary:hover,
+        .key-actions .key-action-secondary:focus-visible { opacity: 1; }
+        .key-actions .key-action-danger { grid-column: 1 / 2; }
+        .key-actions .btn:focus-visible,
+        .btn-copy:focus-visible,
+        .search-box:focus-visible,
+        .sort-select:focus-visible,
+        .cost-model-select:focus-visible {
+            outline: 3px solid color-mix(in srgb, var(--primary-color) 35%, transparent);
+            outline-offset: 2px;
+        }
+
+        .toolbar { gap: 10px; align-items: center; }
+        .toolbar-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .toolbar-filters { flex: 1 1 auto; min-width: 320px; }
+        .toolbar-bulk-actions { flex: 0 0 auto; }
+        .toolbar-bulk-actions .btn { white-space: nowrap; }
 
         /* 模态框 */
         .modal-overlay {
@@ -857,6 +931,15 @@
             margin-top: 4px;
             font-size: 12px;
             color: var(--text-secondary);
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+                scroll-behavior: auto !important;
+            }
         }
         .detail-meta {
             display: grid;
@@ -1084,30 +1167,36 @@
         /* 响应式 */
         @media (max-width: 1500px) {
             .key-card {
-                grid-template-columns: 260px minmax(0, 1fr);
+                grid-template-columns: 248px minmax(0, 1fr);
             }
             .key-actions {
                 grid-column: 2;
+                grid-row: auto;
                 justify-content: flex-start;
                 padding-top: 4px;
             }
+            .key-info { grid-row: span 2; }
         }
 
         @media (max-width: 1280px) {
             .key-stats {
                 grid-template-columns: repeat(3, minmax(135px, 1fr));
             }
+            .key-primary-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .key-secondary-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         }
 
         @media (max-width: 1024px) {
             .key-card {
-                grid-template-columns: 240px minmax(0, 1fr);
+                grid-template-columns: 232px minmax(0, 1fr);
                 gap: 16px;
             }
             .key-stats {
                 grid-template-columns: repeat(2, minmax(135px, 1fr));
                 gap: 16px;
             }
+            .key-primary-stats,
+            .key-secondary-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .stats-grid { grid-template-columns: repeat(2, 1fr); }
             .usage-insights-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .usage-calendar-card,
@@ -1136,6 +1225,12 @@
                 grid-template-columns: repeat(2, minmax(135px, 1fr));
                 gap: 20px;
             }
+            .key-info,
+            .key-primary-stats,
+            .key-secondary-stats,
+            .key-actions { grid-column: auto; grid-row: auto; }
+            .key-primary-stats,
+            .key-secondary-stats { gap: 12px; }
             .key-stat { text-align: left; }
             .key-actions {
                 grid-column: auto;
@@ -1145,6 +1240,12 @@
                 border-top: 1px solid var(--border-color);
             }
             .pool-concurrency-grid { grid-template-columns: 1fr; }
+            .toolbar,
+            .toolbar-group { align-items: stretch; }
+            .toolbar { flex-direction: column; width: 100%; }
+            .toolbar-filters,
+            .toolbar-bulk-actions { width: 100%; min-width: 0; }
+            .toolbar-bulk-actions .btn { flex: 1; }
         }
 
         @media (max-width: 480px) {
@@ -1207,6 +1308,10 @@
                 grid-template-columns: repeat(2, 1fr);
                 gap: 8px;
             }
+            .key-card-header { flex-direction: column; }
+            .key-status-badge { align-self: flex-start; }
+            .toolbar-filters { flex-direction: column; }
+            .toolbar-filters .search-wrapper { width: 100%; }
             .navbar-brand .badge { display: none; }
             .navbar-actions { gap: 8px; }
             #createKeyBtn .btn-text { display: none; }
@@ -1440,9 +1545,12 @@
             <div class="keys-header">
                 <h2 class="section-title" style="margin-bottom: 0;"><i class="fas fa-key"></i> Key 列表</h2>
                 <div class="toolbar">
-                    <div class="search-wrapper">
-                        <input type="text" id="searchBox" class="search-box" placeholder="搜索名称或 Key...">
-                        <select id="sortSelect" class="sort-select">
+                    <div class="toolbar-group toolbar-filters">
+                        <div class="search-wrapper">
+                        <label class="sr-only" for="searchBox">搜索 Key 名称或内容</label>
+                        <input type="text" id="searchBox" class="search-box" aria-label="搜索 Key 名称或内容" placeholder="搜索名称或 Key...">
+                        <label class="sr-only" for="sortSelect">Key 排序方式</label>
+                        <select id="sortSelect" class="sort-select" aria-label="Key 排序方式">
                             <option value="rangeTokens-desc">当前范围 Token ↓</option>
                             <option value="rangeCost-desc">当前范围金额 ↓</option>
                             <option value="rangeUsage-desc">当前范围调用 ↓</option>
@@ -1459,13 +1567,14 @@
                             <option value="rpm-desc">RPM 频率 ↓</option>
                             <option value="created-desc">创建时间 ↓</option>
                         </select>
+                        </div>
                     </div>
                     <div class="cost-model-toggle" id="keyCostModelToggle" aria-label="Key 金额口径">
                         <select id="conversionModelSelect" class="cost-model-select" aria-label="Key 金额口径">
                             <option value="actual">真实</option>
                         </select>
                     </div>
-                    <div class="btn-limit-wrapper">
+                    <div class="toolbar-group toolbar-bulk-actions btn-limit-wrapper">
                         <button class="btn btn-secondary btn-sm" onclick="resetAllTokenStats()">
                             <i class="fas fa-eraser"></i> <span class="btn-limit-text">重置全部 Token</span>
                         </button>
@@ -1854,6 +1963,7 @@
             }
             return `conversionModel=${encodeURIComponent(conversionModel)}`;
         }
+
         function populateConversionModels(pricing) {
             const select = document.getElementById('conversionModelSelect');
             if (!select || !Array.isArray(pricing?.conversionModels)) return;
@@ -3420,12 +3530,15 @@
 
                 return `<div class="key-card ${key.enabled ? '' : 'disabled'}">
                     <div class="key-info">
-                        <div class="key-name"><span class="key-name-text">${escapeHtml(key.name)}</span><button class="btn-copy" style="padding: 2px 6px;" onclick="openEditName('${key.id}', '${escapeHtml(key.name).replace(/'/g, "\\'")}')" title="修改名称"><i class="fas fa-edit"></i></button>${renderKeyRoutingSummary(key)}${renderEdgeAdmissionSummary(key)}</div>
+                        <div class="key-card-header">
+                            <div class="key-name"><span class="key-name-text">${escapeHtml(key.name)}</span><button class="btn-copy" style="padding: 2px 6px;" onclick="openEditName('${key.id}', '${escapeHtml(key.name).replace(/'/g, "\\'")}')" title="修改名称" aria-label="修改 Key 名称"><i class="fas fa-edit"></i></button>${renderKeyRoutingSummary(key)}${renderEdgeAdmissionSummary(key)}</div>
+                            <span class="key-status-badge ${key.enabled ? '' : 'is-disabled'}"><i class="fas ${key.enabled ? 'fa-check-circle' : 'fa-ban'}" aria-hidden="true"></i>${key.enabled ? '启用' : '禁用'}</span>
+                        </div>
                         <div class="key-id">${key.maskedKey} <button class="btn-copy" onclick="copyKeyFromDetail('${key.id}')" title="按需获取并复制完整 Key"><i class="fas fa-copy"></i></button></div>
                         ${providerBadges ? `<div class="key-dist-mini">${providerBadges}</div>` : ''}
                         ${dailyUsage}
                     </div>
-                    <div class="key-stats">
+                    <div class="key-stats key-primary-stats">
 
                         <div class="key-stat">
                             <div class="label">今日/限额</div>
@@ -3448,6 +3561,8 @@
                             <div class="value">${rangeRate.qps.toFixed(2)} QPS / ${rangeRate.rpm.toFixed(0)} RPM</div>
                             <div class="value muted">所选范围平均 · 峰值: ${(key.maxQps || 0).toFixed(2)} QPS / ${(key.maxRpm || 0).toFixed(0)} RPM</div>
                         </div>
+                    </div>
+                    <div class="key-stats key-secondary-stats">
                         <div class="key-stat">
                             <div class="label">Token 速率</div>
                             <div class="value">${(key.tps || 0).toFixed(1)} TPS</div>
@@ -3464,12 +3579,12 @@
                     </div>
                     <div class="key-actions">
                         <button class="btn btn-secondary btn-sm" onclick="showKeyDetail('${key.id}')" title="查看用户端视图"><i class="fas fa-chart-line"></i> <span class="btn-text">详情</span></button>
-                        <button class="btn btn-secondary btn-sm" onclick="resetUsage('${key.id}')" title="重置今日用量"><i class="fas fa-redo"></i> <span class="btn-text">重置</span></button>
-                        <button class="btn btn-secondary btn-sm" onclick="resetTokenStats('${key.id}')" title="重置 Token 统计"><i class="fas fa-eraser"></i> <span class="btn-text">Token</span></button>
+                        <button class="btn btn-secondary btn-sm key-action-secondary" onclick="resetUsage('${key.id}')" title="重置今日用量"><i class="fas fa-redo"></i> <span class="btn-text">重置</span></button>
+                        <button class="btn btn-secondary btn-sm key-action-secondary" onclick="resetTokenStats('${key.id}')" title="重置 Token 统计"><i class="fas fa-eraser"></i> <span class="btn-text">Token</span></button>
                         <button class="btn btn-secondary btn-sm" onclick="openEditLimit('${key.id}', ${key.dailyLimit})" title="修改限额"><i class="fas fa-sliders-h"></i> <span class="btn-text">限额</span></button>
                         <button class="btn btn-secondary btn-sm" onclick="openEditRouting('${key.id}')" title="修改凭据路由"><i class="fas fa-route"></i> <span class="btn-text">路由</span></button>
                         <button class="btn btn-secondary btn-sm" onclick="toggleKey('${key.id}')" title="${key.enabled ? '禁用' : '启用'}">${key.enabled ? '<i class="fas fa-toggle-on"></i>' : '<i class="fas fa-toggle-off"></i>'} <span class="btn-text">${key.enabled ? '禁用' : '启用'}</span></button>
-                        <button class="btn btn-danger btn-sm" onclick="deleteKey('${key.id}')" title="删除"><i class="fas fa-trash"></i> <span class="btn-text">删除</span></button>
+                        <button class="btn btn-danger btn-sm key-action-danger" onclick="deleteKey('${key.id}')" title="删除"><i class="fas fa-trash"></i> <span class="btn-text">删除</span></button>
                     </div>
                 </div>`;
             }).join('');

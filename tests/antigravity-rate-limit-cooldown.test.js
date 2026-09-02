@@ -363,4 +363,78 @@ describe('Antigravity model quota cooldown', () => {
         expect(secondService.generateContent).toHaveBeenCalledTimes(1);
         expect(res.body).toContain('antigravity-retry-success');
     });
+
+    test('does not re-enter credential selection after all Antigravity models are unavailable', async () => {
+        mockGetApiServiceWithFallback.mockReset();
+        const terminalError = new Error('All Antigravity models are unavailable');
+        terminalError.status = 429;
+        terminalError.statusCode = 429;
+        terminalError.code = 'ALL_MODELS_UNAVAILABLE';
+        terminalError.quotaScope = 'model';
+        terminalError.nextRecoveryTime = new Date(Date.now() + 3000).toISOString();
+        terminalError.shouldSwitchCredential = true;
+        const service = { generateContent: jest.fn().mockRejectedValue(terminalError) };
+        const providerPoolManager = {
+            markAntigravityModelQuotaUnhealthy: jest.fn(),
+            markAntigravityModelCapacityUnavailable: jest.fn(),
+            markProviderUnhealthyWithRecoveryTime: jest.fn(),
+            markProviderUnhealthy: jest.fn(),
+            markProviderUnhealthyImmediately: jest.fn(),
+            markProviderHealthy: jest.fn(),
+            recordAntigravityRoutingEvent: jest.fn(),
+            releaseSlot: jest.fn()
+        };
+        const res = new FakeResponse();
+
+        await handleUnaryRequest(
+            res,
+            service,
+            'gemini-3.1-flash-lite',
+            { contents: [] },
+            'gemini',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-pro-1',
+            'Provider Pro 1',
+            { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 5 }, maxRetries: 5 }
+        );
+
+        expect(mockGetApiServiceWithFallback).not.toHaveBeenCalled();
+        expect(providerPoolManager.recordAntigravityRoutingEvent).toHaveBeenCalledWith('retrySuppressed');
+        expect(res.statusCode).toBe(429);
+    });
+
+    test('does not quarantine an Antigravity credential for a generic upstream model error', async () => {
+        const error = new Error('Requested entity was not found.');
+        error.response = { status: 404, data: { error: { code: 404, message: error.message } } };
+        const service = { generateContent: jest.fn().mockRejectedValue(error) };
+        const providerPoolManager = {
+            markAntigravityModelQuotaUnhealthy: jest.fn(),
+            markAntigravityModelCapacityUnavailable: jest.fn(),
+            markProviderUnhealthy: jest.fn(),
+            markProviderUnhealthyImmediately: jest.fn(),
+            releaseSlot: jest.fn()
+        };
+        const res = new FakeResponse();
+
+        await handleUnaryRequest(
+            res,
+            service,
+            'gemini-3.5-flash',
+            { contents: [] },
+            'gemini',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-pro-1',
+            'Provider Pro 1',
+            { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 0 }, maxRetries: 0 }
+        );
+
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+        expect(providerPoolManager.markProviderUnhealthyImmediately).not.toHaveBeenCalled();
+    });
 });

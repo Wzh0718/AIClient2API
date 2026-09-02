@@ -657,6 +657,30 @@ export class ProviderPoolManager {
             fastPathMisses: 0,
             fastPathFallbackFailures: 0
         };
+        this._antigravityAvailabilityLocal = new Map();
+        this._antigravityAvailabilityFlights = new Map();
+        this._antigravityAvailabilityRevision = 0;
+        this._antigravityAvailabilityMetrics = {
+            cacheHits: 0,
+            cacheMisses: 0,
+            negativeCacheHits: 0,
+            singleFlightHits: 0,
+            providersScanned: 0,
+            refreshMs: 0,
+            invalidations: 0,
+            allModelsUnavailable: 0
+        };
+        this._antigravityRoutingMetrics = {
+            sourceAttempts: 0,
+            fallbackAttempts: 0,
+            fallbackSuccesses: 0,
+            skippedByNegativeCache: 0,
+            allModelsUnavailable: 0,
+            queueEnqueued: 0,
+            queueWaitMs: 0,
+            queueTimeouts: 0,
+            retrySuppressed: 0
+        };
         this._providerSelectionLoadStats = new Map();
         this._poolKeySchedulers = new Map();
         this._geminiElasticQueue = {
@@ -1729,7 +1753,7 @@ export class ProviderPoolManager {
         return null;
     }
 
-    _getHealthyProvidersForType(providerType, requestedModel, options = {}) {
+    async _getHealthyProvidersForType(providerType, requestedModel, options = {}) {
         const excludedProviderTypes = new Set(options.excludeProviderTypes || []);
         if (excludedProviderTypes.has(providerType)) {
             return [];
@@ -1776,11 +1800,12 @@ export class ProviderPoolManager {
         }
         if (isAntigravityProviderType(providerType) && candidates.length > 0) {
             candidates = this._filterAntigravityProvidersByPlan(providerType, candidates, options.selectionDiagnostics);
-            candidates = this._filterAntigravityProvidersByQuota(
+            candidates = await this._filterAntigravityProvidersByQuota(
                 providerType,
                 candidates,
                 requestedModel,
-                options.selectionDiagnostics
+                options.selectionDiagnostics,
+                options
             );
         }
 
@@ -1974,7 +1999,7 @@ export class ProviderPoolManager {
             try {
                 const candidateProviders = this.providerStatus[candidateType] || [];
                 await this._hydrateCodexPoolSnapshot(candidateType, candidateProviders, requestedModel);
-                const providers = this._getHealthyProvidersForType(candidateType, requestedModel, options);
+                const providers = await this._getHealthyProvidersForType(candidateType, requestedModel, options);
                 candidates.push(...providers);
             } catch (error) {
                 if (error.status === 429 || error.code === 429) {
@@ -2009,7 +2034,7 @@ export class ProviderPoolManager {
             try {
                 const candidateProviders = this.providerStatus[candidateType] || [];
                 await this._hydrateCodexPoolSnapshot(candidateType, candidateProviders, requestedModel);
-                const providers = this._getHealthyProvidersForType(candidateType, requestedModel, options)
+                const providers = (await this._getHealthyProvidersForType(candidateType, requestedModel, options))
                     .filter(provider => this._hasAcquireCapacity(provider, options));
                 candidates.push(...providers);
             } catch (error) {
@@ -2393,7 +2418,7 @@ export class ProviderPoolManager {
     async acquireSlot(providerType, requestedModel = null, options = {}) {
         if (this.coordination) {
             await this._hydrateCodexPoolSnapshot(providerType, this.providerStatus[providerType] || [], requestedModel);
-            const healthyProviders = this._getHealthyProvidersForType(providerType, requestedModel, options);
+            const healthyProviders = await this._getHealthyProvidersForType(providerType, requestedModel, options);
             const ordered = this._orderCoordinatedCandidates(
                 healthyProviders,
                 providerType,
@@ -2736,11 +2761,12 @@ export class ProviderPoolManager {
         }
         if (isAntigravityProviderType(providerType)) {
             availableAndHealthyProviders = this._filterAntigravityProvidersByPlan(providerType, availableAndHealthyProviders, selectionDiagnostics);
-            availableAndHealthyProviders = this._filterAntigravityProvidersByQuota(
+            availableAndHealthyProviders = await this._filterAntigravityProvidersByQuota(
                 providerType,
                 availableAndHealthyProviders,
                 requestedModel,
-                selectionDiagnostics
+                selectionDiagnostics,
+                options
             );
         }
 
@@ -3125,80 +3151,301 @@ export class ProviderPoolManager {
         return allowed;
     }
 
-    _filterAntigravityProvidersByQuota(providerType, providers, requestedModel = null, selectionDiagnostics = null) {
+    _getAntigravityAvailabilityScope(providerType, canonicalModel, providers = [], options = {}) {
+        const candidateHash = providers
+            .map(provider => this._getAntigravityCredentialHash(provider.config?.uuid || provider.uuid || ''))
+            .sort()
+            .join(',');
+        const routingStrategy = String(options.routingStrategy || '').trim();
+        return `antigravity-availability:${providerType}:${canonicalModel}:${this.providerConfigRevision}:${this._antigravityAvailabilityRevision}:${routingStrategy}:${candidateHash}`;
+    }
+
+    _getAntigravityCredentialHash(providerUuid) {
+        return crypto.createHash('sha256')
+            .update(`antigravity-credential:${String(providerUuid || '')}`)
+            .digest('hex')
+            .slice(0, 16);
+    }
+
+    _getAntigravityAvailabilityTtl(snapshot) {
+        if (snapshot?.exhausted === true) {
+            const recoveryMs = Date.parse(snapshot.nearestRecoveryTime || '');
+            const retryMs = Number.isFinite(recoveryMs) ? Math.max(1000, recoveryMs - Date.now()) : 3000;
+            return Math.min(30_000, retryMs);
+        }
+        return 1000;
+    }
+
+    _isAntigravityAvailabilitySnapshotValid(snapshot, now = Date.now()) {
+        const expiry = Number(snapshot?.localExpiresAt || snapshot?.expiresAt);
+        return Boolean(snapshot
+            && snapshot.version === 1
+            && snapshot.configRevision === this.providerConfigRevision
+            && expiry > now
+            && Array.isArray(snapshot.eligibleCredentialHashes)
+            && Array.isArray(snapshot.coolingCredentialHashes));
+    }
+
+    _attachAntigravityLocalExpiry(snapshot) {
+        if (!snapshot || !Number.isFinite(Number(snapshot.expiresAt))) return snapshot;
+        const createdAt = Number(snapshot.createdAt) || Date.now();
+        const sharedExpiry = Number(snapshot.expiresAt);
+        const localTtlMs = Math.min(200, Math.max(1, sharedExpiry - createdAt));
+        return {
+            ...snapshot,
+            localExpiresAt: Math.min(sharedExpiry, createdAt + localTtlMs)
+        };
+    }
+
+    async _getOrRefreshAntigravityAvailability(scope, refresh) {
+        const now = Date.now();
+        const local = this._antigravityAvailabilityLocal.get(scope);
+        if (this._isAntigravityAvailabilitySnapshotValid(local, now)) {
+            this._antigravityAvailabilityMetrics.cacheHits += 1;
+            if (local.exhausted) this._antigravityAvailabilityMetrics.negativeCacheHits += 1;
+            return local;
+        }
+
+        const existingFlight = this._antigravityAvailabilityFlights.get(scope);
+        if (existingFlight) {
+            this._antigravityAvailabilityMetrics.singleFlightHits += 1;
+            return existingFlight;
+        }
+
+        const flight = (async () => {
+            let owner = null;
+            let shared = null;
+            try {
+                try {
+                    shared = await this.coordination?.getRuntimeSnapshot?.(scope);
+                } catch {
+                    shared = null;
+                }
+                if (this._isAntigravityAvailabilitySnapshotValid(shared)) {
+                    this._antigravityAvailabilityMetrics.cacheHits += 1;
+                    if (shared.exhausted) this._antigravityAvailabilityMetrics.negativeCacheHits += 1;
+                    const localShared = this._attachAntigravityLocalExpiry(shared);
+                    this._antigravityAvailabilityLocal.set(scope, localShared);
+                    return localShared;
+                }
+
+                try {
+                    owner = await this.coordination?.acquireRuntimeSnapshotLock?.(scope, { ttlMs: 1500 });
+                } catch {
+                    owner = null;
+                }
+                if (!owner && this.coordination?.getRuntimeSnapshot) {
+                    for (let attempt = 0; attempt < 5; attempt += 1) {
+                        await new Promise(resolve => setTimeout(resolve, 10));
+                        try {
+                            shared = await this.coordination.getRuntimeSnapshot(scope);
+                        } catch {
+                            shared = null;
+                        }
+                        if (this._isAntigravityAvailabilitySnapshotValid(shared)) {
+                            this._antigravityAvailabilityMetrics.cacheHits += 1;
+                            if (shared.exhausted) this._antigravityAvailabilityMetrics.negativeCacheHits += 1;
+                            const localShared = this._attachAntigravityLocalExpiry(shared);
+                            this._antigravityAvailabilityLocal.set(scope, localShared);
+                            return localShared;
+                        }
+                    }
+                    // Another worker owns the refresh. Do not duplicate the
+                    // expensive credential scan; let the caller proceed with
+                    // the current provider set while the shared snapshot is
+                    // being published.
+                    const inProgress = this._attachAntigravityLocalExpiry({
+                        version: 1,
+                        providerType: MODEL_PROVIDER.ANTIGRAVITY,
+                        model: 'unknown',
+                        eligibleCredentialHashes: [],
+                        coolingCredentialHashes: [],
+                        unavailableCredentialCount: 0,
+                        reason: 'refresh_in_progress',
+                        refreshInProgress: true,
+                        exhausted: false,
+                        configRevision: this.providerConfigRevision,
+                        createdAt: Date.now(),
+                        expiresAt: Date.now() + 100,
+                        ttlMs: 100
+                    });
+                    this._antigravityAvailabilityLocal.set(scope, inProgress);
+                    return inProgress;
+                }
+
+                this._antigravityAvailabilityMetrics.cacheMisses += 1;
+                const startedAt = performance.now();
+                const snapshot = await refresh();
+                const ttlMs = this._getAntigravityAvailabilityTtl(snapshot);
+                const createdAt = Date.now();
+                const enriched = {
+                    version: 1,
+                    ...snapshot,
+                    configRevision: this.providerConfigRevision,
+                    createdAt,
+                    expiresAt: createdAt + ttlMs,
+                    ttlMs
+                };
+                this._antigravityAvailabilityMetrics.providersScanned += Number(snapshot.providersScanned || 0);
+                this._antigravityAvailabilityMetrics.refreshMs += performance.now() - startedAt;
+                const localSnapshot = this._attachAntigravityLocalExpiry(enriched);
+                this._antigravityAvailabilityLocal.set(scope, localSnapshot);
+                try {
+                    const sharedSnapshot = { ...enriched };
+                    await this.coordination?.setRuntimeSnapshot?.(scope, sharedSnapshot, { ttlMs });
+                } catch {
+                    // Local filtering remains authoritative when Redis is unavailable.
+                }
+                return localSnapshot;
+            } finally {
+                if (owner) {
+                    try {
+                        await this.coordination?.releaseRuntimeSnapshotLock?.(scope, owner);
+                    } catch {
+                        // Lock expiry remains the fallback when release cannot reach Redis.
+                    }
+                }
+            }
+        })();
+        this._antigravityAvailabilityFlights.set(scope, flight);
+        try {
+            return await flight;
+        } finally {
+            this._antigravityAvailabilityFlights.delete(scope);
+        }
+    }
+
+    getAntigravityAvailabilityMetrics() {
+        const metrics = this._antigravityAvailabilityMetrics;
+        const calls = metrics.cacheHits + metrics.cacheMisses;
+        return {
+            ...metrics,
+            cacheHitRatio: calls > 0 ? metrics.cacheHits / calls : 0,
+            negativeCacheHitRatio: calls > 0 ? metrics.negativeCacheHits / calls : 0,
+            singleFlightHitRatio: calls > 0 ? metrics.singleFlightHits / calls : 0,
+            activeSnapshots: [...this._antigravityAvailabilityLocal.values()]
+                .filter(snapshot => this._isAntigravityAvailabilitySnapshotValid(snapshot)).length
+        };
+    }
+
+    getAntigravityRoutingMetrics() {
+        return { ...this._antigravityRoutingMetrics };
+    }
+
+    recordAntigravityRoutingEvent(field) {
+        if (!Object.prototype.hasOwnProperty.call(this._antigravityRoutingMetrics, field)) return false;
+        this._antigravityRoutingMetrics[field] += 1;
+        return true;
+    }
+
+    invalidateAntigravityAvailability(canonicalModel = null) {
+        const prefix = canonicalModel
+            ? `antigravity-availability:${MODEL_PROVIDER.ANTIGRAVITY}:${normalizeAntigravityQuotaModel(canonicalModel)}:`
+            : `antigravity-availability:${MODEL_PROVIDER.ANTIGRAVITY}:`;
+        let count = 0;
+        for (const key of this._antigravityAvailabilityLocal.keys()) {
+            if (!key.startsWith(prefix)) continue;
+            this._antigravityAvailabilityLocal.delete(key);
+            count += 1;
+        }
+        this._antigravityAvailabilityRevision += 1;
+        this._antigravityAvailabilityMetrics.invalidations += count;
+        return count;
+    }
+
+    async _filterAntigravityProvidersByQuota(providerType, providers, requestedModel = null, selectionDiagnostics = null, options = {}) {
         if (!requestedModel) return providers;
 
         const canonicalModel = normalizeAntigravityQuotaModel(requestedModel);
-        const now = Date.now();
-        const allowed = [];
-        const filterReasons = {};
-        const recoveryTimes = [];
-        let updated = false;
+        const scope = this._getAntigravityAvailabilityScope(providerType, canonicalModel, providers, options);
+        const providerByHash = new Map(providers.map(provider => {
+            const uuid = provider.config?.uuid || provider.uuid || '';
+            return [this._getAntigravityCredentialHash(uuid), provider];
+        }));
+        const snapshot = await this._getOrRefreshAntigravityAvailability(scope, async () => {
+            const now = Date.now();
+            const allowed = [];
+            const coolingCredentialHashes = [];
+            const filterReasons = {};
+            const recoveryTimes = [];
+            let updated = false;
+            const recordReason = reason => {
+                filterReasons[reason] = (filterReasons[reason] || 0) + 1;
+            };
 
-        const recordReason = reason => {
-            filterReasons[reason] = (filterReasons[reason] || 0) + 1;
-        };
-
-        for (const provider of providers) {
-            const config = provider.config || {};
-            const quotaHealth = config.antigravityQuotaHealth || { families: {}, models: {} };
-            quotaHealth.families = quotaHealth.families || {};
-            quotaHealth.models = quotaHealth.models || {};
-            config.antigravityQuotaHealth = quotaHealth;
-
-            for (const [family, familyState] of Object.entries(quotaHealth.families)) {
-                if (familyState?.source === 'usage_cache') {
-                    delete quotaHealth.families[family];
+            for (const provider of providers) {
+                const config = provider.config || {};
+                const quotaHealth = config.antigravityQuotaHealth || { families: {}, models: {} };
+                quotaHealth.families = quotaHealth.families || {};
+                quotaHealth.models = quotaHealth.models || {};
+                config.antigravityQuotaHealth = quotaHealth;
+                for (const [family, familyState] of Object.entries(quotaHealth.families)) {
+                    if (familyState?.source === 'usage_cache') {
+                        delete quotaHealth.families[family];
+                        updated = true;
+                    }
+                }
+                const uuid = provider.config?.uuid || provider.uuid || '';
+                const credentialHash = this._getAntigravityCredentialHash(uuid);
+                const modelState = getActiveAntigravityQuotaState(quotaHealth.models[canonicalModel], now);
+                if (modelState) {
+                    coolingCredentialHashes.push(credentialHash);
+                    recordReason('model_cooldown');
+                    const recoveryMs = Date.parse(modelState.scheduledRecoveryTime || '');
+                    if (Number.isFinite(recoveryMs) && recoveryMs > now) recoveryTimes.push(recoveryMs);
+                    continue;
+                }
+                if (quotaHealth.models[canonicalModel]) {
+                    delete quotaHealth.models[canonicalModel];
                     updated = true;
                 }
+                allowed.push(provider);
             }
-
-            const modelState = getActiveAntigravityQuotaState(quotaHealth.models[canonicalModel], now);
-            if (modelState) {
-                recordReason('model_cooldown');
-                const recoveryMs = Date.parse(modelState.scheduledRecoveryTime || '');
-                if (Number.isFinite(recoveryMs) && recoveryMs > now) recoveryTimes.push(recoveryMs);
-                continue;
-            }
-            if (quotaHealth.models[canonicalModel]) {
-                delete quotaHealth.models[canonicalModel];
-                updated = true;
-            }
-
-            allowed.push(provider);
-        }
-
-        this.coordination?.updateGeminiSchedulingGauge?.(canonicalModel, {
-            schedulable: allowed.length,
-            cooling: Number(filterReasons.model_cooldown || 0),
-            quotaUnknown: 0
+            this.coordination?.updateGeminiSchedulingGauge?.(canonicalModel, {
+                schedulable: allowed.length,
+                cooling: Number(filterReasons.model_cooldown || 0),
+                quotaUnknown: 0
+            });
+            if (updated) this._debouncedSave(providerType);
+            const nearestRecoveryTime = recoveryTimes.length > 0
+                ? new Date(Math.min(...recoveryTimes)).toISOString()
+                : null;
+            return {
+                providerType,
+                model: canonicalModel,
+                eligibleCredentialHashes: allowed.map(provider => this._getAntigravityCredentialHash(provider.config?.uuid || provider.uuid || '')),
+                coolingCredentialHashes,
+                unavailableCredentialCount: coolingCredentialHashes.length,
+                nearestRecoveryTime,
+                reason: allowed.length === 0 ? 'all_credentials_unavailable' : 'partial_cooldown',
+                exhausted: allowed.length === 0 && coolingCredentialHashes.length > 0,
+                filterReasons,
+                providersScanned: providers.length
+            };
         });
 
-        if (updated) this._debouncedSave(providerType);
-        if (selectionDiagnostics && Object.keys(filterReasons).length > 0) {
+        if (selectionDiagnostics && snapshot.filterReasons && Object.keys(snapshot.filterReasons).length > 0) {
             selectionDiagnostics.filterReasons = {
                 ...(selectionDiagnostics.filterReasons || {}),
-                ...filterReasons
+                ...snapshot.filterReasons
             };
-            if (recoveryTimes.length > 0) {
-                selectionDiagnostics.nextModelRecoveryTime = new Date(Math.min(...recoveryTimes)).toISOString();
-            }
+            if (snapshot.nearestRecoveryTime) selectionDiagnostics.nextModelRecoveryTime = snapshot.nearestRecoveryTime;
         }
-
-        if (allowed.length === 0 && providers.length > 0 && Object.keys(filterReasons).length > 0) {
+        if (snapshot.exhausted === true) {
+            this._antigravityAvailabilityMetrics.allModelsUnavailable += 1;
+            this._antigravityRoutingMetrics.skippedByNegativeCache += 1;
             const error = new Error(`All Antigravity providers are cooling down for model ${canonicalModel}`);
             error.status = 429;
             error.code = 429;
             error.quotaScope = 'model';
             error.quotaKey = canonicalModel;
-            error.filterReasons = filterReasons;
-            if (recoveryTimes.length > 0) {
-                error.nextRecoveryTime = new Date(Math.min(...recoveryTimes)).toISOString();
-            }
+            error.filterReasons = { ...(snapshot.filterReasons || {}) };
+            if (snapshot.nearestRecoveryTime) error.nextRecoveryTime = snapshot.nearestRecoveryTime;
             throw error;
         }
-
-        return allowed;
+        if (snapshot.refreshInProgress === true) return [];
+        return providers.filter(provider => providerByHash.has(this._getAntigravityCredentialHash(provider.config?.uuid || provider.uuid || ''))
+            && snapshot.eligibleCredentialHashes.includes(this._getAntigravityCredentialHash(provider.config?.uuid || provider.uuid || '')));
     }
 
     _getAntigravityElasticRoutingConfig() {
@@ -3398,24 +3645,82 @@ export class ProviderPoolManager {
         }
     }
 
+    _createAntigravityAllModelsUnavailableError(requestedModel, errors = []) {
+        const recoveryTimes = errors
+            .map(error => error?.nextRecoveryTime || error?.retryAfter)
+            .map(value => Date.parse(value || ''))
+            .filter(value => Number.isFinite(value) && value > Date.now());
+        const nextRecoveryTime = recoveryTimes.length > 0
+            ? new Date(Math.min(...recoveryTimes)).toISOString()
+            : null;
+        const error = createGeminiRoutingError(
+            `All Antigravity models are unavailable for ${normalizeAntigravityQuotaModel(requestedModel)}`,
+            'ALL_MODELS_UNAVAILABLE',
+            429,
+            {
+                quotaScope: 'model',
+                quotaKey: normalizeAntigravityQuotaModel(requestedModel),
+                nextRecoveryTime,
+                retryAfter: nextRecoveryTime
+            }
+        );
+        this._antigravityAvailabilityMetrics.allModelsUnavailable += 1;
+        this._antigravityRoutingMetrics.allModelsUnavailable += 1;
+        this._antigravityRoutingMetrics.retrySuppressed += 1;
+        return error;
+    }
+
+    _shouldFastFailAntigravityModels(errors, models) {
+        const recoveryTimes = (errors || [])
+            .map(error => this._getRecoveryTimeFromError(error))
+            .filter(value => Number.isFinite(value) && value > Date.now());
+        const nearestRecoveryMs = recoveryTimes.length > 0
+            ? Math.min(...recoveryTimes) - Date.now()
+            : null;
+        return Array.isArray(errors)
+            && errors.length === models.length
+            && errors.length > 0
+            && errors.every(error => error?.quotaScope === 'model')
+            && (nearestRecoveryMs === null || nearestRecoveryMs > 2000);
+    }
+
     async _acquireAntigravityElasticSlot(providerType, requestedModel, options = {}) {
         const policy = this._getAntigravityElasticRoutingConfig();
         const canonicalRequestedModel = normalizeAntigravityQuotaModel(requestedModel);
+        const requestStore = requestContext.getStore();
+        const requestRouting = requestStore.antigravityRouting || {
+            attemptedModels: [],
+            negativeCacheVersion: this._antigravityAvailabilityRevision,
+            sourceModelCooldownMs: null
+        };
+        requestStore.antigravityRouting = requestRouting;
         const configuredFallbacks = Array.isArray(policy.fallbackModels) ? policy.fallbackModels : [];
         const models = [requestedModel, ...getAntigravityElasticFallbackModels(requestedModel, configuredFallbacks)];
         const startedAt = Date.now();
         const deadline = startedAt + policy.maxQueueWaitMs;
         let queueEntry = null;
+        let queueStartedAt = null;
         let latestErrors = [];
 
-        const attemptModels = async () => {
+        const attemptModels = async ({ includeSource = true } = {}) => {
             latestErrors = [];
-            for (let index = 0; index < models.length; index += 1) {
+            const startIndex = includeSource ? 0 : 1;
+            for (let index = startIndex; index < models.length; index += 1) {
                 const model = models[index];
+                if (requestRouting.attemptedModels.includes(model)) {
+                    this._antigravityRoutingMetrics.retrySuppressed += 1;
+                    continue;
+                }
+                if (!requestRouting.attemptedModels.includes(model)) requestRouting.attemptedModels.push(model);
+                if (index === 0) this._antigravityRoutingMetrics.sourceAttempts += 1;
+                else this._antigravityRoutingMetrics.fallbackAttempts += 1;
                 const attempt = await this._tryAntigravityElasticModel(providerType, model, options);
                 if (attempt.config) {
                     const isFallback = model !== requestedModel;
-                    if (isFallback) this.recordGeminiSchedulingEvent('fallbacks');
+                    if (isFallback) {
+                        this.recordGeminiSchedulingEvent('fallbacks');
+                        this._antigravityRoutingMetrics.fallbackSuccesses += 1;
+                    }
                     return {
                         config: attempt.config,
                         actualProviderType: providerType,
@@ -3432,7 +3737,9 @@ export class ProviderPoolManager {
         };
 
         try {
+            if (!requestRouting.attemptedModels.includes(requestedModel)) requestRouting.attemptedModels.push(requestedModel);
             const sourceAttempt = await this._tryAntigravityElasticModel(providerType, requestedModel, options);
+            this._antigravityRoutingMetrics.sourceAttempts += 1;
             if (sourceAttempt.config) {
                 return {
                     config: sourceAttempt.config,
@@ -3446,12 +3753,17 @@ export class ProviderPoolManager {
 
             const sourceRecovery = this._getRecoveryTimeFromError(sourceAttempt.error);
             const sourceWaitMs = sourceRecovery ? sourceRecovery - Date.now() : Infinity;
+            requestRouting.sourceModelCooldownMs = sourceWaitMs === Infinity ? null : Math.max(0, sourceWaitMs);
+            requestRouting.negativeCacheVersion = this._antigravityAvailabilityRevision;
             if (sourceWaitMs > 0 && sourceWaitMs <= policy.preferOriginalWaitMs) {
                 queueEntry = await this._acquireGeminiElasticQueueEntry(requestedModel, options, policy);
+                queueStartedAt = Date.now();
+                this._antigravityRoutingMetrics.queueEnqueued += 1;
                 await this._waitForGeminiElasticWake({
                     timeoutMs: Math.min(sourceWaitMs, Math.max(1, deadline - Date.now())),
                     abortSignal: options.abortSignal
                 });
+                this.invalidateAntigravityAvailability(canonicalRequestedModel);
                 const jitterRange = Math.max(0, policy.recoveryJitterMaxMs - policy.recoveryJitterMinMs);
                 const jitterMs = policy.recoveryJitterMinMs + Math.floor(Math.random() * (jitterRange + 1));
                 if (jitterMs > 0 && Date.now() < deadline) {
@@ -3474,9 +3786,17 @@ export class ProviderPoolManager {
                 }
             }
 
-            const immediateFallback = await attemptModels();
+            const immediateFallback = await attemptModels({ includeSource: false });
             if (immediateFallback) return immediateFallback;
-            if (!queueEntry) queueEntry = await this._acquireGeminiElasticQueueEntry(requestedModel, options, policy);
+            const allModelErrors = [sourceAttempt.error, ...latestErrors];
+            if (this._shouldFastFailAntigravityModels(allModelErrors, models)) {
+                throw this._createAntigravityAllModelsUnavailableError(requestedModel, allModelErrors);
+            }
+            if (!queueEntry) {
+                queueEntry = await this._acquireGeminiElasticQueueEntry(requestedModel, options, policy);
+                queueStartedAt = Date.now();
+                this._antigravityRoutingMetrics.queueEnqueued += 1;
+            }
 
             while (Date.now() < deadline) {
                 const now = Date.now();
@@ -3490,7 +3810,8 @@ export class ProviderPoolManager {
                     timeoutMs: Math.min(remainingMs, recoveryDelay, this.coordination ? 1000 : remainingMs),
                     abortSignal: options.abortSignal
                 });
-                const selected = await attemptModels();
+                this.invalidateAntigravityAvailability(canonicalRequestedModel);
+                const selected = await attemptModels({ includeSource: false });
                 if (selected) {
                     selected.queueOutcome = selected.isFallback ? 'fallback_after_wait' : 'recovered_original';
                     return selected;
@@ -3503,6 +3824,7 @@ export class ProviderPoolManager {
             const nextRecoveryTime = recoveryTimes.length > 0
                 ? new Date(Math.min(...recoveryTimes)).toISOString()
                 : null;
+            this._antigravityRoutingMetrics.queueTimeouts += 1;
             throw createGeminiRoutingError(
                 `Gemini model queue wait timed out after ${policy.maxQueueWaitMs}ms`,
                 'QUEUE_WAIT_TIMEOUT',
@@ -3515,6 +3837,9 @@ export class ProviderPoolManager {
                 }
             );
         } finally {
+            if (queueEntry && queueStartedAt !== null) {
+                this._antigravityRoutingMetrics.queueWaitMs += Math.max(0, Date.now() - queueStartedAt);
+            }
             await this._releaseGeminiElasticQueueEntry(queueEntry);
         }
     }
@@ -4356,6 +4681,7 @@ export class ProviderPoolManager {
 
         const canonicalModel = normalizeAntigravityQuotaModel(modelName);
         if (!canonicalModel) return;
+        this.invalidateAntigravityAvailability(canonicalModel);
         provider.config.antigravityQuotaHealth = provider.config.antigravityQuotaHealth || {};
         provider.config.antigravityQuotaHealth.families = provider.config.antigravityQuotaHealth.families || {};
         provider.config.antigravityQuotaHealth.models = provider.config.antigravityQuotaHealth.models || {};
@@ -4389,6 +4715,7 @@ export class ProviderPoolManager {
 
         const canonicalModel = normalizeAntigravityQuotaModel(modelName);
         if (!canonicalModel) return;
+        this.invalidateAntigravityAvailability(canonicalModel);
         provider.config.antigravityQuotaHealth = provider.config.antigravityQuotaHealth || {};
         provider.config.antigravityQuotaHealth.families = provider.config.antigravityQuotaHealth.families || {};
         provider.config.antigravityQuotaHealth.models = provider.config.antigravityQuotaHealth.models || {};

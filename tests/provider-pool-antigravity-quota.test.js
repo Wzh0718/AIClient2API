@@ -31,11 +31,12 @@ function writeUsageCache(instances) {
     }), 'utf8');
 }
 
-function createManager(providers) {
+function createManager(providers, coordination = null, globalConfig = {}) {
     const manager = new ProviderPoolManager({ 'gemini-antigravity': providers }, {
         logLevel: 'error',
         saveDebounceTime: 60 * 60 * 1000,
-        globalConfig: { PROVIDER_POOLS_FILE_PATH: 'configs/provider_pools.test.json' }
+        globalConfig: { PROVIDER_POOLS_FILE_PATH: 'configs/provider_pools.test.json', ...globalConfig },
+        coordination
     });
     managers.push(manager);
     return manager;
@@ -304,5 +305,260 @@ describe('provider pool Antigravity quota health', () => {
             quotaKey: 'gemini-3.1-flash-image',
             nextRecoveryTime: firstRecovery
         });
+    });
+
+    test('shares an Antigravity negative model snapshot across workers', async () => {
+        const recoveryTime = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        const snapshots = new Map();
+        const coordination = {
+            getRuntimeSnapshot: jest.fn(async scope => snapshots.get(scope) || null),
+            setRuntimeSnapshot: jest.fn(async (scope, value) => { snapshots.set(scope, value); return true; }),
+            acquireRuntimeSnapshotLock: jest.fn(async () => 'worker-lock'),
+            releaseRuntimeSnapshotLock: jest.fn(async () => true),
+            deleteRuntimeSnapshot: jest.fn(async scope => snapshots.delete(scope)),
+            updateGeminiSchedulingGauge: jest.fn()
+        };
+        const cooled = provider('credential-a', {
+            antigravityQuotaHealth: {
+                families: {},
+                models: {
+                    'gemini-3.1-flash-lite': {
+                        isHealthy: false,
+                        scheduledRecoveryTime: recoveryTime,
+                        source: 'upstream_429'
+                    }
+                }
+            }
+        });
+        const first = createManager([cooled], coordination);
+        await expect(first.selectProvider('gemini-antigravity', 'gemini-3.1-flash-lite')).rejects.toMatchObject({ status: 429 });
+        expect(coordination.setRuntimeSnapshot).toHaveBeenCalled();
+
+        const second = createManager([provider('credential-a')], coordination);
+        await expect(second.selectProvider('gemini-antigravity', 'gemini-3.1-flash-lite')).rejects.toMatchObject({
+            status: 429,
+            quotaScope: 'model'
+        });
+        expect(coordination.getRuntimeSnapshot).toHaveBeenCalled();
+    });
+
+    test('stores only credential hashes in the shared Antigravity snapshot', async () => {
+        const snapshots = [];
+        const coordination = {
+            getRuntimeSnapshot: jest.fn(async () => null),
+            setRuntimeSnapshot: jest.fn(async (scope, value) => { snapshots.push({ scope, value }); return true; }),
+            acquireRuntimeSnapshotLock: jest.fn(async () => 'worker-lock'),
+            releaseRuntimeSnapshotLock: jest.fn(async () => true),
+            deleteRuntimeSnapshot: jest.fn(async () => true),
+            updateGeminiSchedulingGauge: jest.fn()
+        };
+        const credentialUuid = 'credential-with-sensitive-uuid';
+        const manager = createManager([provider(credentialUuid)], coordination);
+        await manager.selectProvider('gemini-antigravity', 'gemini-3.1-flash-lite');
+        const serialized = JSON.stringify(snapshots);
+        expect(serialized).not.toContain(credentialUuid);
+        expect(snapshots[0].value.eligibleCredentialHashes).toEqual(expect.any(Array));
+    });
+
+    test('reuses a positive snapshot without rescanning credentials', async () => {
+        const snapshots = new Map();
+        const coordination = {
+            getRuntimeSnapshot: jest.fn(async scope => snapshots.get(scope) || null),
+            setRuntimeSnapshot: jest.fn(async (scope, value) => { snapshots.set(scope, value); return true; }),
+            acquireRuntimeSnapshotLock: jest.fn(async () => 'worker-lock'),
+            releaseRuntimeSnapshotLock: jest.fn(async () => true),
+            deleteRuntimeSnapshot: jest.fn(async () => true),
+            updateGeminiSchedulingGauge: jest.fn()
+        };
+        const manager = createManager([provider('credential-a')], coordination);
+        await manager.selectProvider('gemini-antigravity', 'gemini-3.1-flash-lite');
+        await manager.selectProvider('gemini-antigravity', 'gemini-3.1-flash-lite');
+        const metrics = manager.getAntigravityAvailabilityMetrics();
+        expect(metrics.cacheHits).toBeGreaterThan(0);
+        expect(metrics.providersScanned).toBe(1);
+    });
+
+    test('keeps worker-local availability cache shorter than the shared snapshot TTL', async () => {
+        const snapshots = new Map();
+        const coordination = {
+            getRuntimeSnapshot: jest.fn(async scope => snapshots.get(scope) || null),
+            setRuntimeSnapshot: jest.fn(async (scope, value) => { snapshots.set(scope, value); return true; }),
+            acquireRuntimeSnapshotLock: jest.fn(async () => 'worker-lock'),
+            releaseRuntimeSnapshotLock: jest.fn(async () => true),
+            updateGeminiSchedulingGauge: jest.fn()
+        };
+        const manager = createManager([provider('credential-a')], coordination);
+        await manager.selectProvider('gemini-antigravity', 'gemini-3.1-flash-lite');
+        const snapshot = [...manager._antigravityAvailabilityLocal.values()][0];
+
+        expect(snapshot.localExpiresAt).toBeGreaterThan(snapshot.createdAt);
+        expect(snapshot.localExpiresAt - snapshot.createdAt).toBeLessThanOrEqual(250);
+        expect(snapshot.expiresAt - snapshot.createdAt).toBeGreaterThanOrEqual(1000);
+    });
+
+    test('deduplicates concurrent Antigravity snapshot refreshes', async () => {
+        let lockCalls = 0;
+        let snapshot = null;
+        const coordination = {
+            getRuntimeSnapshot: jest.fn(async () => snapshot),
+            setRuntimeSnapshot: jest.fn(async (scope, value) => { snapshot = value; return true; }),
+            acquireRuntimeSnapshotLock: jest.fn(async () => {
+                lockCalls += 1;
+                return lockCalls === 1 ? 'worker-lock' : null;
+            }),
+            releaseRuntimeSnapshotLock: jest.fn(async () => true),
+            deleteRuntimeSnapshot: jest.fn(async () => true),
+            updateGeminiSchedulingGauge: jest.fn()
+        };
+        const managerA = createManager([provider('credential-a')], coordination);
+        const managerB = createManager([provider('credential-a')], coordination);
+        const first = managerA.selectProvider('gemini-antigravity', 'gemini-3.1-flash-lite');
+        const second = managerB.selectProvider('gemini-antigravity', 'gemini-3.1-flash-lite');
+        await Promise.all([first, second]);
+        expect(coordination.acquireRuntimeSnapshotLock).toHaveBeenCalledTimes(2);
+        expect(coordination.setRuntimeSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    test('does not rescan credentials when another worker owns the refresh lock', async () => {
+        const coordination = {
+            getRuntimeSnapshot: jest.fn(async () => null),
+            acquireRuntimeSnapshotLock: jest.fn(async () => null),
+            releaseRuntimeSnapshotLock: jest.fn(async () => true)
+        };
+        const manager = createManager([provider('credential-a')], coordination);
+        const refresh = jest.fn(async () => {
+            throw new Error('unexpected duplicate scan');
+        });
+
+        const snapshot = await manager._getOrRefreshAntigravityAvailability('refresh-owned-elsewhere', refresh);
+
+        expect(refresh).not.toHaveBeenCalled();
+        expect(snapshot).toMatchObject({ refreshInProgress: true, exhausted: false });
+    });
+
+    test('fails fast without queueing when every Antigravity fallback model is unavailable', async () => {
+        const recoveryTime = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        writeUsageCache([paidUsage('credential-a'), paidUsage('credential-b')]);
+        const manager = createManager([
+            provider('credential-a', {
+                antigravityQuotaHealth: {
+                    families: {},
+                    models: {
+                        'gemini-3.1-flash-lite': { isHealthy: false, scheduledRecoveryTime: recoveryTime, source: 'upstream_429' },
+                        'gemini-3-flash': { isHealthy: false, scheduledRecoveryTime: recoveryTime, source: 'upstream_429' }
+                    }
+                }
+            }),
+            provider('credential-b', {
+                antigravityQuotaHealth: {
+                    families: {},
+                    models: {
+                        'gemini-3.1-flash-lite': { isHealthy: false, scheduledRecoveryTime: recoveryTime, source: 'upstream_429' },
+                        'gemini-3-flash': { isHealthy: false, scheduledRecoveryTime: recoveryTime, source: 'upstream_429' }
+                    }
+                }
+            })
+        ], null, {
+            antigravityElasticRouting: {
+                enabled: true,
+                fallbackModels: ['gemini-3-flash'],
+                maxQueueWaitMs: 100
+            }
+        });
+        const queueSpy = jest.spyOn(manager, '_acquireGeminiElasticQueueEntry');
+        const acquireSpy = jest.spyOn(manager, 'acquireSlot');
+
+        await expect(manager.acquireSlotWithFallback('gemini-antigravity', 'gemini-3.1-flash-lite')).rejects.toMatchObject({
+            status: 429,
+            code: 'ALL_MODELS_UNAVAILABLE'
+        });
+        expect(queueSpy).not.toHaveBeenCalled();
+        expect(acquireSpy.mock.calls.filter(call => call[1] === 'gemini-3.1-flash-lite')).toHaveLength(1);
+        expect(manager.getAntigravityAvailabilityMetrics().allModelsUnavailable).toBeGreaterThan(0);
+    });
+
+    test('falls back within Antigravity after a shared negative source snapshot', async () => {
+        const recoveryTime = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        const manager = createManager([
+            provider('source-cooled', {
+                supportedModels: ['gemini-3.1-flash-lite', 'gemini-3-flash'],
+                antigravityQuotaHealth: {
+                    families: {},
+                    models: {
+                        'gemini-3.1-flash-lite': { isHealthy: false, scheduledRecoveryTime: recoveryTime, source: 'upstream_429' }
+                    }
+                }
+            }),
+            provider('fallback-ready', {
+                supportedModels: ['gemini-3-flash'],
+                notSupportedModels: ['gemini-3.1-flash-lite']
+            })
+        ], null, {
+            antigravityElasticRouting: {
+                enabled: true,
+                fallbackModels: ['gemini-3-flash'],
+                maxQueueWaitMs: 100,
+                preferOriginalWaitMs: 0
+            }
+        });
+
+        const result = await manager.acquireSlotWithFallback('gemini-antigravity', 'gemini-3.1-flash-lite');
+
+        expect(result).toMatchObject({
+            actualProviderType: 'gemini-antigravity',
+            actualModel: 'gemini-3-flash',
+            isFallback: true,
+            modelFallbackReason: 'SOURCE_MODEL_UNAVAILABLE',
+            fallbackAttemptCount: 1
+        });
+        expect(manager.getAntigravityRoutingMetrics()).toMatchObject({
+            sourceAttempts: 1,
+            fallbackAttempts: 1,
+            fallbackSuccesses: 1
+        });
+    });
+
+    test('invalidates shared availability when a credential enters cooldown', async () => {
+        let snapshot = null;
+        const coordination = {
+            getRuntimeSnapshot: jest.fn(async () => snapshot),
+            setRuntimeSnapshot: jest.fn(async (scope, value) => { snapshot = value; return true; }),
+            acquireRuntimeSnapshotLock: jest.fn(async () => 'worker-lock'),
+            releaseRuntimeSnapshotLock: jest.fn(async () => true),
+            deleteRuntimeSnapshot: jest.fn(async () => { snapshot = null; return true; }),
+            setProviderModelCooldown: jest.fn(async () => true),
+            updateGeminiSchedulingGauge: jest.fn(),
+            recordGeminiSchedulingEvent: jest.fn()
+        };
+        const target = provider('credential-a');
+        const manager = createManager([target], coordination);
+        await manager.selectProvider('gemini-antigravity', 'gemini-3.1-flash-lite');
+        expect(manager.getAntigravityAvailabilityMetrics().activeSnapshots).toBe(1);
+
+        manager.markAntigravityModelQuotaUnhealthy(
+            'gemini-antigravity',
+            target,
+            'gemini-3.1-flash-lite',
+            'quota exhausted',
+            new Date(Date.now() + 10_000)
+        );
+
+        expect(manager.getAntigravityAvailabilityMetrics().activeSnapshots).toBe(0);
+        expect(manager.getAntigravityAvailabilityMetrics().invalidations).toBeGreaterThan(0);
+    });
+
+    test('releases the shared availability refresh lock when a refresh fails', async () => {
+        const coordination = {
+            getRuntimeSnapshot: jest.fn(async () => null),
+            acquireRuntimeSnapshotLock: jest.fn(async () => 'worker-lock'),
+            releaseRuntimeSnapshotLock: jest.fn(async () => true)
+        };
+        const manager = createManager([provider('credential-a')], coordination);
+
+        await expect(manager._getOrRefreshAntigravityAvailability('scope-failing-refresh', async () => {
+            throw new Error('refresh failed');
+        })).rejects.toThrow('refresh failed');
+
+        expect(coordination.releaseRuntimeSnapshotLock).toHaveBeenCalledWith('scope-failing-refresh', 'worker-lock');
     });
 });

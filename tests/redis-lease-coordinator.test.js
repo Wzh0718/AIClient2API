@@ -659,6 +659,29 @@ describe('RedisLeaseCoordinator', () => {
             .rejects.toBeInstanceOf(CoordinationUnavailableError);
     });
 
+    test('surfaces model cooldown blocking with a retry recovery time', async () => {
+        const redis = {
+            evalScript: jest.fn(async (name) => {
+                if (name === 'acquire-provider-lease') {
+                    return JSON.stringify({ cooldownBlocked: true, retryAfterMs: 2400 });
+                }
+                return null;
+            })
+        };
+        const coordinator = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+        coordinator.ready = true;
+        coordinator.bootId = 'boot-1';
+
+        await expect(coordinator.acquire([
+            { providerType: 'gemini-antigravity', uuid: 'credential-a', concurrencyLimit: 1 }
+        ], { requestedModel: 'gemini-3.1-flash-lite' })).rejects.toMatchObject({
+            status: 429,
+            quotaScope: 'model',
+            quotaKey: 'gemini-3.1-flash-lite',
+            nextRecoveryTime: expect.any(String)
+        });
+    });
+
     test('issues monotonic refresh fences and rejects stale writers', async () => {
         const redis = new InMemoryRedisExecutor();
         const first = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });

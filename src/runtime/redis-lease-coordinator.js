@@ -34,9 +34,18 @@ local best_preferred = false
 local affinity_candidate = nil
 local affinity_active = nil
 local probe_blocked = false
+local cooling_count = 0
+local nearest_cooldown_ttl = nil
 for _, candidate in ipairs(candidates) do
   local cooling = candidate.cooldownHash and candidate.cooldownHash ~= ''
     and redis.call('EXISTS', KEYS[1] .. ':model-cooldown:' .. candidate.cooldownHash) == 1
+  if cooling then
+    cooling_count = cooling_count + 1
+    local cooldown_ttl = redis.call('PTTL', KEYS[1] .. ':model-cooldown:' .. candidate.cooldownHash)
+    if cooldown_ttl and cooldown_ttl > 0 and (not nearest_cooldown_ttl or cooldown_ttl < nearest_cooldown_ttl) then
+      nearest_cooldown_ttl = cooldown_ttl
+    end
+  end
   local probe_busy = candidate.probeHash and candidate.probeHash ~= ''
     and redis.call('EXISTS', KEYS[1] .. ':model-probe:' .. candidate.probeHash) == 1
   if probe_busy then probe_blocked = true end
@@ -91,6 +100,9 @@ if routed_provider_key ~= '' then
   end
 end
 if best == nil then
+  if cooling_count == #candidates and cooling_count > 0 then
+    return cjson.encode({ cooldownBlocked = true, retryAfterMs = nearest_cooldown_ttl or 1000 })
+  end
   if probe_blocked then return cjson.encode({ probeRejected = true }) end
   return nil
 end
@@ -712,6 +724,16 @@ export class RedisLeaseCoordinator {
             this.modelSchedulingMetrics.probeRejected += 1;
             return null;
         }
+        if (lease.cooldownBlocked) {
+            const error = new Error(`All providers are cooling down for model ${requestedModel}`);
+            error.status = 429;
+            error.code = 429;
+            error.quotaScope = 'model';
+            error.quotaKey = requestedModel;
+            error.retryAfter = new Date(Date.now() + Math.max(1000, Number(lease.retryAfterMs) || 1000)).toISOString();
+            error.nextRecoveryTime = error.retryAfter;
+            throw error;
+        }
         if (lease.coordinationRestarted) {
             this.ready = false;
             this.recovering = true;
@@ -1003,7 +1025,7 @@ export class RedisLeaseCoordinator {
     async setRuntimeSnapshot(scope, value, { ttlMs = 3000 } = {}) {
         const normalizedScope = String(scope || '').trim();
         if (!normalizedScope) return false;
-        const safeTtlMs = Math.max(500, Math.min(15_000, Number(ttlMs) || 3000));
+        const safeTtlMs = Math.max(500, Math.min(30_000, Number(ttlMs) || 3000));
         await this._eval('set-runtime-snapshot', SET_RUNTIME_SNAPSHOT_SCRIPT, [
             hashAffinityKey(normalizedScope),
             JSON.stringify(value || {}),

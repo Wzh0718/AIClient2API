@@ -1,5 +1,6 @@
 import { jest } from '@jest/globals';
 import { ProviderPoolManager, getAntigravityElasticFallbackModels } from '../src/providers/provider-pool-manager.js';
+import requestContext from '../src/utils/context.js';
 
 jest.mock('../src/providers/adapter.js', () => ({
     getServiceAdapter: jest.fn(),
@@ -115,6 +116,42 @@ describe('Antigravity elastic queue and model fallback', () => {
             isFallback: true,
             modelFallbackReason: 'SOURCE_MODEL_UNAVAILABLE'
         });
+    });
+
+    test('records attempted models and source cooldown in the request context', async () => {
+        const manager = createManager([
+            provider('gemini-a', { [sourceModel]: coolingUntil(500) })
+        ]);
+        const store = { requestId: 'routing-context-test' };
+
+        const result = await requestContext.run(store, () => manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: 'key-a'
+        }));
+
+        expect(result.actualModel).toBe(firstFallback);
+        expect(store.antigravityRouting).toMatchObject({
+            attemptedModels: [sourceModel, firstFallback],
+            negativeCacheVersion: expect.any(Number),
+            sourceModelCooldownMs: expect.any(Number)
+        });
+    });
+
+    test('does not retry the same fallback model within one request lifecycle', async () => {
+        const manager = createManager([
+            provider('gemini-a', {
+                [sourceModel]: coolingUntil(1500),
+                [firstFallback]: coolingUntil(1500),
+                [secondFallback]: coolingUntil(1500)
+            })
+        ], { maxQueueWaitMs: 25, preferOriginalWaitMs: 0 });
+        const attempts = jest.spyOn(manager, '_tryAntigravityElasticModel');
+
+        await expect(manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: 'key-a'
+        })).rejects.toMatchObject({ code: 'QUEUE_WAIT_TIMEOUT' });
+
+        const attemptedModels = attempts.mock.calls.map(([, model]) => model);
+        expect(new Set(attemptedModels).size).toBe(attemptedModels.length);
     });
 
     test('continues to 3.1 Flash Lite when 2.5 Flash is also cooling down', async () => {
