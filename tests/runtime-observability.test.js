@@ -5,6 +5,7 @@ import {
 import { RuntimeMetrics } from '../src/runtime/runtime-metrics.js';
 import {
     aggregateWorkerMetrics,
+    getPersistenceBacklog,
     resolveRuntimeHealthStatus,
     shutdownWorkerStages
 } from '../src/runtime/multi-worker-runtime.js';
@@ -316,6 +317,16 @@ describe('runtime observability baseline', () => {
             stages: { byWorker: {} },
             output: { bytes: 300, backpressureMs: 10 },
             hooks: { pending: 0, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 0, consumerLag: 0, oldestPendingAgeMs: 0, available: true, unavailableWorkers: [], byWorker: {} },
+            usageLedger: {
+                events: 0,
+                rawEvents: 0,
+                pending: 0,
+                projectionLag: 0,
+                oldestPendingAgeMs: 0,
+                databaseBytes: 0,
+                projections: {},
+                byWorker: {}
+            },
             usageEventBatch: {
                 flushCount: 0,
                 flushBySize: 0,
@@ -328,8 +339,29 @@ describe('runtime observability baseline', () => {
                 lastFlushMs: 0,
                 failedBatches: 0,
                 pending: 0,
+                acceptedEvents: 0,
+                rejectedEvents: 0,
+                retryCount: 0,
+                queuePending: 0,
+                queueCapacity: 0,
+                availableCapacity: 0,
+                inFlight: 0,
+                pollPaused: false,
                 queueAgeMs: 0,
                 lastCommitMs: 0,
+                byWorker: {}
+            },
+            runtimeHookPoller: {
+                streamReadBatches: 0,
+                streamReadEvents: 0,
+                claimCount: 0,
+                statusPollCount: 0,
+                errors: 0,
+                batchErrors: 0,
+                enqueuedEvents: 0,
+                rejectedEvents: 0,
+                pollPaused: false,
+                lastError: null,
                 byWorker: {}
             },
             inFlight: 3,
@@ -521,6 +553,148 @@ describe('runtime observability baseline', () => {
                 'control-1': expect.any(Object),
                 'execution-1': expect.any(Object)
             }
+        });
+    });
+
+    test('aggregates bounded ingress and poller metrics without double-counting stream backlog', () => {
+        const snapshots = new Map([
+            ['control-1', {
+                usageEventBatch: {
+                    acceptedEvents: 120,
+                    rejectedEvents: 0,
+                    retryCount: 2,
+                    queuePending: 80,
+                    queueCapacity: 1000,
+                    inFlight: 100,
+                    availableCapacity: 820,
+                    pollPaused: false
+                },
+                runtimeHookPoller: {
+                    streamReadBatches: 3,
+                    streamReadEvents: 120,
+                    claimCount: 1,
+                    statusPollCount: 2,
+                    enqueuedEvents: 120,
+                    rejectedEvents: 0,
+                    pollPaused: false
+                },
+                hooks: { pending: 80, spooled: 0, consumerLag: 0, available: true }
+            }]
+        ]);
+
+        const aggregate = aggregateWorkerMetrics(snapshots);
+        expect(aggregate.usageEventBatch).toMatchObject({
+            acceptedEvents: 120,
+            rejectedEvents: 0,
+            retryCount: 2,
+            queuePending: 80,
+            queueCapacity: 1000,
+            inFlight: 100,
+            availableCapacity: 820,
+            pollPaused: false
+        });
+        expect(aggregate.runtimeHookPoller).toMatchObject({
+            streamReadBatches: 3,
+            streamReadEvents: 120,
+            claimCount: 1,
+            statusPollCount: 2,
+            enqueuedEvents: 120,
+            rejectedEvents: 0,
+            pollPaused: false,
+            byWorker: { 'control-1': expect.any(Object) }
+        });
+        expect(aggregate.hooks.pending).toBe(80);
+    });
+
+    test('uses the largest logical hook layer instead of summing the same event twice', () => {
+        const snapshots = new Map([
+            ['execution-1', {
+                hooks: {
+                    pending: 5,
+                    outboundPending: 5,
+                    streamPending: 0,
+                    spooled: 0,
+                    consumerLag: 0,
+                    available: true
+                }
+            }],
+            ['control-1', {
+                hooks: {
+                    pending: 5,
+                    outboundPending: 0,
+                    streamPending: 5,
+                    spooled: 0,
+                    consumerLag: 0,
+                    available: true
+                }
+            }]
+        ]);
+
+        const hooks = aggregateWorkerMetrics(snapshots).hooks;
+        expect(hooks.pending).toBe(5);
+        expect(hooks.byWorker['execution-1'].outboundPending).toBe(5);
+        expect(hooks.byWorker['control-1'].streamPending).toBe(5);
+    });
+
+    test('exposes usage ledger projection lag and avoids double counting a shared database', () => {
+        const snapshots = new Map([
+            ['control-1', {
+                hooks: {
+                    pending: 2,
+                    spooled: 1,
+                    consumerLag: 3,
+                    available: true,
+                    usageLedger: {
+                        dbPath: '/var/lib/aiclient/usage-events.sqlite',
+                        events: 100,
+                        rawEvents: 100,
+                        pending: 7,
+                        oldestPendingAgeMs: 1200,
+                        projections: {
+                            'api-potluck': { lag: 4, attempts: 1, oldestPendingAgeMs: 900 },
+                            'request-audit': { lag: 3, attempts: 2, oldestPendingAgeMs: 1200 }
+                        }
+                    }
+                }
+            }],
+            ['control-2', {
+                hooks: {
+                    pending: 1,
+                    spooled: 0,
+                    consumerLag: 0,
+                    available: true,
+                    usageLedger: {
+                        dbPath: '/var/lib/aiclient/usage-events.sqlite',
+                        events: 100,
+                        rawEvents: 100,
+                        pending: 9,
+                        oldestPendingAgeMs: 1800,
+                        projections: {
+                            'api-potluck': { lag: 5, attempts: 3, oldestPendingAgeMs: 1800 },
+                            'request-audit': { lag: 2, attempts: 4, oldestPendingAgeMs: 1500 }
+                        }
+                    }
+                }
+            }]
+        ]);
+
+        const aggregate = aggregateWorkerMetrics(snapshots);
+        expect(aggregate.usageLedger).toMatchObject({
+            events: 100,
+            rawEvents: 100,
+            pending: 9,
+            projectionLag: 8,
+            oldestPendingAgeMs: 1800
+        });
+        expect(aggregate.usageLedger.projections).toMatchObject({
+            'api-potluck': { lag: 5, attempts: 3 },
+            'request-audit': { lag: 3, attempts: 4 }
+        });
+        expect(Object.keys(aggregate.usageLedger.byWorker)).toEqual(['control-1', 'control-2']);
+        expect(getPersistenceBacklog(aggregate)).toEqual({
+            total: 9,
+            hooks: 7,
+            usageLedger: 9
         });
     });
 

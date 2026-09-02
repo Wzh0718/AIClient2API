@@ -12,6 +12,110 @@ function addMapValues(target, source = {}) {
     for (const [key, value] of Object.entries(source)) target[key] = (target[key] || 0) + Number(value || 0);
 }
 
+function nonNegativeNumber(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function normalizeUsageLedgerSnapshot(snapshot = {}) {
+    const projections = {};
+    let projectionLag = 0;
+    for (const [projectionName, projection] of Object.entries(snapshot.projections || {})) {
+        const lag = nonNegativeNumber(projection?.lag);
+        projections[projectionName] = {
+            lag,
+            attempts: nonNegativeNumber(projection?.attempts),
+            oldestPendingAgeMs: nonNegativeNumber(projection?.oldestPendingAgeMs),
+            lastError: typeof projection?.lastError === 'string' ? projection.lastError : null,
+            lastSuccessAt: projection?.lastSuccessAt || null
+        };
+        projectionLag += lag;
+    }
+    return {
+        events: nonNegativeNumber(snapshot.events),
+        rawEvents: nonNegativeNumber(snapshot.rawEvents),
+        pending: nonNegativeNumber(snapshot.pending),
+        projectionLag,
+        oldestPendingAgeMs: nonNegativeNumber(snapshot.oldestPendingAgeMs),
+        databaseBytes: nonNegativeNumber(snapshot.databaseBytes),
+        projections
+    };
+}
+
+function mergeSharedUsageLedgerSnapshot(target, source) {
+    target.events = Math.max(target.events, source.events);
+    target.rawEvents = Math.max(target.rawEvents, source.rawEvents);
+    target.pending = Math.max(target.pending, source.pending);
+    target.oldestPendingAgeMs = Math.max(target.oldestPendingAgeMs, source.oldestPendingAgeMs);
+    target.databaseBytes = Math.max(target.databaseBytes, source.databaseBytes);
+    for (const [projectionName, projection] of Object.entries(source.projections)) {
+        const current = target.projections[projectionName] || {
+            lag: 0,
+            attempts: 0,
+            oldestPendingAgeMs: 0,
+            lastError: null,
+            lastSuccessAt: null
+        };
+        current.lag = Math.max(current.lag, projection.lag);
+        current.attempts = Math.max(current.attempts, projection.attempts);
+        current.oldestPendingAgeMs = Math.max(current.oldestPendingAgeMs, projection.oldestPendingAgeMs);
+        if (projection.lastSuccessAt && (!current.lastSuccessAt || projection.lastSuccessAt > current.lastSuccessAt)) {
+            current.lastSuccessAt = projection.lastSuccessAt;
+        }
+        if (projection.lastError) current.lastError = projection.lastError;
+        target.projections[projectionName] = current;
+    }
+    target.projectionLag = Object.values(target.projections)
+        .reduce((total, projection) => total + nonNegativeNumber(projection.lag), 0);
+}
+
+function addDistinctUsageLedgerSnapshot(target, source) {
+    target.events += source.events;
+    target.rawEvents += source.rawEvents;
+    target.pending += source.pending;
+    target.projectionLag += source.projectionLag;
+    target.oldestPendingAgeMs = Math.max(target.oldestPendingAgeMs, source.oldestPendingAgeMs);
+    target.databaseBytes += source.databaseBytes;
+    for (const [projectionName, projection] of Object.entries(source.projections)) {
+        const current = target.projections[projectionName] || {
+            lag: 0,
+            attempts: 0,
+            oldestPendingAgeMs: 0,
+            lastError: null,
+            lastSuccessAt: null
+        };
+        current.lag += projection.lag;
+        current.attempts = Math.max(current.attempts, projection.attempts);
+        current.oldestPendingAgeMs = Math.max(current.oldestPendingAgeMs, projection.oldestPendingAgeMs);
+        if (projection.lastSuccessAt && (!current.lastSuccessAt || projection.lastSuccessAt > current.lastSuccessAt)) {
+            current.lastSuccessAt = projection.lastSuccessAt;
+        }
+        if (projection.lastError) current.lastError = projection.lastError;
+        target.projections[projectionName] = current;
+    }
+}
+
+/**
+ * Return a logical persistence backlog without counting the same event once
+ * in the ingress stream and again in the usage ledger/projection rows.
+ */
+export function getPersistenceBacklog(metrics = {}) {
+    const hooks = metrics.hooks || {};
+    const hookBacklog = nonNegativeNumber(hooks.pending)
+        + nonNegativeNumber(hooks.spooled)
+        + nonNegativeNumber(hooks.consumerLag);
+    const ledger = metrics.usageLedger || {};
+    const usageLedgerBacklog = Math.max(
+        nonNegativeNumber(ledger.pending),
+        nonNegativeNumber(ledger.projectionLag)
+    );
+    return {
+        total: Math.max(hookBacklog, usageLedgerBacklog),
+        hooks: hookBacklog,
+        usageLedger: usageLedgerBacklog
+    };
+}
+
 const CODEX_QUOTA_METRIC_FIELDS = [
     'codexQuotaFilterCalls',
     'codexQuotaFilterCacheHits',
@@ -42,6 +146,16 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         stages: { byWorker: {} },
         output: { bytes: 0, backpressureMs: 0 },
         hooks: { pending: 0, spooled: 0, spoolBytes: 0, dropped: 0, backpressured: 0, consumerLag: 0, oldestPendingAgeMs: 0, available: true, unavailableWorkers: [], byWorker: {} },
+        usageLedger: {
+            events: 0,
+            rawEvents: 0,
+            pending: 0,
+            projectionLag: 0,
+            oldestPendingAgeMs: 0,
+            databaseBytes: 0,
+            projections: {},
+            byWorker: {}
+        },
         usageEventBatch: {
             flushCount: 0,
             flushBySize: 0,
@@ -55,7 +169,28 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             lastCommitMs: 0,
             failedBatches: 0,
             pending: 0,
+            acceptedEvents: 0,
+            rejectedEvents: 0,
+            retryCount: 0,
+            queuePending: 0,
+            queueCapacity: 0,
+            availableCapacity: 0,
+            inFlight: 0,
+            pollPaused: false,
             queueAgeMs: 0,
+            byWorker: {}
+        },
+        runtimeHookPoller: {
+            streamReadBatches: 0,
+            streamReadEvents: 0,
+            claimCount: 0,
+            statusPollCount: 0,
+            errors: 0,
+            batchErrors: 0,
+            enqueuedEvents: 0,
+            rejectedEvents: 0,
+            pollPaused: false,
+            lastError: null,
             byWorker: {}
         },
         imageCapacity: {
@@ -141,6 +276,11 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             byWorker: {}
         }
     };
+    let usageBatchWorkersWithCapacity = 0;
+    let explicitHookLayers = false;
+    let outboundPendingTotal = 0;
+    let streamPendingTotal = 0;
+    const usageLedgerSources = new Map();
     for (const [workerId, snapshot] of workerSnapshots.entries()) {
         result.requests.total += Number(snapshot?.requests?.total || 0);
         result.requests.success += Number(snapshot?.requests?.success || 0);
@@ -169,6 +309,11 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         result.inFlight += Number(snapshot?.inFlight || 0);
         if (snapshot?.hooks) {
             result.hooks.byWorker[workerId] = snapshot.hooks;
+            if (snapshot.hooks.outboundPending !== undefined || snapshot.hooks.streamPending !== undefined) {
+                explicitHookLayers = true;
+                outboundPendingTotal += Number(snapshot.hooks.outboundPending || 0);
+                streamPendingTotal += Number(snapshot.hooks.streamPending || 0);
+            }
             if (snapshot.hooks.available === false) {
                 result.hooks.available = false;
                 result.hooks.unavailableWorkers.push(workerId);
@@ -178,16 +323,55 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             }
             result.hooks.oldestPendingAgeMs = Math.max(result.hooks.oldestPendingAgeMs, Number(snapshot.hooks.oldestPendingAgeMs || 0));
         }
+        const usageLedgerSnapshot = snapshot?.usageLedger || snapshot?.hooks?.usageLedger;
+        if (usageLedgerSnapshot && typeof usageLedgerSnapshot === 'object') {
+            const normalizedLedger = normalizeUsageLedgerSnapshot(usageLedgerSnapshot);
+            result.usageLedger.byWorker[workerId] = normalizedLedger;
+            const sourceKey = typeof usageLedgerSnapshot.dbPath === 'string' && usageLedgerSnapshot.dbPath
+                ? `db:${usageLedgerSnapshot.dbPath}`
+                : `worker:${workerId}`;
+            const sharedLedger = usageLedgerSources.get(sourceKey);
+            if (sharedLedger) mergeSharedUsageLedgerSnapshot(sharedLedger, normalizedLedger);
+            else usageLedgerSources.set(sourceKey, normalizedLedger);
+        }
         if (snapshot?.usageEventBatch) {
             const batch = snapshot.usageEventBatch;
             result.usageEventBatch.byWorker[workerId] = batch;
-            for (const field of ['flushCount', 'flushBySize', 'flushByTimer', 'flushByShutdown', 'eventsAppended', 'totalBatchSize', 'failedBatches', 'pending']) {
+            for (const field of [
+                'flushCount', 'flushBySize', 'flushByTimer', 'flushByShutdown',
+                'eventsAppended', 'totalBatchSize', 'failedBatches', 'pending',
+                'acceptedEvents', 'rejectedEvents', 'retryCount', 'queuePending', 'inFlight'
+            ]) {
                 result.usageEventBatch[field] += Number(batch[field] || 0);
             }
+            result.usageEventBatch.queueCapacity = Math.max(
+                result.usageEventBatch.queueCapacity,
+                Number(batch.queueCapacity || 0)
+            );
+            if (Number(batch.queueCapacity || 0) > 0) {
+                const available = Number(batch.availableCapacity || 0);
+                result.usageEventBatch.availableCapacity = usageBatchWorkersWithCapacity === 0
+                    ? available
+                    : Math.min(result.usageEventBatch.availableCapacity, available);
+                usageBatchWorkersWithCapacity += 1;
+            }
+            result.usageEventBatch.pollPaused ||= batch.pollPaused === true;
             result.usageEventBatch.lastBatchSize = Math.max(result.usageEventBatch.lastBatchSize, Number(batch.lastBatchSize || 0));
             result.usageEventBatch.lastFlushMs = Math.max(result.usageEventBatch.lastFlushMs, Number(batch.lastFlushMs || 0));
             result.usageEventBatch.lastCommitMs = Math.max(result.usageEventBatch.lastCommitMs, Number(batch.lastCommitMs || batch.lastFlushMs || 0));
             result.usageEventBatch.queueAgeMs = Math.max(result.usageEventBatch.queueAgeMs, Number(batch.queueAgeMs || 0));
+        }
+        if (snapshot?.runtimeHookPoller) {
+            const poller = snapshot.runtimeHookPoller;
+            result.runtimeHookPoller.byWorker[workerId] = poller;
+            for (const field of [
+                'streamReadBatches', 'streamReadEvents', 'claimCount', 'statusPollCount',
+                'errors', 'batchErrors', 'enqueuedEvents', 'rejectedEvents'
+            ]) {
+                result.runtimeHookPoller[field] += Number(poller[field] || 0);
+            }
+            result.runtimeHookPoller.pollPaused ||= poller.pollPaused === true;
+            if (poller.lastError) result.runtimeHookPoller.lastError = poller.lastError;
         }
         result.process.rss += Number(snapshot?.process?.rss || 0);
         result.process.heapUsed += Number(snapshot?.process?.heapUsed || 0);
@@ -300,6 +484,8 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
     if (result.usageEventBatch.flushCount > 0) {
         result.usageEventBatch.averageBatchSize = result.usageEventBatch.totalBatchSize / result.usageEventBatch.flushCount;
     }
+    for (const ledger of usageLedgerSources.values()) addDistinctUsageLedgerSnapshot(result.usageLedger, ledger);
+    if (explicitHookLayers) result.hooks.pending = Math.max(outboundPendingTotal, streamPendingTotal);
     return result;
 }
 
@@ -583,7 +769,8 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
             readyWorkers: ready.size,
             coordination: 'redis',
             leaseRecovery: 'ready',
-            persistenceBacklog: metrics.hooks.pending + metrics.hooks.spooled + metrics.hooks.consumerLag,
+            persistenceBacklog: getPersistenceBacklog(metrics).total,
+            persistenceBacklogByLayer: getPersistenceBacklog(metrics),
             providerConfig: providerConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
             rawCapture: rawCaptureConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
             potluckKeyConfig: potluckKeyConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id)),
@@ -625,8 +812,7 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
             closeProxy: () => new Promise(resolve => proxy.close(resolve)),
             stopRole,
             getBacklog: () => {
-                const hooks = aggregateWorkerMetrics(workerMetrics).hooks;
-                return hooks.pending + hooks.spooled + hooks.consumerLag;
+                return getPersistenceBacklog(aggregateWorkerMetrics(workerMetrics)).total;
             }
         });
         if (!result.drained) logger.error?.(`[Runtime] Hook drain timed out with backlog=${result.remainingBacklog}`);

@@ -163,6 +163,11 @@ export class RuntimeHookBridge {
                 }
                 const durableResult = await this.durableTransport.publish(durableEvent);
                 if (durableResult?.streamId) outbound.streamId = durableResult.streamId;
+                // Local standalone transports can append directly to their
+                // durable store and return an explicit acknowledgement. Do
+                // not retain such events in the IPC retry map: there is no
+                // control worker that could send the normal ACK frame.
+                if (tracked && durableResult?.acknowledged === true) await this.ack(eventId);
             }
         } catch (error) {
             if (tracked) this.outbound.delete(eventId);

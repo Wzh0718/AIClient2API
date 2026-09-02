@@ -22,6 +22,9 @@ import { createRuntimeHookStreamFromEnv } from '../runtime/runtime-hook-stream.j
 import { createUsageEventStore } from '../runtime/usage-event-store.js';
 import { RuntimeUsageProjector } from '../runtime/runtime-usage-projector.js';
 import { RuntimeEventBatcher } from '../runtime/runtime-event-batcher.js';
+import { drainRuntimeHookTransport } from '../runtime/runtime-hook-shutdown.js';
+import { RuntimeHookPoller } from '../runtime/runtime-hook-poller.js';
+import { resolveRuntimeBatchConfig } from '../runtime/runtime-batch-config.js';
 import { migrateCodexFingerprintProviderPoolsFile } from '../utils/codex-fingerprint-migration.js';
 import { invalidateServiceAdapter } from '../providers/adapter.js';
 import { runtimeImageCapacity } from '../runtime/runtime-image-capacity.js';
@@ -159,6 +162,7 @@ let usageEventStore = null;
 let usageEventStoreSnapshot = null;
 let runtimeUsageProjector = null;
 let runtimeEventBatcher = null;
+let runtimeHookPoller = null;
 let usageProjectionRefreshPromise = null;
 let usageProjectionRefreshRequested = false;
 let usageEventMaintenanceTimerId = null;
@@ -218,24 +222,49 @@ const runtimeHookConsumer = new RuntimeEventConsumer({
 
 function getRuntimeEventBatcher() {
     if (!runtimeEventBatcher) {
+        const batchConfig = resolveRuntimeBatchConfig({ env: process.env, config: CONFIG });
         runtimeEventBatcher = new RuntimeEventBatcher({
-            maxSize: Math.max(1, Number(process.env.USAGE_EVENT_BATCH_SIZE ?? CONFIG.USAGE_EVENT_BATCH_SIZE ?? 100)),
-            flushMs: Math.max(0, Number(process.env.USAGE_EVENT_BATCH_FLUSH_MS ?? CONFIG.USAGE_EVENT_BATCH_FLUSH_MS ?? 1000)),
-            flush: events => runtimeHookConsumer.consumeBatch(events)
+            maxSize: batchConfig.appendBatchSize,
+            flushMs: batchConfig.flushMs,
+            maxPending: batchConfig.queueMax,
+            flush: events => runtimeHookConsumer.consumeBatch(events),
+            onError: RUNTIME_WORKER_ROLE === 'control'
+                ? null
+                : error => logger.warn('[Runtime Hook] Durable batch flush failed:', error?.message || String(error))
         });
     }
     return runtimeEventBatcher;
 }
 
 function enqueueRuntimeHookEvent(event) {
-    return getRuntimeEventBatcher().push(event);
+    const batcher = getRuntimeEventBatcher();
+    return (async () => {
+        while (true) {
+            while (batcher.availableCapacity() < 1) {
+                const available = await batcher.waitForCapacity(1);
+                if (!available) throw new Error('Runtime event batcher is closing');
+            }
+            try {
+                return await batcher.push(event);
+            } catch (error) {
+                if (error?.code !== 'RUNTIME_EVENT_QUEUE_FULL') throw error;
+            }
+        }
+    })();
 }
 
 function getRuntimeHookSnapshot() {
     const bridgeSnapshot = getPluginManager()?.runtimeHookBridge?.snapshot?.() || {};
     const streamSnapshot = runtimeHookStream?.snapshot?.() || {};
+    const outboundPending = Number(bridgeSnapshot.pending || 0);
+    const streamPending = Number(runtimeHookStreamStatus.pending || 0);
     return {
-        pending: Number(bridgeSnapshot.pending || runtimeHookStreamStatus.pending || 0),
+        // The same event can remain in the producer bridge until the control
+        // worker ACKs it, while also appearing in the Redis PEL. Expose both
+        // layers and use their max as the logical pending count.
+        pending: Math.max(outboundPending, streamPending),
+        outboundPending,
+        streamPending,
         dropped: Number(bridgeSnapshot.dropped || 0),
         backpressured: Number(bridgeSnapshot.backpressured || 0),
         spooled: Number(bridgeSnapshot.spooled || streamSnapshot.spooled || 0),
@@ -288,6 +317,7 @@ function buildRuntimeMetricsSnapshot() {
         potluckQuota: getPotluckQuotaMetrics(),
         requestAudit: getRequestAuditMetrics(),
         usageEventBatch: runtimeEventBatcher?.snapshot?.() || null,
+        runtimeHookPoller: runtimeHookPoller?.snapshot?.() || null,
         hooks: getRuntimeHookSnapshot()
     };
 }
@@ -295,26 +325,31 @@ function buildRuntimeMetricsSnapshot() {
 function startRuntimeHookPolling() {
     if (!runtimeHookStream || RUNTIME_WORKER_ROLE !== 'control' || runtimeHookPollPromise) return;
     runtimeHookPollStopped = false;
-    runtimeHookPollPromise = (async () => {
-        while (!runtimeHookPollStopped) {
-            try {
-                const events = await runtimeHookStream.readBatch({
-                    count: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_SIZE || process.env.USAGE_EVENT_BATCH_SIZE || 100)),
-                    blockMs: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_WAIT_MS || process.env.USAGE_EVENT_BATCH_WAIT_MS || 20))
-                });
-                if (events.length > 0) {
-                    await Promise.all(events.map(event => enqueueRuntimeHookEvent(event)));
-                }
-                runtimeHookStreamStatus = await runtimeHookStream.pendingSnapshot();
-            } catch (error) {
-                if (!runtimeHookPollStopped) {
-                    runtimeHookStreamStatus = { pending: 0, consumerLag: 0, available: false, error: error.message };
-                    logger.error('[Runtime Hook] Redis stream poll failed:', error.message);
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                }
+    const batchConfig = resolveRuntimeBatchConfig({ env: process.env, config: CONFIG });
+    runtimeHookPoller = new RuntimeHookPoller({
+        stream: runtimeHookStream,
+        ingress: getRuntimeEventBatcher(),
+        readBatchSize: batchConfig.streamReadBatchSize,
+        blockMs: batchConfig.waitMs,
+        statusPollMs: batchConfig.statusPollMs,
+        claimIntervalMs: batchConfig.claimIntervalMs,
+        onStatus: snapshot => { runtimeHookStreamStatus = snapshot; },
+        onBatchError: error => logger.warn('[Runtime Hook] Durable batch flush failed:', error?.message || String(error)),
+        onError: error => {
+            if (!runtimeHookPollStopped) {
+                runtimeHookStreamStatus = {
+                    pending: 0,
+                    consumerLag: 0,
+                    available: false,
+                    error: error?.message || String(error)
+                };
+                logger.error('[Runtime Hook] Redis stream poll failed:', error?.message || String(error));
             }
         }
-    })().finally(() => { runtimeHookPollPromise = null; });
+    });
+    runtimeHookPollPromise = runtimeHookPoller.start().finally(() => {
+        runtimeHookPollPromise = null;
+    });
 }
 
 async function stopRuntimeHookTransport() {
@@ -327,19 +362,28 @@ async function stopRuntimeHookTransport() {
         usageEventMaintenanceTimerId = null;
     }
     runtimeHookPollStopped = true;
-    await runtimeHookPollPromise;
-    await runtimeEventBatcher?.close?.();
-    runtimeEventBatcher = null;
-    await getPluginManager()?.runtimeHookBridge?.drain?.({ timeoutMs: 20000 });
-    await runtimeHookStream?.flushSpool?.();
-    await runtimeUsageProjector?.drain?.();
-    runtimeUsageProjector = null;
-    if (usageEventStore) {
-        usageEventStoreSnapshot = await usageEventStore.checkpoint();
-        await usageEventStore.close();
-        usageEventStore = null;
+    if (runtimeHookPoller) {
+        const poller = runtimeHookPoller;
+        runtimeHookPoller = null;
+        await poller.stop({ drain: false });
     }
-    await runtimeHookStream?.close?.();
+    await runtimeHookPollPromise;
+    const result = await drainRuntimeHookTransport({
+        batcher: runtimeEventBatcher,
+        bridge: getPluginManager()?.runtimeHookBridge,
+        stream: runtimeHookStream,
+        projector: runtimeUsageProjector,
+        usageEventStore,
+        waitForProjectionRefresh: () => usageProjectionRefreshPromise,
+        onUsageEventStoreSnapshot: snapshot => {
+            usageEventStoreSnapshot = snapshot;
+        }
+    });
+    runtimeEventBatcher = null;
+    runtimeUsageProjector = null;
+    usageEventStore = null;
+    runtimeHookStream = null;
+    return result;
 }
 
 /**
@@ -515,7 +559,7 @@ async function startServer() {
             });
             runtimeUsageProjector = new RuntimeUsageProjector({
                 store: usageEventStore,
-                batchSize: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_SIZE || process.env.USAGE_EVENT_BATCH_SIZE || 100)),
+                batchSize: resolveRuntimeBatchConfig({ env: process.env, config: CONFIG }).projectionBatchSize,
                 executeProjectionBatch: (projectionName, items) => getPluginManager()?.executeUsageProjectionBatch?.(
                     projectionName,
                     items
@@ -560,7 +604,7 @@ async function startServer() {
         });
         runtimeUsageProjector = new RuntimeUsageProjector({
             store: usageEventStore,
-            batchSize: Math.max(1, Number(CONFIG.USAGE_EVENT_BATCH_SIZE || process.env.USAGE_EVENT_BATCH_SIZE || 100)),
+            batchSize: resolveRuntimeBatchConfig({ env: process.env, config: CONFIG }).projectionBatchSize,
             executeProjectionBatch: (projectionName, items) => getPluginManager()?.executeUsageProjectionBatch?.(
                 projectionName,
                 items
@@ -583,7 +627,7 @@ async function startServer() {
                     publish: async event => {
                     const result = await enqueueRuntimeHookEvent(event);
                     usageEventStoreSnapshot = await usageEventStore.snapshot();
-                    return { streamId: `local:${event.eventId}`, ...result };
+                    return { streamId: `local:${event.eventId}`, ...result, acknowledged: true };
                 },
                 acknowledge: async () => true,
                 snapshot: () => ({

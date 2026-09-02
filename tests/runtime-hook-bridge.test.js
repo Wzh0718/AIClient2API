@@ -48,6 +48,20 @@ describe('RuntimeHookBridge', () => {
         expect(messages).toHaveLength(0);
     });
 
+    test('releases local outbound tracking when the durable transport confirms an immediate ACK', async () => {
+        const durableTransport = {
+            publish: jest.fn().mockResolvedValue({ persisted: true, acknowledged: true, streamId: 'local:1' }),
+            acknowledge: jest.fn().mockResolvedValue(undefined),
+            snapshot: () => ({ spooled: 0 })
+        };
+        const bridge = new RuntimeHookBridge({ send: jest.fn(), durableTransport });
+
+        await bridge.handle('onRequestCompleted', { requestId: 'local-auto-ack' });
+
+        expect(bridge.snapshot()).toMatchObject({ pending: 0 });
+        expect(durableTransport.acknowledge).toHaveBeenCalledWith(expect.any(String));
+    });
+
     test('does not resurrect an outbound event when its durable ACK arrives before publish resolves', async () => {
         let bridge;
         const durableTransport = {
