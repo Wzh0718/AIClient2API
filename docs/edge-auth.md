@@ -29,14 +29,19 @@ rejected instead of falling back to in-process limits.
 
 1. Deploy the edge-auth image built from the same commit as the API image.
 2. Replace the deployed `edge-auth-api-directives.conf` with the contents of
-   `docker/nginx-edge-auth-api-location.conf` so the lease headers reach the
-   upstream; without this step `edgeAdmissionMode=enforce` keys are enforced
-   nowhere.
-3. Set `EDGE_ADMISSION_ENABLED=true` and `EDGE_ADMISSION_REQUIRED=true` on the
-   API container, together with a deliberate `EDGE_AUTH_DEFAULT_KEY_CONCURRENCY`.
-4. Only after observing the dry-run IP counters, add
-   `docker/nginx-edge-auth-api-enforce.conf` to switch per-IP limits from
-   observation to enforcement.
+   `docker/nginx-edge-auth-api-location.conf` followed by exactly one of
+   `docker/nginx-edge-auth-api-observe.conf` (dry-run) or
+   `docker/nginx-edge-auth-api-enforce.conf` (rejecting), so the lease headers
+   reach the upstream; without this step `edgeAdmissionMode=enforce` keys are
+   enforced nowhere. The two add-ons are mutually exclusive because nginx allows
+   `limit_req_dry_run` only once per context.
+3. Point the API container at the edge-auth service with
+   `EDGE_AUTH_INTERNAL_URL=http://edge-auth:18081`; the default
+   `http://127.0.0.1:18081` resolves to the API container itself.
+4. Set `EDGE_ADMISSION_ENABLED=true`, and only after confirming that leases
+   actually arrive, `EDGE_ADMISSION_REQUIRED=true`, together with a deliberate
+   `EDGE_AUTH_DEFAULT_KEY_CONCURRENCY`. Enabling `REQUIRED` before the Nginx
+   snippet is live rejects every protected request.
 
 ## Local smoke test
 

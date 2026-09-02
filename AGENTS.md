@@ -25,8 +25,8 @@
 
 ## Edge Admission Rollout
 
-- Edge Admission needs three things at once; any one missing means `edgeAdmissionMode=enforce` keys are enforced nowhere: an edge-auth image from the same commit, the deployed Nginx snippet replaced by `docker/nginx-edge-auth-api-location.conf` so the lease headers reach upstream, and `EDGE_ADMISSION_ENABLED=true` plus `EDGE_ADMISSION_REQUIRED=true` on the API container.
-- Per-IP rate limits stay in `limit_req_dry_run` until `docker/nginx-edge-auth-api-enforce.conf` is explicitly included. Include it only after reviewing the dry-run counters.
+- Edge Admission needs four things at once; any one missing means `edgeAdmissionMode=enforce` keys are enforced nowhere: an edge-auth image from the same commit, the deployed Nginx snippet replaced by `docker/nginx-edge-auth-api-location.conf` so the lease headers reach upstream, `EDGE_AUTH_INTERNAL_URL=http://edge-auth:18081` (the default `127.0.0.1` points at the API container itself), and `EDGE_ADMISSION_ENABLED=true` plus `EDGE_ADMISSION_REQUIRED=true` on the API container. Turn `REQUIRED` on only after leases are confirmed to arrive.
+- Per-IP rate limits come from exactly one add-on included after the location snippet: `docker/nginx-edge-auth-api-observe.conf` (dry-run) or `docker/nginx-edge-auth-api-enforce.conf` (rejecting at 1200r/m per IP). They must not be combined, because nginx rejects a duplicate `limit_req_dry_run` in one context.
 - The steps and the lease lifecycle are documented in `docs/edge-auth.md`.
 
 ## Testing
