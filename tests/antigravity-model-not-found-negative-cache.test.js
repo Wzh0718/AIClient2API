@@ -212,6 +212,19 @@ describe('Antigravity model-not-found negative cache', () => {
         });
     });
 
+    test('exposes every routing counter through the multi-worker aggregate', async () => {
+        const { aggregateWorkerMetrics } = await import('../src/runtime/multi-worker-runtime.js');
+        const manager = createManager();
+        const counters = Object.keys(manager.getAntigravityRoutingMetrics());
+        const routing = Object.fromEntries(counters.map(field => [field, 1]));
+
+        const aggregated = aggregateWorkerMetrics(new Map([['execution-1', { antigravityRouting: routing }]]));
+
+        for (const field of counters) {
+            expect(aggregated.antigravityRouting[field]).toBe(1);
+        }
+    });
+
     test('ignores non-Antigravity provider types', () => {
         const manager = createManager();
         expect(manager.markAntigravityModelNotFound('gemini-cli-oauth', firstFallback)).toBe(false);

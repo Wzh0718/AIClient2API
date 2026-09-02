@@ -273,6 +273,9 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             queueWaitMs: 0,
             queueTimeouts: 0,
             retrySuppressed: 0,
+            modelNotFoundMarked: 0,
+            modelNotFoundFastFails: 0,
+            availableModelsUnknown: 0,
             byWorker: {}
         },
         potluckQuota: {
@@ -509,7 +512,10 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
                 'queueEnqueued',
                 'queueWaitMs',
                 'queueTimeouts',
-                'retrySuppressed'
+                'retrySuppressed',
+                'modelNotFoundMarked',
+                'modelNotFoundFastFails',
+                'availableModelsUnknown'
             ]) {
                 result.antigravityRouting[field] += Number(routing[field] || 0);
             }

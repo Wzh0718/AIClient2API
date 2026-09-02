@@ -444,6 +444,9 @@ describe('runtime observability baseline', () => {
                 queueWaitMs: 0,
                 queueTimeouts: 0,
                 retrySuppressed: 0,
+                modelNotFoundMarked: 0,
+                modelNotFoundFastFails: 0,
+                availableModelsUnknown: 0,
                 byWorker: {}
             },
             potluckQuota: {
