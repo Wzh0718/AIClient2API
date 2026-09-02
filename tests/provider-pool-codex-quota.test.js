@@ -94,6 +94,19 @@ afterEach(() => {
 });
 
 describe('provider pool Codex token quota', () => {
+    test.each(['gpt-5.4', 'gpt-5.4-fast', 'gpt-5.4-mini', 'gpt-5.4-mini-fast'])(
+        'uses GPT-5.6 Luna as the default unavailable-model fallback for %s',
+        model => {
+            expect(getCodexModelFallbackTarget(model, {
+                CODEX_UNAVAILABLE_MODEL_FALLBACKS: {
+                    'gpt-5.4': 'gpt-5.6-luna',
+                    'gpt-5.4-fast': 'gpt-5.6-luna',
+                    'gpt-5.4-mini': 'gpt-5.6-luna',
+                    'gpt-5.4-mini-fast': 'gpt-5.6-luna'
+                }
+            })).toBe('gpt-5.6-luna');
+        }
+    );
     test('reuses a quota filter snapshot for repeated selection state', () => {
         const usageTimestamp = new Date().toISOString();
         writeCodexUsageCache([
@@ -635,7 +648,7 @@ describe('provider pool Codex token quota', () => {
         expect(provider.codexQuotaHealth.general?.isHealthy).not.toBe(false);
     });
 
-    test('falls back Codex 5.3 Spark requests to GPT-5.4 Mini when every 5.3 quota bucket is exhausted', async () => {
+    test('falls back Codex 5.3 Spark requests to GPT-5.6 Luna when every 5.3 quota bucket is exhausted', async () => {
         writeCodexUsageCache([
             {
                 uuid: 'aaa-codex-over',
@@ -675,7 +688,7 @@ describe('provider pool Codex token quota', () => {
         expect(selected).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
             isFallback: true,
-            actualModel: 'gpt-5.4-mini'
+            actualModel: 'gpt-5.6-luna'
         });
         expect(['aaa-codex-over', 'zzz-codex-ok']).toContain(selected.config.uuid);
     });
@@ -728,7 +741,7 @@ describe('provider pool Codex token quota', () => {
         expect(selected).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
             isFallback: true,
-            actualModel: 'gpt-5.4-mini'
+            actualModel: 'gpt-5.6-luna'
         });
     });
 
@@ -803,13 +816,13 @@ describe('provider pool Codex token quota', () => {
         expect(manager._codexQuotaFilterMetrics).toMatchObject({ fastPathHits: 1, fastPathMisses: 0 });
         expect(selected).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
-            actualModel: 'gpt-5.4-mini',
+            actualModel: 'gpt-5.6-luna',
             isFallback: true,
             modelFallbackReason: 'CODEX53_POOL_EXHAUSTED'
         });
         expect(manager._codexQuotaFilterMetrics.providersScanned).toBe(scannedAfterFirst + 2);
         expect(filterSpy).toHaveBeenCalledTimes(2);
-        expect(filterSpy.mock.calls[1][2]).toBe('gpt-5.4-mini');
+        expect(filterSpy.mock.calls[1][2]).toBe('gpt-5.6-luna');
         expect(manager.getCodexQuotaFilterMetrics()).toMatchObject({ fastPathHits: 1, fastPathMisses: 0 });
     });
 
@@ -826,7 +839,7 @@ describe('provider pool Codex token quota', () => {
         expect(manager._debouncedSave).toHaveBeenCalledTimes(2);
     });
 
-    test('falls back to GPT-5.4 Mini when Codex 5.3 Spark has no selectable provider', async () => {
+    test('falls back to GPT-5.6 Luna when Codex 5.3 Spark has no selectable provider', async () => {
         writeCodexUsageCache([
             { uuid: 'aaa-codex-over', success: true, usage: { summary: { plan: 'Pro' }, items: [] } },
             { uuid: 'zzz-codex-ok', success: true, usage: { summary: { plan: 'Plus' }, items: [] } }
@@ -847,7 +860,7 @@ describe('provider pool Codex token quota', () => {
         expect(selected).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
             isFallback: true,
-            actualModel: 'gpt-5.4-mini'
+            actualModel: 'gpt-5.6-luna'
         });
     });
 

@@ -392,7 +392,7 @@ describe('temporary key model content routing', () => {
             })
         );
         const payload = JSON.parse(response.body);
-        expect(payload.model).toBe('gpt-5.4-mini');
+        expect(payload.model).toBe('gpt-5.6-luna');
         expect(payload.output).toEqual(expect.arrayContaining([
             expect.objectContaining({
                 type: 'function_call',
@@ -614,7 +614,7 @@ describe('temporary key model content routing', () => {
         expect(mockGetApiServiceWithFallback.mock.calls.some(([, model]) => model === 'gemini-2.5-flash')).toBe(false);
         expect(providerPoolManager.recordGeminiSchedulingEvent).not.toHaveBeenCalled();
         expect(lunaService.generateContent).toHaveBeenCalledWith('gpt-5.6-luna', expect.any(Object));
-        expect(JSON.parse(response.body).model).toBe('gpt-5.4-mini');
+        expect(JSON.parse(response.body).model).toBe('gpt-5.6-luna');
         expect(config._temporaryKeyModelRouteResult).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
             actualModel: 'gpt-5.6-luna',

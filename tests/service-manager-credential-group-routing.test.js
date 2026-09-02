@@ -168,7 +168,7 @@ describe('Service Manager Codex credential-group routing', () => {
                 fixedCredential: { providerType, uuid: 'codex-a' },
                 manualLock: true
             },
-            extra: { CODEX_53_QUOTA_FALLBACK_MODEL: 'gpt-5.4-mini' }
+            extra: { CODEX_53_QUOTA_FALLBACK_MODEL: 'gpt-5.6-luna' }
         });
         const manager = await initialize(config);
         jest.spyOn(manager, 'selectProviderWithFallback').mockImplementation(async (_providerType, model) => {
@@ -186,10 +186,10 @@ describe('Service Manager Codex credential-group routing', () => {
 
         expect(result).toMatchObject({
             uuid: 'codex-b',
-            actualModel: 'gpt-5.4-mini',
+            actualModel: 'gpt-5.6-luna',
             isFallback: true,
             modelFallbackFrom: 'gpt-5.3-codex-spark',
-            modelFallbackTo: 'gpt-5.4-mini'
+            modelFallbackTo: 'gpt-5.6-luna'
         });
     });
 
@@ -394,7 +394,7 @@ describe('Service Manager Codex credential-group routing', () => {
         });
     });
 
-    test('auto routing falls back to GPT-5.4 Mini when every group is exhausted for Codex 5.3', async () => {
+    test('auto routing falls back to GPT-5.6 Luna when every group is exhausted for Codex 5.3', async () => {
         writeGroupConfig({
             groups: [
                 { id: 'group-a', credentialUuids: ['codex-a'] },
@@ -404,7 +404,7 @@ describe('Service Manager Codex credential-group routing', () => {
         });
         const config = createConfig({
             providers: [provider('codex-a'), provider('codex-b')],
-            extra: { CODEX_53_QUOTA_FALLBACK_MODEL: 'gpt-5.4-mini' }
+            extra: { CODEX_53_QUOTA_FALLBACK_MODEL: 'gpt-5.6-luna' }
         });
         const manager = await initialize(config);
         jest.spyOn(manager, 'selectProviderWithFallback').mockImplementation(async (_providerType, model) => {
@@ -420,13 +420,13 @@ describe('Service Manager Codex credential-group routing', () => {
 
         const result = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark');
 
-        expect(result.actualModel).toBe('gpt-5.4-mini');
+        expect(result.actualModel).toBe('gpt-5.6-luna');
         expect(result.isFallback).toBe(true);
         expect(result.modelFallbackFrom).toBe('gpt-5.3-codex-spark');
-        expect(result.modelFallbackTo).toBe('gpt-5.4-mini');
+        expect(result.modelFallbackTo).toBe('gpt-5.6-luna');
     });
 
-    test('falls back to GPT-5.4 Mini for any unavailable Codex 5.3 Spark selection error', async () => {
+    test('falls back to GPT-5.6 Luna for any unavailable Codex 5.3 Spark selection error', async () => {
         writeGroupConfig({
             groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
             keyAssignments: [{ keyId: 'key-1', routingMode: 'auto', primaryGroupId: 'group-a' }]
@@ -445,10 +445,10 @@ describe('Service Manager Codex credential-group routing', () => {
         const result = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark');
 
         expect(result).toMatchObject({
-            actualModel: 'gpt-5.4-mini',
+            actualModel: 'gpt-5.6-luna',
             isFallback: true,
             modelFallbackFrom: 'gpt-5.3-codex-spark',
-            modelFallbackTo: 'gpt-5.4-mini'
+            modelFallbackTo: 'gpt-5.6-luna'
         });
     });
 

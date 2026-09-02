@@ -262,7 +262,7 @@ describe('provider pool fallback disabling', () => {
         const manager = createManager({
             codex: [codexProvider('codex-primary')],
             globalConfig: {
-                CODEX_53_QUOTA_FALLBACK_MODEL: 'gpt-5.4-mini'
+                CODEX_53_QUOTA_FALLBACK_MODEL: 'gpt-5.6-luna'
             }
         });
         const primary = { uuid: 'codex-primary' };
