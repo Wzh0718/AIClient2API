@@ -121,19 +121,18 @@ The apply command revalidates artifact hashes, request-audit event and file dige
 
 Permanent ledger files remain historical facts. The Potluck "reset Token" actions clear the current Key store counters and retained 35-day Token history, but do not delete or rewrite permanent ledger history; custom historical queries can therefore still show records from before a reset.
 
-Example production cron wrapper:
+Example production cron wrapper (the runner resolves the script from the image;
+do not use `/app/configs/tools`, because `/app/configs` is a bind-mounted data
+directory):
 
 ```sh
 #!/bin/sh
 set -eu
 LOG_DIR=/root/ai_client_configs/permanent-usage-ledger/logs
 mkdir -p "$LOG_DIR"
-DAY=$(TZ=Asia/Shanghai date -d 'yesterday' +%F)
 {
-  echo "[$(date -Is)] write day=$DAY"
-  docker exec aiclient2api node /app/configs/tools/daily-usage-ledger.mjs write --base /app/configs --from "$DAY" --to "$DAY"
-  docker exec aiclient2api node /app/configs/tools/daily-usage-ledger.mjs cleanup-hourly --base /app/configs --days 35
-  docker exec aiclient2api node /app/configs/tools/daily-usage-ledger.mjs reconcile --base /app/configs --from "$DAY" --to "$DAY" || echo "[$(date -Is)] reconcile deviation day=$DAY"
+  echo "[$(date -Is)] reconciliation start"
+  docker exec aiclient2api node /app/scripts/ops/reconcile-current-day.mjs --base /app/configs
 } >> "$LOG_DIR/usage-ledger-cron.log" 2>&1
 ```
 
