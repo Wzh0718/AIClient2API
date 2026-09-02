@@ -227,7 +227,9 @@ function getRuntimeEventBatcher() {
             flushMs: batchConfig.flushMs,
             maxPending: batchConfig.queueMax,
             flush: events => runtimeHookConsumer.consumeBatch(events),
-            onError: error => logger.warn('[Runtime Hook] Durable batch flush failed:', error.message)
+            onError: RUNTIME_WORKER_ROLE === 'control'
+                ? null
+                : error => logger.warn('[Runtime Hook] Durable batch flush failed:', error.message)
         });
     }
     return runtimeEventBatcher;
@@ -324,6 +326,7 @@ function startRuntimeHookPolling() {
         statusPollMs: batchConfig.statusPollMs,
         claimIntervalMs: batchConfig.claimIntervalMs,
         onStatus: snapshot => { runtimeHookStreamStatus = snapshot; },
+        onBatchError: error => logger.warn('[Runtime Hook] Durable batch flush failed:', error?.message || String(error)),
         onError: error => {
             if (!runtimeHookPollStopped) {
                 runtimeHookStreamStatus = {

@@ -22,7 +22,8 @@ export class RuntimeHookPoller {
         now = () => Date.now(),
         sleepFn = sleep,
         onStatus = null,
-        onError = null
+        onError = null,
+        onBatchError = null
     } = {}) {
         if (!stream?.readBatch) throw new TypeError('runtime hook stream is required');
         if (!ingress?.pushBatch || !ingress?.availableCapacity || !ingress?.waitForCapacity) {
@@ -39,6 +40,7 @@ export class RuntimeHookPoller {
         this.sleep = sleepFn;
         this.onStatus = typeof onStatus === 'function' ? onStatus : null;
         this.onError = typeof onError === 'function' ? onError : null;
+        this.onBatchError = typeof onBatchError === 'function' ? onBatchError : null;
         this.running = null;
         this.stopped = true;
         this.stopWaiters = [];
@@ -50,6 +52,7 @@ export class RuntimeHookPoller {
             claimCount: 0,
             statusPollCount: 0,
             errors: 0,
+            batchErrors: 0,
             enqueuedEvents: 0,
             rejectedEvents: 0,
             pollPaused: false,
@@ -94,7 +97,7 @@ export class RuntimeHookPoller {
                     const result = this.ingress.pushBatch(events, { awaitFlush: false });
                     this.metrics.enqueuedEvents += Number(result?.accepted || 0);
                     this.metrics.rejectedEvents += Number(result?.rejected || 0);
-                    result?.completion?.catch(error => this._reportError(error));
+                    result?.completion?.catch(error => this._reportBatchError(error));
                 } else {
                     // A mocked/non-blocking Redis client can resolve immediately;
                     // yield between empty reads so shutdown and capacity signals
@@ -117,6 +120,11 @@ export class RuntimeHookPoller {
         this.metrics.errors += 1;
         this.metrics.lastError = error?.message || String(error);
         invokeSafely(this.onError, error);
+    }
+
+    _reportBatchError(error) {
+        this.metrics.batchErrors += 1;
+        invokeSafely(this.onBatchError, error);
     }
 
     _waitForStop() {

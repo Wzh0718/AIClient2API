@@ -346,6 +346,7 @@ describe('runtime observability baseline', () => {
                 claimCount: 0,
                 statusPollCount: 0,
                 errors: 0,
+                batchErrors: 0,
                 enqueuedEvents: 0,
                 rejectedEvents: 0,
                 pollPaused: false,

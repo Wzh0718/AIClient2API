@@ -72,6 +72,7 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             claimCount: 0,
             statusPollCount: 0,
             errors: 0,
+            batchErrors: 0,
             enqueuedEvents: 0,
             rejectedEvents: 0,
             pollPaused: false,
@@ -231,7 +232,7 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             result.runtimeHookPoller.byWorker[workerId] = poller;
             for (const field of [
                 'streamReadBatches', 'streamReadEvents', 'claimCount', 'statusPollCount',
-                'errors', 'enqueuedEvents', 'rejectedEvents'
+                'errors', 'batchErrors', 'enqueuedEvents', 'rejectedEvents'
             ]) {
                 result.runtimeHookPoller[field] += Number(poller[field] || 0);
             }

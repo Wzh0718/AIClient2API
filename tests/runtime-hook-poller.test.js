@@ -106,4 +106,32 @@ describe('runtime hook poller', () => {
         expect(readsBeforeStop).toBeGreaterThan(1);
         expect(statusBeforeStop).toBeLessThan(readsBeforeStop);
     });
+
+    test('reports durable batch failures separately from Redis polling failures', async () => {
+        const batchFailure = new Error('sqlite busy');
+        const stream = {
+            readBatch: jest.fn()
+                .mockResolvedValueOnce([{ eventId: 'evt-1' }])
+                .mockImplementation(async () => {
+                    await new Promise(resolve => setTimeout(resolve, 5));
+                    return [];
+                }),
+            pendingSnapshot: jest.fn().mockResolvedValue({ pending: 1 })
+        };
+        const ingress = {
+            availableCapacity: jest.fn(() => 10),
+            pushBatch: jest.fn(() => ({ accepted: 1, completion: Promise.reject(batchFailure) })),
+            waitForCapacity: jest.fn().mockResolvedValue(true),
+            close: jest.fn().mockResolvedValue(undefined),
+            snapshot: jest.fn(() => ({ pending: 1 }))
+        };
+        const onError = jest.fn();
+        const onBatchError = jest.fn();
+        const poller = new RuntimeHookPoller({ stream, ingress, onError, onBatchError, blockMs: 1 });
+
+        poller.start();
+        await eventually(() => expect(onBatchError).toHaveBeenCalledWith(batchFailure));
+        expect(onError).not.toHaveBeenCalledWith(batchFailure);
+        await poller.stop({ drain: false });
+    });
 });
