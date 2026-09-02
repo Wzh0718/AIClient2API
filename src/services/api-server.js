@@ -229,7 +229,7 @@ function getRuntimeEventBatcher() {
             flush: events => runtimeHookConsumer.consumeBatch(events),
             onError: RUNTIME_WORKER_ROLE === 'control'
                 ? null
-                : error => logger.warn('[Runtime Hook] Durable batch flush failed:', error.message)
+                : error => logger.warn('[Runtime Hook] Durable batch flush failed:', error?.message || String(error))
         });
     }
     return runtimeEventBatcher;

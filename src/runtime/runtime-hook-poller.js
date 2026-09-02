@@ -77,7 +77,7 @@ export class RuntimeHookPoller {
             if (availableCapacity <= 0) {
                 this.metrics.pollPaused = true;
                 const capacityPromise = this.ingress.waitForCapacity(1);
-                await Promise.race([capacityPromise, this._waitForStop()]);
+                await this._awaitWithStop(capacityPromise);
                 this.metrics.pollPaused = false;
                 continue;
             }
@@ -102,16 +102,13 @@ export class RuntimeHookPoller {
                     // A mocked/non-blocking Redis client can resolve immediately;
                     // yield between empty reads so shutdown and capacity signals
                     // are not starved by a microtask-only loop.
-                    await Promise.race([
-                        this.sleep(Math.max(1, Math.min(this.blockMs || 1, 25))),
-                        this._waitForStop()
-                    ]);
+                    await this._awaitWithStop(this.sleep(Math.max(1, Math.min(this.blockMs || 1, 25))));
                 }
                 await this._sampleStatusIfDue();
             } catch (error) {
                 if (this.stopped) break;
                 this._reportError(error);
-                await Promise.race([this.sleep(this.errorRetryMs), this._waitForStop()]);
+                await this._awaitWithStop(this.sleep(this.errorRetryMs));
             }
         }
     }
@@ -128,8 +125,28 @@ export class RuntimeHookPoller {
     }
 
     _waitForStop() {
-        if (this.stopped) return Promise.resolve(true);
-        return new Promise(resolve => this.stopWaiters.push(resolve));
+        if (this.stopped) return { promise: Promise.resolve(true), cancel: () => {} };
+        let waiter;
+        const promise = new Promise(resolve => {
+            waiter = { resolve };
+            this.stopWaiters.push(waiter);
+        });
+        return {
+            promise,
+            cancel: () => {
+                const index = this.stopWaiters.indexOf(waiter);
+                if (index >= 0) this.stopWaiters.splice(index, 1);
+            }
+        };
+    }
+
+    async _awaitWithStop(operation) {
+        const stopWaiter = this._waitForStop();
+        try {
+            return await Promise.race([operation, stopWaiter.promise]);
+        } finally {
+            stopWaiter.cancel();
+        }
     }
 
     async _sampleStatusIfDue(force = false) {
@@ -151,7 +168,7 @@ export class RuntimeHookPoller {
 
     async stop({ drain = true, timeoutMs = 30000 } = {}) {
         this.stopped = true;
-        for (const resolve of this.stopWaiters.splice(0)) resolve(true);
+        for (const waiter of this.stopWaiters.splice(0)) waiter.resolve(true);
         if (this.running) await this.running.catch(() => {});
         this.running = null;
         await this._sampleStatusIfDue(true);

@@ -134,4 +134,24 @@ describe('runtime hook poller', () => {
         expect(onError).not.toHaveBeenCalledWith(batchFailure);
         await poller.stop({ drain: false });
     });
+
+    test('does not retain stop waiters after normal empty-read sleeps', async () => {
+        const stream = {
+            readBatch: jest.fn(async () => []),
+            pendingSnapshot: jest.fn().mockResolvedValue({ pending: 0 })
+        };
+        const ingress = {
+            availableCapacity: jest.fn(() => 10),
+            waitForCapacity: jest.fn().mockResolvedValue(true),
+            pushBatch: jest.fn(),
+            close: jest.fn().mockResolvedValue(undefined),
+            snapshot: jest.fn(() => ({ pending: 0 }))
+        };
+        const poller = new RuntimeHookPoller({ stream, ingress, blockMs: 1, statusPollMs: 10000 });
+        poller.start();
+        await new Promise(resolve => setTimeout(resolve, 25));
+        expect(poller.stopWaiters.length).toBeLessThanOrEqual(1);
+        await poller.stop({ drain: false });
+        expect(poller.stopWaiters.length).toBe(0);
+    });
 });

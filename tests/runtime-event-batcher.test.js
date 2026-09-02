@@ -86,6 +86,27 @@ describe('runtime event batcher', () => {
         });
     });
 
+    test('caps each flush at maxSize when the queue grows during an in-flight flush', async () => {
+        let releaseFirst;
+        const firstFlush = new Promise(resolve => { releaseFirst = resolve; });
+        const flush = jest.fn()
+            .mockReturnValueOnce(firstFlush)
+            .mockResolvedValue({ inserted: 2 });
+        const batcher = new RuntimeEventBatcher({ flush, maxSize: 2, maxPending: 10, flushMs: 1000 });
+
+        const first = batcher.pushBatch([{ eventId: 'a' }, { eventId: 'b' }]);
+        await Promise.resolve();
+        const queued = batcher.pushBatch(
+            [{ eventId: 'c' }, { eventId: 'd' }, { eventId: 'e' }, { eventId: 'f' }],
+            { awaitFlush: false }
+        );
+        releaseFirst({ inserted: 2 });
+
+        await expect(first).resolves.toEqual({ inserted: 2 });
+        await expect(queued.completion).resolves.toEqual({ inserted: 2 });
+        expect(flush.mock.calls.slice(1).every(([events]) => events.length <= 2)).toBe(true);
+    });
+
     test('enforces a bounded queue and wakes capacity waiters after a flush', async () => {
         let release;
         const flushPromise = new Promise(resolve => { release = resolve; });

@@ -214,7 +214,7 @@ export class RuntimeEventBatcher {
         if (this.entries.length === 0) return null;
         this._clearTimer('timer');
         this._clearTimer('retryTimer');
-        const entries = this.entries.splice(0, this.entries.length);
+        const entries = this.entries.splice(0, this.maxSize);
         const events = entries.map(entry => entry.event);
         this.activeEntries = entries;
         this.inFlightEntries = entries.length;
