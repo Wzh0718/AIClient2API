@@ -230,12 +230,16 @@ describe('usage manager display source regressions', () => {
         expect(source).not.toContain("${instance.success ? '<i class=\"fas fa-check-circle status-success\"></i>' : '<i class=\"fas fa-times-circle status-error\"></i>'}");
     });
 
-    test('Codex quota badges distinguish not-applicable and unknown states', () => {
+    test('Codex quota badges render Pro not-applicable as healthy and keep unknown distinct', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
         const i18n = fs.readFileSync(path.join(process.cwd(), 'static/app/i18n.js'), 'utf8').replace(/\r\n/g, '\n');
 
         expect(source).toContain("state?.applicability === 'not_applicable'");
         expect(source).toContain("state?.applicability === 'unknown'");
+        expect(source).toContain('Pro 计划不提供通用 5h 窗口，属于正常情况');
+        expect(source).toContain('badge-healthy');
+        expect(source).toContain('label: t(\'usage.card.status.healthy\')');
+        expect(source).not.toContain('label}：不适用');
         expect(i18n).toContain("'usage.card.status.notApplicable'");
         expect(i18n).toContain("'usage.card.status.unknown'");
         const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
