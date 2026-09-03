@@ -679,6 +679,89 @@ describe('provider pool Codex token quota', () => {
         expect(selected.uuid).toBe('aaa-codex-over');
     });
 
+    test('does not mark the Codex provider unhealthy when a health check reports quota exhaustion', () => {
+        const manager = createQuotaPoolManager();
+        const provider = manager.providerStatus['openai-codex-oauth'][0].config;
+
+        manager.markProviderHealthCheckFailed(
+            'openai-codex-oauth',
+            provider,
+            '429 Too Many Requests: {"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}'
+        );
+
+        expect(provider.isHealthy).toBe(true);
+        expect(provider.errorCount).toBe(0);
+        expect(provider.lastErrorMessage).toBeNull();
+    });
+
+    test('does not let direct Codex quota error marking mutate base health state', () => {
+        const manager = createQuotaPoolManager();
+        const provider = manager.providerStatus['openai-codex-oauth'][0].config;
+        const errorMessage = '429 Too Many Requests: {"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}';
+
+        manager.markProviderUnhealthy('openai-codex-oauth', provider, errorMessage);
+        manager.markProviderUnhealthyWithRecoveryTime(
+            'openai-codex-oauth',
+            provider,
+            errorMessage,
+            '2099-01-08T00:00:00.000Z'
+        );
+
+        expect(provider.isHealthy).toBe(true);
+        expect(provider.errorCount).toBe(0);
+        expect(provider.lastErrorMessage).toBeNull();
+        expect(provider.scheduledRecoveryTime).toBeUndefined();
+    });
+
+    test('records a machine-readable reason on Codex quota bucket exhaustion', () => {
+        const manager = createQuotaPoolManager();
+        const provider = manager.providerStatus['openai-codex-oauth'][0].config;
+
+        manager.markCodexQuotaBucketUnhealthy(
+            'openai-codex-oauth',
+            provider,
+            'general',
+            '通用额度已用 100.0%',
+            '2099-01-08T00:00:00.000Z'
+        );
+
+        expect(provider.codexQuotaHealth.general).toMatchObject({
+            isHealthy: false,
+            reasonCode: 'CODEX_QUOTA_EXHAUSTED'
+        });
+    });
+
+    test('repairs persisted Codex quota-only unhealthy state during initialization', () => {
+        const manager = createQuotaPoolManager({
+            over: {
+                isHealthy: false,
+                errorCount: 10,
+                lastErrorTime: '2026-09-03T09:00:00.000Z',
+                lastErrorMessage: '429 Too Many Requests: {"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}',
+                scheduledRecoveryTime: '2099-01-08T00:00:00.000Z',
+                codexQuotaHealth: {
+                    codex53: {
+                        isHealthy: false,
+                        scheduledRecoveryTime: '2099-01-08T00:00:00.000Z'
+                    }
+                }
+            }
+        });
+
+        const provider = manager.providerStatus['openai-codex-oauth'][0].config;
+        expect(provider).toMatchObject({
+            isHealthy: true,
+            errorCount: 0,
+            lastErrorTime: null,
+            lastErrorMessage: null,
+            scheduledRecoveryTime: null
+        });
+        expect(provider.codexQuotaHealth.codex53).toMatchObject({
+            isHealthy: false,
+            scheduledRecoveryTime: '2099-01-08T00:00:00.000Z'
+        });
+    });
+
     test('skips Codex accounts whose Codex 5.3 official quota exceeds the Codex 5.3 percent limit without blocking general requests', async () => {
         writeCodexUsageCache([
             {

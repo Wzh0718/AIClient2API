@@ -289,6 +289,87 @@ describe('usage api scheduled recovery handling', () => {
         );
     });
 
+    test('keeps Pro weekly-only general quota restricted when weekly usage is exhausted', async () => {
+        const provider = {
+            uuid: 'pro-weekly-only-exhausted',
+            customName: 'Pro Weekly Only Exhausted',
+            isHealthy: true
+        };
+        getServiceAdapter.mockReturnValue({});
+        usageService.getFormattedUsage.mockResolvedValue({
+            summary: {
+                plan: 'Pro',
+                quotaApplicability: {
+                    general: {
+                        short: { status: 'not_applicable' },
+                        weekly: { status: 'healthy' }
+                    }
+                }
+            },
+            items: [{
+                id: 'primary_window',
+                scope: 'general',
+                windowKind: 'weekly',
+                percent: 100,
+                resetAt: '2099-01-08T00:00:00.000Z'
+            }]
+        });
+
+        const usage = await getAllProvidersUsage({}, {
+            providerPools: { 'openai-codex-oauth': [provider] },
+            syncCodexQuotaHealth: jest.fn()
+        });
+
+        const instance = usage.providers['openai-codex-oauth'].instances[0];
+        expect(instance.isHealthy).toBe(true);
+        expect(instance.codexQuotaHealth.general).toMatchObject({
+            isHealthy: false,
+            applicability: 'not_applicable',
+            activeWindow: 'weekly',
+            reasonCode: 'CODEX_QUOTA_EXHAUSTED',
+            scheduledRecoveryTime: '2099-01-08T00:00:00.000Z'
+        });
+    });
+
+    test('keeps Pro weekly-only general quota healthy when weekly usage is below the limit', async () => {
+        const provider = {
+            uuid: 'pro-weekly-only-healthy',
+            customName: 'Pro Weekly Only Healthy',
+            isHealthy: true
+        };
+        getServiceAdapter.mockReturnValue({});
+        usageService.getFormattedUsage.mockResolvedValue({
+            summary: {
+                plan: 'Pro',
+                quotaApplicability: {
+                    general: {
+                        short: { status: 'not_applicable' },
+                        weekly: { status: 'healthy' }
+                    }
+                }
+            },
+            items: [{
+                id: 'primary_window',
+                scope: 'general',
+                windowKind: 'weekly',
+                percent: 40,
+                resetAt: '2099-01-08T00:00:00.000Z'
+            }]
+        });
+
+        const usage = await getAllProvidersUsage({}, {
+            providerPools: { 'openai-codex-oauth': [provider] },
+            syncCodexQuotaHealth: jest.fn()
+        });
+
+        expect(usage.providers['openai-codex-oauth'].instances[0].codexQuotaHealth.general).toMatchObject({
+            isHealthy: true,
+            applicability: 'not_applicable',
+            activeWindow: 'weekly',
+            reasonCode: null
+        });
+    });
+
     test('keeps exhausted general quota blocked when reset time is unavailable', async () => {
         const provider = {
             uuid: 'general-quota-no-reset',

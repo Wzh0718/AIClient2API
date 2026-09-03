@@ -54,6 +54,13 @@ const ANTIGRAVITY_ELASTIC_DEFAULTS = Object.freeze({
     recoveryJitterMaxMs: 250
 });
 
+function isCodexQuotaExhaustionMessage(value) {
+    const message = String(value || '').toLowerCase();
+    return message.includes('usage_limit_reached')
+        || message.includes('insufficient_quota')
+        || message.includes('usage limit has been reached');
+}
+
 export function getAntigravityElasticFallbackModels(requestedModel, configuredFallbacks = [], availableModels = []) {
     const canonicalRequestedModel = normalizeAntigravityQuotaModel(requestedModel);
     const allowedFallbacks = ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS[canonicalRequestedModel] || [];
@@ -2483,6 +2490,21 @@ export class ProviderPoolManager {
                     providerConfig.customName = providerConfig.customName || null;
                     providerConfig.providerWeight = getProviderWeight(providerConfig);
                     delete providerConfig.weight;
+
+                    // Quota exhaustion is bucket-scoped and must not leave a
+                    // persisted Codex credential looking auth-unhealthy.
+                    if (isCodexProviderType(providerType)
+                        && providerConfig.isDisabled !== true
+                        && providerConfig.isHealthy === false
+                        && isCodexQuotaExhaustionMessage(providerConfig.lastErrorMessage)) {
+                        providerConfig.isHealthy = true;
+                        providerConfig.errorCount = 0;
+                        providerConfig.lastErrorTime = null;
+                        providerConfig.lastErrorMessage = null;
+                        providerConfig.scheduledRecoveryTime = null;
+                        providerConfig.lastHealthStateTime = new Date().toISOString();
+                        this._log('info', `Repaired persisted Codex quota-only health state for ${this._getDisplayName(providerConfig)}`);
+                    }
 
                     this.providerStatus[providerType].push({
                         config: providerConfig,
@@ -5001,6 +5023,11 @@ export class ProviderPoolManager {
             return;
         }
 
+        if (isCodexProviderType(providerType) && isCodexQuotaExhaustionMessage(errorMessage)) {
+            this._log('info', `Ignoring Codex quota exhaustion as provider failure for ${this._getDisplayName(providerConfig)}`);
+            return;
+        }
+
         const provider = this._findProvider(providerType, providerConfig.uuid);
         if (provider) {
             const wasHealthy = provider.config.isHealthy;
@@ -5057,6 +5084,11 @@ export class ProviderPoolManager {
             return;
         }
 
+        if (isCodexProviderType(providerType) && isCodexQuotaExhaustionMessage(errorMessage)) {
+            this._log('info', `Ignoring Codex quota exhaustion as provider failure for ${this._getDisplayName(providerConfig)}`);
+            return;
+        }
+
         const provider = this._findProvider(providerType, providerConfig.uuid);
         if (provider) {
             const wasHealthy = provider.config.isHealthy;
@@ -5094,6 +5126,11 @@ export class ProviderPoolManager {
     markProviderUnhealthyWithRecoveryTime(providerType, providerConfig, errorMessage = null, recoveryTime = null) {
         if (!providerConfig?.uuid) {
             this._log('error', 'Invalid providerConfig in markProviderUnhealthyWithRecoveryTime');
+            return;
+        }
+
+        if (isCodexProviderType(providerType) && isCodexQuotaExhaustionMessage(errorMessage)) {
+            this._log('info', `Ignoring Codex quota exhaustion as provider failure for ${this._getDisplayName(providerConfig)}`);
             return;
         }
 
@@ -5270,6 +5307,7 @@ export class ProviderPoolManager {
             lastErrorTime: new Date().toISOString(),
             lastErrorMessage: errorMessage || null,
             scheduledRecoveryTime: recoveryIso,
+            reasonCode: 'CODEX_QUOTA_EXHAUSTED',
             updatedAt: new Date().toISOString()
         };
         provider.config.lastUsed = new Date().toISOString();
@@ -5333,6 +5371,7 @@ export class ProviderPoolManager {
             lastErrorTime: null,
             lastErrorMessage: null,
             scheduledRecoveryTime: null,
+            reasonCode: null,
             updatedAt: new Date().toISOString()
         };
         this._log('info', `Recovered Codex quota bucket ${bucket} for ${this._getDisplayName(provider.config)} (${providerType})`);
@@ -5470,6 +5509,11 @@ export class ProviderPoolManager {
         }
         const provider = this._findProvider(providerType, providerConfig.uuid);
         if (!provider) return;
+
+        if (isCodexProviderType(providerType) && isCodexQuotaExhaustionMessage(errorMessage)) {
+            this._log('info', `Ignoring Codex quota exhaustion as provider health failure for ${this._getDisplayName(provider.config)}`);
+            return;
+        }
 
         const wasHealthy = provider.config.isHealthy;
         const now = Date.now();

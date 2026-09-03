@@ -369,6 +369,47 @@ describe('provider auth failure health marking', () => {
         expect(providerPoolManager.releaseSlot).toHaveBeenCalledWith('openai-codex-oauth', 'codex-provider-1');
     });
 
+    test('marks a unary Codex general usage_limit_reached error without globally unhealthy provider', async () => {
+        const error = createCodexUsageLimitError();
+        const service = {
+            generateContent: jest.fn().mockRejectedValue(error)
+        };
+        const providerPoolManager = createProviderPoolManager();
+        const res = new FakeResponse();
+
+        await handleUnaryRequest(
+            res,
+            service,
+            'gpt-5.5',
+            { messages: [{ role: 'user', content: 'ping' }] },
+            'openai',
+            'openai-codex-oauth',
+            'none',
+            null,
+            providerPoolManager,
+            'codex-provider-1',
+            'Codex Provider',
+            {
+                CONFIG: {
+                    RATE_LIMIT_COOLDOWN_ENABLED: true,
+                    RATE_LIMIT_COOLDOWN_MS: 30000,
+                    RATE_LIMIT_COOLDOWN_JITTER_MS: 0
+                }
+            }
+        );
+
+        expect(providerPoolManager.markCodexQuotaBucketUnhealthy).toHaveBeenCalledWith(
+            'openai-codex-oauth',
+            { uuid: 'codex-provider-1' },
+            'general',
+            '429 Too Many Requests - short cooldown',
+            expect.any(Date)
+        );
+        expect(providerPoolManager.markProviderUnhealthyWithRecoveryTime).not.toHaveBeenCalled();
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+        expect(providerPoolManager.releaseSlot).toHaveBeenCalledWith('openai-codex-oauth', 'codex-provider-1');
+    });
+
     test('marks a stream Codex 5.3 usage_limit_reached error as Codex 5.3 quota bucket cooldown without globally unhealthy provider', async () => {
         const error = createCodexUsageLimitError();
         const service = {

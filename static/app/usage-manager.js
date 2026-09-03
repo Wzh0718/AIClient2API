@@ -519,13 +519,6 @@ function getBaseStatusState(instance) {
 }
 
 function getQuotaStatusState(state = {}) {
-    if (state?.applicability === 'not_applicable') {
-        return {
-            isHealthy: true,
-            label: t('usage.card.status.healthy'),
-            title: 'Pro 计划不提供通用 5h 窗口，属于正常情况'
-        };
-    }
     if (state?.applicability === 'unknown') {
         return {
             status: 'unknown',
@@ -583,9 +576,6 @@ function renderCodexQuotaHealthBadges(instance, providerType) {
 
     const quotaHealth = instance.codexQuotaHealth || {};
     const renderBadge = (label, state = {}) => {
-        if (state.applicability === 'not_applicable') {
-            return `<span class="badge badge-healthy" title="Pro 计划不提供通用 5h 窗口，属于正常情况">${label}：正常</span>`;
-        }
         if (state.applicability === 'unknown') {
             return `<span class="badge badge-warning" title="${escapeHtml(state.lastErrorMessage || '上游未提供')}">${label}：未知</span>`;
         }

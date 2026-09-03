@@ -322,18 +322,23 @@ function mergeQuotaHealthState(existingState = {}, usedPercent, label, options =
         return existingState;
     }
 
-    const usageState = usedPercent >= 100
+    const exhausted = usedPercent >= 100;
+    const usageState = exhausted
         ? {
             isHealthy: false,
             lastErrorTime: existingState?.lastErrorTime || new Date(options.now ?? Date.now()).toISOString(),
             lastErrorMessage: `${label} 已用 ${usedPercent.toFixed(1)}%`,
-            scheduledRecoveryTime: options.scheduledRecoveryTime || null
+            scheduledRecoveryTime: options.scheduledRecoveryTime || null,
+            reasonCode: options.reasonCode || 'CODEX_QUOTA_EXHAUSTED',
+            activeWindow: options.activeWindow || existingState?.activeWindow || null
         }
         : {
             isHealthy: true,
             lastErrorTime: null,
             lastErrorMessage: null,
-            scheduledRecoveryTime: null
+            scheduledRecoveryTime: null,
+            reasonCode: options.healthyReasonCode ?? null,
+            activeWindow: options.activeWindow || existingState?.activeWindow || null
         };
 
     if (options.allowRecovery) {
@@ -366,6 +371,9 @@ function deriveCodexQuotaHealthFromUsage(currentHealth, usage, now = Date.now())
     const generalUsedPercent = getUsageItemMaxPercent(usage, item =>
         item.id === 'primary_window' || item.id === 'secondary_window'
     );
+    const generalWeeklyUsedPercent = getUsageItemMaxPercent(usage, item =>
+        item.scope === 'general' && (item.windowKind === 'weekly' || item.id === 'secondary_window')
+    );
     const codex53UsedPercent = getUsageItemMaxPercent(usage, item => {
         const id = String(item.id || '').toLowerCase();
         const label = String(item.label || '').toLowerCase();
@@ -377,21 +385,39 @@ function deriveCodexQuotaHealthFromUsage(currentHealth, usage, now = Date.now())
         item => item.scope === 'general' || item.id === 'primary_window' || item.id === 'secondary_window',
         now
     );
+    const generalWeeklyRecoveryTime = getLatestExhaustedResetTime(
+        usage,
+        item => item.scope === 'general' && (item.windowKind === 'weekly' || item.id === 'secondary_window'),
+        now
+    );
 
     const generalApplicability = applicability?.general?.short?.status;
     if (generalApplicability === 'not_applicable') {
-        quotaHealth.general = {
-            ...(quotaHealth.general || {}),
-            isHealthy: true,
-            applicability: 'not_applicable',
-            lastErrorTime: null,
-            lastErrorMessage: null,
-            scheduledRecoveryTime: null
-        };
+        if (Number.isFinite(generalWeeklyUsedPercent)) {
+            quotaHealth.general = mergeQuotaHealthState(quotaHealth.general, generalWeeklyUsedPercent, '通用额度', {
+                allowRecovery: true,
+                scheduledRecoveryTime: generalWeeklyRecoveryTime,
+                activeWindow: 'weekly',
+                now
+            });
+        } else {
+            quotaHealth.general = {
+                ...(quotaHealth.general || {}),
+                isHealthy: true,
+                lastErrorTime: null,
+                lastErrorMessage: null,
+                scheduledRecoveryTime: null,
+                reasonCode: null,
+                activeWindow: null
+            };
+        }
+        quotaHealth.general.applicability = 'not_applicable';
     } else if (Number.isFinite(generalUsedPercent)) {
         quotaHealth.general = mergeQuotaHealthState(quotaHealth.general, generalUsedPercent, '通用额度', {
             allowRecovery: true,
             scheduledRecoveryTime: generalRecoveryTime,
+            activeWindow: Number.isFinite(generalWeeklyUsedPercent)
+                && generalWeeklyUsedPercent >= generalUsedPercent ? 'weekly' : 'short',
             now
         });
         if (generalApplicability === 'unknown') {

@@ -230,20 +230,29 @@ describe('usage manager display source regressions', () => {
         expect(source).not.toContain("${instance.success ? '<i class=\"fas fa-check-circle status-success\"></i>' : '<i class=\"fas fa-times-circle status-error\"></i>'}");
     });
 
-    test('Codex quota badges render Pro not-applicable as healthy and keep unknown distinct', () => {
+    test('Codex quota badges use the earlier healthy/restricted rule and keep unknown distinct', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
-        const i18n = fs.readFileSync(path.join(process.cwd(), 'static/app/i18n.js'), 'utf8').replace(/\r\n/g, '\n');
 
-        expect(source).toContain("state?.applicability === 'not_applicable'");
         expect(source).toContain("state?.applicability === 'unknown'");
-        expect(source).toContain('Pro 计划不提供通用 5h 窗口，属于正常情况');
-        expect(source).toContain('badge-healthy');
-        expect(source).toContain('label: t(\'usage.card.status.healthy\')');
+        expect(source).toContain("label: isHealthy ? '正常' : '受限'");
+        expect(source).toContain('badge-unhealthy');
+        expect(source).not.toContain("if (state.applicability === 'not_applicable')");
+        expect(source).not.toContain("if (state?.applicability === 'not_applicable')");
+        expect(source).not.toContain('fa-minus-circle status-neutral');
+        expect(source).not.toContain('badge-neutral');
         expect(source).not.toContain('label}：不适用');
-        expect(i18n).toContain("'usage.card.status.notApplicable'");
-        expect(i18n).toContain("'usage.card.status.unknown'");
-        const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
-        expect(css).toContain('.badge-neutral');
+
+        const functionSource = source.match(/function getQuotaStatusState\(state = \{\}\) \{[\s\S]*?\n\}/)?.[0];
+        expect(functionSource).toBeTruthy();
+        const getQuotaStatusState = new Function('t', 'formatDate', `${functionSource}; return getQuotaStatusState;`)(key => key, value => value);
+        expect(getQuotaStatusState({ applicability: 'not_applicable', isHealthy: true })).toMatchObject({
+            isHealthy: true,
+            label: '正常'
+        });
+        expect(getQuotaStatusState({ applicability: 'not_applicable', isHealthy: false })).toMatchObject({
+            isHealthy: false,
+            label: '受限'
+        });
     });
 
     test('base status follows scheduler health instead of usage refresh outcome', () => {
