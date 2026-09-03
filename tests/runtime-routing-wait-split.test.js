@@ -1,5 +1,13 @@
-import requestContext, { accumulateRoutingWait, readRoutingWaits } from '../src/utils/context.js';
+import requestContext, { accumulateRoutingWait, computeSelectionStages, readRoutingWaits } from '../src/utils/context.js';
 import { RuntimeMetrics } from '../src/runtime/runtime-metrics.js';
+
+const emptyWaits = {
+    keyQueueWaitMs: 0,
+    credentialLeaseWaitMs: 0,
+    elasticQueueWaitMs: 0,
+    availabilityRefreshMs: 0,
+    elasticAttemptCount: 0
+};
 
 describe('routing wait split', () => {
     test('accumulates key queue and credential lease waits per request', () => {
@@ -7,7 +15,11 @@ describe('routing wait split', () => {
             accumulateRoutingWait('keyQueueWaitMs', 1200);
             accumulateRoutingWait('keyQueueWaitMs', 300);
             accumulateRoutingWait('credentialLeaseWaitMs', 2000);
-            expect(readRoutingWaits()).toEqual({ keyQueueWaitMs: 1500, credentialLeaseWaitMs: 2000 });
+            expect(readRoutingWaits()).toEqual({
+                ...emptyWaits,
+                keyQueueWaitMs: 1500,
+                credentialLeaseWaitMs: 2000
+            });
         });
     });
 
@@ -16,9 +28,35 @@ describe('routing wait split', () => {
             accumulateRoutingWait('keyQueueWaitMs', 50);
         });
         requestContext.run({ requestId: 'split-c' }, () => {
-            expect(readRoutingWaits()).toEqual({ keyQueueWaitMs: 0, credentialLeaseWaitMs: 0 });
+            expect(readRoutingWaits()).toEqual(emptyWaits);
         });
-        expect(readRoutingWaits()).toEqual({ keyQueueWaitMs: 0, credentialLeaseWaitMs: 0 });
+        expect(readRoutingWaits()).toEqual(emptyWaits);
+    });
+
+    test('subtracts elastic queue wait from selectionComputeMs', () => {
+        requestContext.run({ requestId: 'split-elastic' }, () => {
+            accumulateRoutingWait('keyQueueWaitMs', 100);
+            accumulateRoutingWait('credentialLeaseWaitMs', 200);
+            accumulateRoutingWait('elasticQueueWaitMs', 4000);
+            accumulateRoutingWait('availabilityRefreshMs', 50);
+            accumulateRoutingWait('elasticAttemptCount', 3);
+            const stages = computeSelectionStages(5300);
+            expect(stages).toEqual({
+                providerFilterMs: 5300,
+                keyQueueWaitMs: 100,
+                credentialLeaseWaitMs: 200,
+                elasticQueueWaitMs: 4000,
+                availabilityRefreshMs: 50,
+                elasticAttemptCount: 3,
+                selectionComputeMs: 1000
+            });
+            expect(stages.providerFilterMs).toBe(
+                stages.keyQueueWaitMs
+                + stages.credentialLeaseWaitMs
+                + stages.elasticQueueWaitMs
+                + stages.selectionComputeMs
+            );
+        });
     });
 
     test('reports the queue and compute segments of provider filtering', () => {

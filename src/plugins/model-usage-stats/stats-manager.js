@@ -1,6 +1,6 @@
 import { atomicWriteFile, atomicWriteFileSync } from '../../utils/file-lock.js';
-import { promises as fs } from 'fs';
-import { existsSync, mkdirSync, readFileSync } from 'fs';
+import { promises as fs, existsSync, mkdirSync, readFileSync } from 'fs';
+import { readFreshUsageCacheSync } from '../../utils/codex-plan.js';
 import path from 'path';
 import logger from '../../utils/logger.js';
 import { RateManager } from '../../utils/rate-tracker.js';
@@ -21,14 +21,12 @@ import {
 } from './sqlite-store.js';
 
 const STATS_STORE_FILE = path.join(process.cwd(), 'configs', 'model-usage-stats.json');
-const USAGE_CACHE_FILE = path.join(process.cwd(), 'configs', 'usage-cache.json');
 const DEFAULT_CONFIG = {
     persistDebounceMs: 30_000,
     maxDirtyAgeMs: 60_000
 };
 const ACCOUNT_EVENT_RETENTION_MS = 8 * 24 * 60 * 60 * 1000;
 const ROLLING_5H_MS = 5 * 60 * 60 * 1000;
-const USAGE_CACHE_SNAPSHOT_TTL_MS = 1000;
 const PENDING_REQUEST_CLEANUP_INTERVAL_MS = 60_000;
 const PERSIST_RETRY_DELAY_MS = 5_000;
 
@@ -49,8 +47,6 @@ let retryNotBefore = 0;
 const rateManager = new RateManager(60); // 使用 60 秒滑动窗口，更平滑
 const pendingRequests = new Map();
 let lastPendingCleanupAt = 0;
-let usageCacheSnapshot = null;
-let usageCacheSnapshotLoadedAt = 0;
 
 function getTraceRequestId(requestId) {
     return requestId || 'N/A';
@@ -634,24 +630,7 @@ function toNumber(value) {
 }
 
 function readUsageCacheSnapshot() {
-    const now = Date.now();
-    if (now - usageCacheSnapshotLoadedAt < USAGE_CACHE_SNAPSHOT_TTL_MS) {
-        return usageCacheSnapshot;
-    }
-
-    usageCacheSnapshotLoadedAt = now;
-    try {
-        if (!existsSync(USAGE_CACHE_FILE)) {
-            usageCacheSnapshot = null;
-            return usageCacheSnapshot;
-        }
-        usageCacheSnapshot = JSON.parse(readFileSync(USAGE_CACHE_FILE, 'utf8'));
-        return usageCacheSnapshot;
-    } catch (error) {
-        logger.warn('[Request Audit] Failed to read usage cache:', error.message);
-        usageCacheSnapshot = null;
-        return usageCacheSnapshot;
-    }
+    return readFreshUsageCacheSync(365 * 24 * 60 * 60 * 1000) || null;
 }
 
 function getPercentFromUsageItem(usage, id, label) {

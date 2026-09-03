@@ -172,6 +172,11 @@ export class RedisRespClient {
         });
     }
 
+    async commandPipeline(commands, options = {}) {
+        if (!Array.isArray(commands) || commands.length === 0) return [];
+        return Promise.all(commands.map(parts => this.command(parts, options)));
+    }
+
     async evalScript(name, script, keys = [], args = []) {
         const hash = this.scriptHashes.get(name) || createHash('sha1').update(script).digest('hex');
         this.scriptHashes.set(name, hash);

@@ -77,7 +77,8 @@ function compactTemporaryModelRoute(route) {
 function compactMetadata(context = {}) {
     const allowedStages = new Set([
         'providerFilterMs', 'keyQueueWaitMs', 'selectionComputeMs',
-        'redisLeaseMs', 'identityReadMs', 'identityPersistLockWaitMs',
+        'redisLeaseMs', 'elasticQueueWaitMs', 'availabilityRefreshMs', 'elasticAttemptCount',
+        'identityReadMs', 'identityPersistLockWaitMs',
         'identityPersistIoMs', 'requestConvertMs', 'systemPromptPersistMs',
         'upstreamFirstByteMs', 'upstreamCompleteMs', 'responseFinalizeMs', 'complete'
     ]);
@@ -163,13 +164,14 @@ export class RuntimeHookBridge {
         else this.backpressured += 1;
         try {
             if (this.durableTransport) {
-                const durableEvent = JSON.parse(JSON.stringify(outbound));
-                for (const arg of durableEvent.args || []) {
-                    if (arg?.potluckApiKey) {
-                        arg.potluckKeyHash = hashSecret(arg.potluckApiKey, 16);
-                        delete arg.potluckApiKey;
-                    }
-                }
+                const durableEvent = {
+                    ...outbound,
+                    args: (outbound.args || []).map(arg => {
+                        if (!arg || typeof arg !== 'object' || !arg.potluckApiKey) return arg;
+                        const { potluckApiKey, ...rest } = arg;
+                        return { ...rest, potluckKeyHash: hashSecret(potluckApiKey, 16) };
+                    })
+                };
                 const durableResult = await this.durableTransport.publish(durableEvent);
                 if (durableResult?.streamId) outbound.streamId = durableResult.streamId;
                 // Local standalone transports can append directly to their

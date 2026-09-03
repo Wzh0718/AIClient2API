@@ -463,6 +463,34 @@ describe('RuntimeHookStream', () => {
         expect(stream.redisCommandTimeoutMs).toBe(15000);
     });
 
+    test('publishes a batch of hook events with one Redis pipeline', async () => {
+        const redis = {
+            command: jest.fn(async () => 'OK'),
+            commandPipeline: jest.fn(async commands => commands.map((_, index) => `${index + 1}-0`))
+        };
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-hook-batch-'));
+        const stream = new RuntimeHookStream({
+            redis,
+            epoch: 'test',
+            workerId: 'execution-1',
+            spoolDir: dir
+        });
+
+        const results = await stream.publishBatch([
+            { eventId: 'evt-a', args: [{ model: 'gemini-3.1-flash-lite' }] },
+            { eventId: 'evt-b', args: [{ model: 'gemini-3.1-flash-lite' }] }
+        ]);
+
+        expect(results).toEqual([
+            expect.objectContaining({ persisted: true, streamId: '1-0' }),
+            expect.objectContaining({ persisted: true, streamId: '2-0' })
+        ]);
+        expect(redis.commandPipeline).toHaveBeenCalledTimes(1);
+        expect(redis.commandPipeline.mock.calls[0][0].every(parts => parts[0] === 'XADD')).toBe(true);
+        expect(redis.command.mock.calls.every(([parts]) => parts[0] !== 'XADD')).toBe(true);
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
     test('rejects new spool writes after the configured disk bound without growing memory', async () => {
         const redis = { command: jest.fn().mockRejectedValue(new Error('redis unavailable')) };
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-hook-spool-bound-'));

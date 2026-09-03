@@ -164,8 +164,21 @@ export class RuntimeHookStream {
     }
 
     async publish(event) {
-        await this._writeSpool(event);
-        const payload = JSON.stringify(event);
+        const [result] = await this.publishBatch([event]);
+        return result;
+    }
+
+    async publishBatch(events = []) {
+        if (!Array.isArray(events) || events.length === 0) return [];
+        const prepared = [];
+        for (const event of events) {
+            await this._writeSpool(event);
+            prepared.push({
+                event,
+                payload: JSON.stringify(event),
+                createdAt: event.createdAt || new Date().toISOString()
+            });
+        }
         try {
             const memory = await this._getRedisMemorySnapshot();
             if (memory.critical) {
@@ -173,20 +186,27 @@ export class RuntimeHookStream {
                 error.code = 'REDIS_MEMORY_CRITICAL';
                 throw error;
             }
-            const streamId = await this.redis.command([
+            const commands = prepared.map(item => ([
                 'XADD', this.streamKey, '*',
-                'eventId', event.eventId,
-                'sourceWorkerId', event.sourceWorkerId || this.workerId,
-                'createdAt', event.createdAt || new Date().toISOString(),
-                'payload', payload
-            ], { timeoutMs: this.redisCommandTimeoutMs });
+                'eventId', item.event.eventId,
+                'sourceWorkerId', item.event.sourceWorkerId || this.workerId,
+                'createdAt', item.createdAt,
+                'payload', item.payload
+            ]));
+            const streamIds = typeof this.redis.commandPipeline === 'function'
+                ? await this.redis.commandPipeline(commands, { timeoutMs: this.redisCommandTimeoutMs })
+                : await Promise.all(commands.map(parts => this.redis.command(parts, { timeoutMs: this.redisCommandTimeoutMs })));
             this.lastPublishedAt = new Date().toISOString();
             this.lastError = null;
-            return { persisted: true, spooled: false, streamId };
+            return prepared.map((item, index) => ({
+                persisted: true,
+                spooled: false,
+                streamId: streamIds[index]
+            }));
         } catch (error) {
             if (/\bOOM\b|maxmemory/i.test(error.message || '')) this.oomCommandErrors++;
             this.lastError = error.message;
-            return { persisted: true, spooled: true, streamId: null };
+            return prepared.map(() => ({ persisted: true, spooled: true, streamId: null }));
         }
     }
 

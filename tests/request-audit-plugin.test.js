@@ -353,4 +353,28 @@ describe('request audit plugin', () => {
     expect(auditStore.cleanup).not.toHaveBeenCalled();
     expect(rawCaptureStore.cleanup).toHaveBeenCalledTimes(1);
   });
+
+  test('commits a usage projection batch with one appendBatch call', async () => {
+    const auditStore = {
+      append: jest.fn(),
+      appendBatch: jest.fn().mockResolvedValue({ appended: 2, duplicates: 0, results: [] }),
+      cleanup: jest.fn()
+    };
+    await plugin.init({ REQUEST_AUDIT_ENABLED: true, _requestAuditStore: auditStore });
+    plugin.beginUsageProjectionBatch();
+    await plugin.hooks.onRequestCompleted({
+      requestId: 'proj-1',
+      _runtimeEventId: 'runtime:1',
+      model: 'gemini-3.1-flash-lite'
+    });
+    await plugin.hooks.onRequestCompleted({
+      requestId: 'proj-2',
+      _runtimeEventId: 'runtime:2',
+      model: 'gemini-3.1-flash-lite'
+    });
+    await plugin.commitUsageProjectionBatch();
+    expect(auditStore.appendBatch).toHaveBeenCalledTimes(1);
+    expect(auditStore.append).not.toHaveBeenCalled();
+    expect(auditStore.appendBatch.mock.calls[0][0]).toHaveLength(2);
+  });
 });

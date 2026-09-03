@@ -38,6 +38,8 @@ const ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS = Object.freeze(
 // A 404 from upstream means the model does not exist at all, so the entry can
 // live far longer than a quota cooldown. It is still bounded so an upstream
 // rename or a newly granted tier recovers without an operator action.
+const ANTIGRAVITY_AVAILABILITY_INVALIDATE_MIN_INTERVAL_MS = 200;
+const ANTIGRAVITY_AVAILABILITY_SCOPE_CACHE_LIMIT = 256;
 const ANTIGRAVITY_MODEL_NOT_FOUND_TTL_MS = 60 * 60 * 1000;
 const ANTIGRAVITY_MODEL_NOT_FOUND_SYNC_INTERVAL_MS = 5000;
 const ANTIGRAVITY_ELASTIC_DEFAULTS = Object.freeze({
@@ -677,6 +679,11 @@ export class ProviderPoolManager {
         this._antigravityAvailabilityLocal = new Map();
         this._antigravityAvailabilityFlights = new Map();
         this._antigravityAvailabilityRevision = 0;
+        this._antigravityAvailabilityModelRevisions = new Map();
+        this._antigravityAvailabilityLastInvalidateAt = new Map();
+        this._antigravityCredentialHashCache = new Map();
+        this._antigravityAvailabilityScopeCache = new Map();
+        this._antigravityPlanFilterCache = { usageCache: null, byUuid: new Map() };
         this._antigravityAvailabilityMetrics = {
             cacheHits: 0,
             cacheMisses: 0,
@@ -1796,27 +1803,34 @@ export class ProviderPoolManager {
             return [];
         }
 
-        const availableProviders = this.providerStatus[providerType] || [];
         this._checkAndRecoverScheduledProviders(providerType);
 
-        let candidates = availableProviders.filter(p =>
-            p.config.isHealthy && !p.config.isDisabled && !p.config.needsRefresh
-        );
+        let candidates;
+        if (isAntigravityProviderType(providerType) && Array.isArray(options.antigravityBaseCandidates)) {
+            candidates = options.antigravityBaseCandidates.filter(p =>
+                p.config.isHealthy && !p.config.isDisabled && !p.config.needsRefresh
+            );
+        } else {
+            const availableProviders = this.providerStatus[providerType] || [];
+            candidates = availableProviders.filter(p =>
+                p.config.isHealthy && !p.config.isDisabled && !p.config.needsRefresh
+            );
 
-        if (Array.isArray(options.allowedProviderUuids)) {
-            const allowedProviderUuids = new Set(options.allowedProviderUuids.filter(Boolean).map(String));
-            candidates = candidates.filter(p => {
-                const uuid = p.uuid || p.config?.uuid;
-                return allowedProviderUuids.has(uuid);
-            });
-        }
+            if (Array.isArray(options.allowedProviderUuids)) {
+                const allowedProviderUuids = new Set(options.allowedProviderUuids.filter(Boolean).map(String));
+                candidates = candidates.filter(p => {
+                    const uuid = p.uuid || p.config?.uuid;
+                    return allowedProviderUuids.has(uuid);
+                });
+            }
 
-        const excludedProviderUuids = new Set(options.excludeProviderUuids || []);
-        if (excludedProviderUuids.size > 0) {
-            candidates = candidates.filter(p => {
-                const uuid = p.uuid || p.config?.uuid;
-                return !excludedProviderUuids.has(uuid);
-            });
+            const excludedProviderUuids = new Set(options.excludeProviderUuids || []);
+            if (excludedProviderUuids.size > 0) {
+                candidates = candidates.filter(p => {
+                    const uuid = p.uuid || p.config?.uuid;
+                    return !excludedProviderUuids.has(uuid);
+                });
+            }
         }
 
         if (requestedModel) {
@@ -1836,7 +1850,9 @@ export class ProviderPoolManager {
             candidates = this._filterCodexProvidersByTokenQuota(providerType, candidates, requestedModel, options.selectionDiagnostics);
         }
         if (isAntigravityProviderType(providerType) && candidates.length > 0) {
-            candidates = this._filterAntigravityProvidersByPlan(providerType, candidates, options.selectionDiagnostics);
+            if (!Array.isArray(options.antigravityBaseCandidates)) {
+                candidates = this._filterAntigravityProvidersByPlan(providerType, candidates, options.selectionDiagnostics);
+            }
             candidates = await this._filterAntigravityProvidersByQuota(
                 providerType,
                 candidates,
@@ -1846,6 +1862,25 @@ export class ProviderPoolManager {
             );
         }
 
+        return candidates;
+    }
+
+    _getAntigravityBaseCandidates(providerType, options = {}) {
+        this._checkAndRecoverScheduledProviders(providerType);
+        let candidates = (this.providerStatus[providerType] || []).filter(p =>
+            p.config.isHealthy && !p.config.isDisabled && !p.config.needsRefresh
+        );
+        if (Array.isArray(options.allowedProviderUuids)) {
+            const allowedProviderUuids = new Set(options.allowedProviderUuids.filter(Boolean).map(String));
+            candidates = candidates.filter(p => allowedProviderUuids.has(p.uuid || p.config?.uuid));
+        }
+        const excludedProviderUuids = new Set(options.excludeProviderUuids || []);
+        if (excludedProviderUuids.size > 0) {
+            candidates = candidates.filter(p => !excludedProviderUuids.has(p.uuid || p.config?.uuid));
+        }
+        if (candidates.length > 0) {
+            candidates = this._filterAntigravityProvidersByPlan(providerType, candidates, options.selectionDiagnostics);
+        }
         return candidates;
     }
 
@@ -1964,6 +1999,45 @@ export class ProviderPoolManager {
         return queueLimit > 0 && state.waitingCount < queueLimit;
     }
 
+    _compareProviderCandidates(a, b, requestedModel, options = {}, now = Date.now(), rankOptions = {}) {
+        const deprioritizedTypes = new Set(options.deprioritizeProviderTypes || []);
+        if (deprioritizedTypes.size > 0) {
+            const aDeprioritized = deprioritizedTypes.has(a.type);
+            const bDeprioritized = deprioritizedTypes.has(b.type);
+            if (aDeprioritized !== bDeprioritized) return aDeprioritized ? 1 : -1;
+        }
+
+        const minSeq = Number.isFinite(rankOptions.minSeq)
+            ? rankOptions.minSeq
+            : Math.min(a.config?._lastSelectionSeq || 0, b.config?._lastSelectionSeq || 0);
+        const weighted = rankOptions.weighted === true;
+
+        if (weighted) {
+            const weightedUsageA = this._getProviderWeightedBalanceScore(a.type, a, now);
+            const weightedUsageB = this._getProviderWeightedBalanceScore(b.type, b, now);
+            if (weightedUsageA !== weightedUsageB) return weightedUsageA - weightedUsageB;
+
+            const loadA = a.state?.activeCount || 0;
+            const loadB = b.state?.activeCount || 0;
+            if (loadA !== loadB) return loadA - loadB;
+
+            const lastUsedA = a.config.lastUsed ? new Date(a.config.lastUsed).getTime() : 0;
+            const lastUsedB = b.config.lastUsed ? new Date(b.config.lastUsed).getTime() : 0;
+            if (lastUsedA !== lastUsedB) return lastUsedA - lastUsedB;
+
+            const typeCompare = (a.type || '').localeCompare(b.type || '');
+            if (typeCompare !== 0) return typeCompare;
+            return String(a.uuid || a.config?.uuid || '').localeCompare(String(b.uuid || b.config?.uuid || ''));
+        }
+
+        const scoreA = this._calculateNodeScore(a, now, minSeq);
+        const scoreB = this._calculateNodeScore(b, now, minSeq);
+        if (scoreA !== scoreB) return scoreA - scoreB;
+        const typeCompare = (a.type || '').localeCompare(b.type || '');
+        if (typeCompare !== 0) return typeCompare;
+        return String(a.uuid || a.config?.uuid || '').localeCompare(String(b.uuid || b.config?.uuid || ''));
+    }
+
     _selectFromMixedCandidates(candidates, requestedModel, options = {}) {
         if (candidates.length === 0) return null;
 
@@ -1977,6 +2051,7 @@ export class ProviderPoolManager {
 
         const now = Date.now();
         const minSeq = Math.min(...candidates.map(p => p.config._lastSelectionSeq || 0));
+        const weighted = hasCustomProviderWeights(candidates);
 
         let selected;
         if (options.stickyProviderKey) {
@@ -1984,34 +2059,15 @@ export class ProviderPoolManager {
                 candidates,
                 `mixed:${requestedModel || ''}:${options.stickyProviderKey}`
             );
-        } else if (hasCustomProviderWeights(candidates)) {
-            selected = [...candidates].sort((a, b) => {
-                const weightedUsageA = this._getProviderWeightedBalanceScore(a.type, a, now);
-                const weightedUsageB = this._getProviderWeightedBalanceScore(b.type, b, now);
-                if (weightedUsageA !== weightedUsageB) return weightedUsageA - weightedUsageB;
-
-                const loadA = a.state?.activeCount || 0;
-                const loadB = b.state?.activeCount || 0;
-                if (loadA !== loadB) return loadA - loadB;
-
-                const lastUsedA = a.config.lastUsed ? new Date(a.config.lastUsed).getTime() : 0;
-                const lastUsedB = b.config.lastUsed ? new Date(b.config.lastUsed).getTime() : 0;
-                if (lastUsedA !== lastUsedB) return lastUsedA - lastUsedB;
-
-                const typeCompare = (a.type || '').localeCompare(b.type || '');
-                if (typeCompare !== 0) return typeCompare;
-                return (a.uuid || '').localeCompare(b.uuid || '');
-            })[0];
         } else {
-            selected = [...candidates].sort((a, b) => {
-                const scoreA = this._calculateNodeScore(a, now, minSeq);
-                const scoreB = this._calculateNodeScore(b, now, minSeq);
-                if (scoreA !== scoreB) return scoreA - scoreB;
-
-                const typeCompare = (a.type || '').localeCompare(b.type || '');
-                if (typeCompare !== 0) return typeCompare;
-                return (a.uuid || '').localeCompare(b.uuid || '');
-            })[0];
+            selected = [...candidates].sort((a, b) => this._compareProviderCandidates(
+                a,
+                b,
+                requestedModel,
+                options,
+                now,
+                { minSeq, weighted }
+            ))[0];
         }
 
         selected.config.lastUsed = new Date().toISOString();
@@ -2505,6 +2561,10 @@ export class ProviderPoolManager {
             store.providerLeases = store.providerLeases || new Map();
             store.providerLeases.set(`${lease.providerType}:${lease.uuid}`, lease.leaseId);
             selected.config.lastUsed = new Date().toISOString();
+            if (!options.skipUsageCount) {
+                selected.config.usageCount = (selected.config.usageCount || 0) + 1;
+            }
+            this._recordProviderSelectionLoad(lease.providerType, selected, Date.now());
             return selected.config;
         }
         // 使用 selectProvider 进行初次选择（评分逻辑已经包含了并发考虑）
@@ -2803,7 +2863,9 @@ export class ProviderPoolManager {
             availableAndHealthyProviders = this._filterCodexProvidersByTokenQuota(providerType, availableAndHealthyProviders, requestedModel, selectionDiagnostics);
         }
         if (isAntigravityProviderType(providerType)) {
-            availableAndHealthyProviders = this._filterAntigravityProvidersByPlan(providerType, availableAndHealthyProviders, selectionDiagnostics);
+            if (!Array.isArray(options.antigravityBaseCandidates)) {
+                availableAndHealthyProviders = this._filterAntigravityProvidersByPlan(providerType, availableAndHealthyProviders, selectionDiagnostics);
+            }
             availableAndHealthyProviders = await this._filterAntigravityProvidersByQuota(
                 providerType,
                 availableAndHealthyProviders,
@@ -3172,13 +3234,21 @@ export class ProviderPoolManager {
 
     _filterAntigravityProvidersByPlan(providerType, providers, selectionDiagnostics = null) {
         const usageCache = readFreshUsageCacheSync();
+        if (this._antigravityPlanFilterCache.usageCache !== usageCache) {
+            this._antigravityPlanFilterCache = { usageCache, byUuid: new Map() };
+        }
+        const planByUuid = this._antigravityPlanFilterCache.byUuid;
         const allowed = [];
         let freeCount = 0;
         let updatedLastKnownPlan = false;
 
         for (const provider of providers) {
             const uuid = provider.config?.uuid || provider.uuid;
-            const planStatus = getAntigravityPlanStatusForProvider(providerType, uuid, usageCache, provider.config);
+            let planStatus = planByUuid.get(uuid);
+            if (!planStatus) {
+                planStatus = getAntigravityPlanStatusForProvider(providerType, uuid, usageCache, provider.config);
+                planByUuid.set(uuid, planStatus);
+            }
             if (planStatus.isFree) {
                 freeCount += 1;
                 this._log('info', `Skipping Antigravity provider ${this._getDisplayName(provider.config)}: plan ${planStatus.plan} is free`);
@@ -3214,19 +3284,40 @@ export class ProviderPoolManager {
     }
 
     _getAntigravityAvailabilityScope(providerType, canonicalModel, providers = [], options = {}) {
-        const candidateHash = providers
-            .map(provider => this._getAntigravityCredentialHash(provider.config?.uuid || provider.uuid || ''))
+        const modelRevision = this._antigravityAvailabilityModelRevisions.get(canonicalModel) || 0;
+        const fingerprint = providers
+            .map(provider => provider.config?.uuid || provider.uuid || '')
             .sort()
             .join(',');
         const routingStrategy = String(options.routingStrategy || '').trim();
-        return `antigravity-availability:${providerType}:${canonicalModel}:${this.providerConfigRevision}:${this._antigravityAvailabilityRevision}:${routingStrategy}:${candidateHash}`;
+        const cacheKey = `${providerType}|${canonicalModel}|${this.providerConfigRevision}|${this._antigravityAvailabilityRevision}|${modelRevision}|${routingStrategy}|${fingerprint}`;
+        const cached = this._antigravityAvailabilityScopeCache.get(cacheKey);
+        if (cached) return cached;
+        const candidateHash = fingerprint
+            .split(',')
+            .filter(Boolean)
+            .map(uuid => this._getAntigravityCredentialHash(uuid))
+            .sort()
+            .join(',');
+        const scope = `antigravity-availability:${providerType}:${canonicalModel}:${this.providerConfigRevision}:${this._antigravityAvailabilityRevision}:${modelRevision}:${routingStrategy}:${candidateHash}`;
+        this._antigravityAvailabilityScopeCache.set(cacheKey, scope);
+        if (this._antigravityAvailabilityScopeCache.size > ANTIGRAVITY_AVAILABILITY_SCOPE_CACHE_LIMIT) {
+            const oldest = this._antigravityAvailabilityScopeCache.keys().next().value;
+            this._antigravityAvailabilityScopeCache.delete(oldest);
+        }
+        return scope;
     }
 
     _getAntigravityCredentialHash(providerUuid) {
-        return crypto.createHash('sha256')
-            .update(`antigravity-credential:${String(providerUuid || '')}`)
+        const key = String(providerUuid || '');
+        const cached = this._antigravityCredentialHashCache.get(key);
+        if (cached) return cached;
+        const hash = crypto.createHash('sha256')
+            .update(`antigravity-credential:${key}`)
             .digest('hex')
             .slice(0, 16);
+        this._antigravityCredentialHashCache.set(key, hash);
+        return hash;
     }
 
     _getAntigravityAvailabilityTtl(snapshot) {
@@ -3260,6 +3351,15 @@ export class ProviderPoolManager {
     }
 
     async _getOrRefreshAntigravityAvailability(scope, refresh) {
+        const startedAt = performance.now();
+        try {
+            return await this._getOrRefreshAntigravityAvailabilityUnmetered(scope, refresh);
+        } finally {
+            accumulateRoutingWait('availabilityRefreshMs', performance.now() - startedAt);
+        }
+    }
+
+    async _getOrRefreshAntigravityAvailabilityUnmetered(scope, refresh) {
         const now = Date.now();
         const local = this._antigravityAvailabilityLocal.get(scope);
         if (this._isAntigravityAvailabilitySnapshotValid(local, now)) {
@@ -3400,10 +3500,31 @@ export class ProviderPoolManager {
         return true;
     }
 
-    invalidateAntigravityAvailability(canonicalModel = null) {
-        const prefix = canonicalModel
-            ? `antigravity-availability:${MODEL_PROVIDER.ANTIGRAVITY}:${normalizeAntigravityQuotaModel(canonicalModel)}:`
-            : `antigravity-availability:${MODEL_PROVIDER.ANTIGRAVITY}:`;
+    invalidateAntigravityAvailability(canonicalModel = null, options = {}) {
+        const minIntervalMs = Math.max(0, Number(options.minIntervalMs) || 0);
+        const now = Date.now();
+        if (canonicalModel) {
+            const model = normalizeAntigravityQuotaModel(canonicalModel);
+            if (minIntervalMs > 0) {
+                const last = this._antigravityAvailabilityLastInvalidateAt.get(model) || 0;
+                if (now - last < minIntervalMs) return 0;
+            }
+            const prefix = `antigravity-availability:${MODEL_PROVIDER.ANTIGRAVITY}:${model}:`;
+            let count = 0;
+            for (const key of this._antigravityAvailabilityLocal.keys()) {
+                if (!key.startsWith(prefix)) continue;
+                this._antigravityAvailabilityLocal.delete(key);
+                count += 1;
+            }
+            this._antigravityAvailabilityModelRevisions.set(
+                model,
+                (this._antigravityAvailabilityModelRevisions.get(model) || 0) + 1
+            );
+            this._antigravityAvailabilityLastInvalidateAt.set(model, now);
+            this._antigravityAvailabilityMetrics.invalidations += count;
+            return count;
+        }
+        const prefix = `antigravity-availability:${MODEL_PROVIDER.ANTIGRAVITY}:`;
         let count = 0;
         for (const key of this._antigravityAvailabilityLocal.keys()) {
             if (!key.startsWith(prefix)) continue;
@@ -3411,6 +3532,9 @@ export class ProviderPoolManager {
             count += 1;
         }
         this._antigravityAvailabilityRevision += 1;
+        this._antigravityAvailabilityModelRevisions.clear();
+        this._antigravityAvailabilityLastInvalidateAt.clear();
+        this._antigravityAvailabilityScopeCache.clear();
         this._antigravityAvailabilityMetrics.invalidations += count;
         return count;
     }
@@ -3901,12 +4025,22 @@ export class ProviderPoolManager {
         });
     }
 
+    async _waitForGeminiElasticWakeTracked(args) {
+        const startedAt = performance.now();
+        try {
+            return await this._waitForGeminiElasticWake(args);
+        } finally {
+            accumulateRoutingWait('elasticQueueWaitMs', performance.now() - startedAt);
+        }
+    }
+
     _getRecoveryTimeFromError(error) {
         const value = Date.parse(error?.nextRecoveryTime || error?.retryAfter || '');
         return Number.isFinite(value) ? value : null;
     }
 
     async _tryAntigravityElasticModel(providerType, model, options) {
+        accumulateRoutingWait('elasticAttemptCount', 1);
         try {
             const config = await this.acquireSlot(providerType, model, {
                 ...options,
@@ -3964,9 +4098,17 @@ export class ProviderPoolManager {
         const requestStore = requestContext.getStore();
         const requestRouting = requestStore.antigravityRouting || {
             attemptedModels: [],
+            passAttemptedModels: [],
+            skippedNotFoundModels: [],
             negativeCacheVersion: this._antigravityAvailabilityRevision,
             sourceModelCooldownMs: null
         };
+        requestRouting.passAttemptedModels = Array.isArray(requestRouting.passAttemptedModels)
+            ? requestRouting.passAttemptedModels
+            : [];
+        requestRouting.skippedNotFoundModels = Array.isArray(requestRouting.skippedNotFoundModels)
+            ? requestRouting.skippedNotFoundModels
+            : [];
         requestStore.antigravityRouting = requestRouting;
         const configuredFallbacks = Array.isArray(policy.fallbackModels) ? policy.fallbackModels : [];
         const availableModels = this._getAntigravityVerifiedModels(providerType);
@@ -3984,20 +4126,38 @@ export class ProviderPoolManager {
         let queueEntry = null;
         let queueStartedAt = null;
         let latestErrors = [];
+        let passOptions = {
+            ...options,
+            antigravityBaseCandidates: this._getAntigravityBaseCandidates(providerType, options)
+        };
 
-        const attemptModels = async ({ includeSource = true } = {}) => {
+        const markStructuralSkip = (model, error) => {
+            if (error?.code === 'MODEL_NOT_FOUND' || Number(error?.status) === 404 || this.isAntigravityModelNotFound(providerType, model)) {
+                if (!requestRouting.skippedNotFoundModels.includes(model)) {
+                    requestRouting.skippedNotFoundModels.push(model);
+                }
+            }
+        };
+
+        const attemptModels = async ({ includeSource = true, resetPass = false } = {}) => {
+            if (resetPass) requestRouting.passAttemptedModels = [];
             latestErrors = [];
             const startIndex = (includeSource || !sourceModelUsable) ? 0 : 1;
             for (let index = startIndex; index < models.length; index += 1) {
                 const model = models[index];
-                if (requestRouting.attemptedModels.includes(model)) {
+                if (requestRouting.skippedNotFoundModels.includes(model) || this.isAntigravityModelNotFound(providerType, model)) {
                     this._antigravityRoutingMetrics.retrySuppressed += 1;
                     continue;
                 }
+                if (requestRouting.passAttemptedModels.includes(model)) {
+                    this._antigravityRoutingMetrics.retrySuppressed += 1;
+                    continue;
+                }
+                requestRouting.passAttemptedModels.push(model);
                 if (!requestRouting.attemptedModels.includes(model)) requestRouting.attemptedModels.push(model);
                 if (index === 0) this._antigravityRoutingMetrics.sourceAttempts += 1;
                 else this._antigravityRoutingMetrics.fallbackAttempts += 1;
-                const attempt = await this._tryAntigravityElasticModel(providerType, model, options);
+                const attempt = await this._tryAntigravityElasticModel(providerType, model, passOptions);
                 if (attempt.config) {
                     const isFallback = model !== requestedModel;
                     if (isFallback) {
@@ -4014,6 +4174,7 @@ export class ProviderPoolManager {
                         queueWaitMs: queueEntry ? Date.now() - startedAt : 0
                     };
                 }
+                markStructuralSkip(model, attempt.error);
                 latestErrors.push(attempt.error);
             }
             return null;
@@ -4023,7 +4184,8 @@ export class ProviderPoolManager {
             let sourceAttempt = { config: null, error: null };
             if (sourceModelUsable) {
                 if (!requestRouting.attemptedModels.includes(requestedModel)) requestRouting.attemptedModels.push(requestedModel);
-                sourceAttempt = await this._tryAntigravityElasticModel(providerType, requestedModel, options);
+                if (!requestRouting.passAttemptedModels.includes(requestedModel)) requestRouting.passAttemptedModels.push(requestedModel);
+                sourceAttempt = await this._tryAntigravityElasticModel(providerType, requestedModel, passOptions);
                 this._antigravityRoutingMetrics.sourceAttempts += 1;
                 if (sourceAttempt.config) {
                     return {
@@ -4035,6 +4197,7 @@ export class ProviderPoolManager {
                         queueWaitMs: 0
                     };
                 }
+                markStructuralSkip(requestedModel, sourceAttempt.error);
             }
 
             const sourceRecovery = this._getRecoveryTimeFromError(sourceAttempt.error);
@@ -4045,7 +4208,7 @@ export class ProviderPoolManager {
                 queueEntry = await this._acquireGeminiElasticQueueEntry(requestedModel, options, policy);
                 queueStartedAt = Date.now();
                 this._antigravityRoutingMetrics.queueEnqueued += 1;
-                await this._waitForGeminiElasticWake({
+                await this._waitForGeminiElasticWakeTracked({
                     timeoutMs: Math.min(sourceWaitMs, Math.max(1, deadline - Date.now())),
                     abortSignal: options.abortSignal,
                     providerType
@@ -4054,13 +4217,17 @@ export class ProviderPoolManager {
                 const jitterRange = Math.max(0, policy.recoveryJitterMaxMs - policy.recoveryJitterMinMs);
                 const jitterMs = policy.recoveryJitterMinMs + Math.floor(Math.random() * (jitterRange + 1));
                 if (jitterMs > 0 && Date.now() < deadline) {
-                    await this._waitForGeminiElasticWake({
+                    await this._waitForGeminiElasticWakeTracked({
                         timeoutMs: Math.min(jitterMs, Math.max(1, deadline - Date.now())),
                         abortSignal: options.abortSignal,
                         providerType
                     });
                 }
-                const recovered = await this._tryAntigravityElasticModel(providerType, requestedModel, options);
+                passOptions = {
+                    ...options,
+                    antigravityBaseCandidates: this._getAntigravityBaseCandidates(providerType, options)
+                };
+                const recovered = await this._tryAntigravityElasticModel(providerType, requestedModel, passOptions);
                 if (recovered.config) {
                     return {
                         config: recovered.config,
@@ -4096,13 +4263,19 @@ export class ProviderPoolManager {
                 const nearestRecovery = recoveryTimes.length > 0 ? Math.min(...recoveryTimes) : null;
                 const remainingMs = Math.max(1, deadline - now);
                 const recoveryDelay = nearestRecovery ? Math.max(1, nearestRecovery - now) : remainingMs;
-                await this._waitForGeminiElasticWake({
+                await this._waitForGeminiElasticWakeTracked({
                     timeoutMs: Math.min(remainingMs, recoveryDelay, this.coordination ? 1000 : remainingMs),
                     abortSignal: options.abortSignal,
                     providerType
                 });
-                this.invalidateAntigravityAvailability(canonicalRequestedModel);
-                const selected = await attemptModels({ includeSource: false });
+                this.invalidateAntigravityAvailability(canonicalRequestedModel, {
+                    minIntervalMs: ANTIGRAVITY_AVAILABILITY_INVALIDATE_MIN_INTERVAL_MS
+                });
+                passOptions = {
+                    ...options,
+                    antigravityBaseCandidates: this._getAntigravityBaseCandidates(providerType, options)
+                };
+                const selected = await attemptModels({ includeSource: true, resetPass: true });
                 if (selected) {
                     selected.queueOutcome = selected.isFallback ? 'fallback_after_wait' : 'recovered_original';
                     return selected;
@@ -4953,16 +5126,29 @@ export class ProviderPoolManager {
 
     _orderCoordinatedCandidates(candidates, providerType, requestedModel, options = {}) {
         if (candidates.length <= 1) return candidates;
-        const remaining = [...candidates];
-        const ordered = [];
-        while (remaining.length > 0) {
-            const selected = this._selectFromMixedCandidates(remaining, requestedModel, options)
-                || remaining[0];
-            ordered.push(selected);
-            const index = remaining.indexOf(selected);
-            remaining.splice(index < 0 ? 0 : index, 1);
+        if (options.stickyProviderKey) {
+            const remaining = [...candidates];
+            const ordered = [];
+            while (remaining.length > 0) {
+                const selected = this._selectFromMixedCandidates(remaining, requestedModel, { ...options, skipUsageCount: true })
+                    || remaining[0];
+                ordered.push(selected);
+                const index = remaining.indexOf(selected);
+                remaining.splice(index < 0 ? 0 : index, 1);
+            }
+            return ordered;
         }
-        return ordered;
+        const now = Date.now();
+        const minSeq = Math.min(...candidates.map(provider => provider.config?._lastSelectionSeq || 0));
+        const weighted = hasCustomProviderWeights(candidates);
+        return [...candidates].sort((a, b) => this._compareProviderCandidates(
+            a,
+            b,
+            requestedModel,
+            options,
+            now,
+            { minSeq, weighted }
+        ));
     }
 
     markAntigravityModelQuotaUnhealthy(providerType, providerConfig, modelName, errorMessage = null, recoveryTime = null) {

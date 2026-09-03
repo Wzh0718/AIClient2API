@@ -1,6 +1,6 @@
 import { jest } from '@jest/globals';
 import { ProviderPoolManager, getAntigravityElasticFallbackModels } from '../src/providers/provider-pool-manager.js';
-import requestContext from '../src/utils/context.js';
+import requestContext, { readRoutingWaits } from '../src/utils/context.js';
 
 jest.mock('../src/providers/adapter.js', () => ({
     getServiceAdapter: jest.fn(),
@@ -153,7 +153,7 @@ describe('Antigravity elastic queue and model fallback', () => {
         });
     });
 
-    test('does not retry the same fallback model within one request lifecycle', async () => {
+    test('does not retry the same fallback model within one pass', async () => {
         const manager = createManager([
             provider('gemini-a', {
                 [sourceModel]: coolingUntil(1500),
@@ -167,8 +167,108 @@ describe('Antigravity elastic queue and model fallback', () => {
             queueKey: 'key-a'
         })).rejects.toMatchObject({ code: 'QUEUE_WAIT_TIMEOUT' });
 
-        const attemptedModels = attempts.mock.calls.map(([, model]) => model);
-        expect(new Set(attemptedModels).size).toBe(attemptedModels.length);
+        const firstPass = [];
+        for (const [, model] of attempts.mock.calls) {
+            if (firstPass.includes(model)) break;
+            firstPass.push(model);
+        }
+        expect(new Set(firstPass).size).toBe(firstPass.length);
+        expect(firstPass).toEqual([sourceModel, firstFallback, secondFallback]);
+    });
+
+    test('retries quota-cooled models after a wake and succeeds when they recover', async () => {
+        const manager = createManager([
+            provider('gemini-a', {
+                [sourceModel]: coolingUntil(40),
+                [firstFallback]: coolingUntil(40),
+                [secondFallback]: coolingUntil(40)
+            })
+        ], { maxQueueWaitMs: 160, preferOriginalWaitMs: 0 });
+
+        const result = await manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: 'key-a'
+        });
+
+        expect(result).toMatchObject({
+            actualModel: expect.stringMatching(/gemini-/),
+            queueOutcome: expect.stringMatching(/fallback_after_wait|recovered_original/)
+        });
+        expect(result.config?.uuid).toBe('gemini-a');
+    });
+
+    test('does not retry a model-not-found entry after a wake', async () => {
+        const manager = createManager([provider('gemini-a')]);
+        manager.markAntigravityModelNotFound(providerType, sourceModel);
+        const attempts = jest.spyOn(manager, '_tryAntigravityElasticModel');
+
+        const result = await manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: 'key-a'
+        });
+
+        expect(result.actualModel).toBe(firstFallback);
+        expect(attempts.mock.calls.map(([, model]) => model)).not.toContain(sourceModel);
+    });
+
+    test('records elastic queue wait on the request instead of treating it as compute', async () => {
+        const manager = createManager([
+            provider('gemini-a', { [sourceModel]: coolingUntil(60) })
+        ], { maxQueueWaitMs: 150, preferOriginalWaitMs: 100 });
+
+        await requestContext.run({ requestId: 'elastic-wait-split' }, async () => {
+            await manager.acquireSlotWithFallback(providerType, sourceModel, {
+                queueKey: 'key-a',
+                queueRequestBytes: 128
+            });
+            expect(readRoutingWaits().elasticQueueWaitMs).toBeGreaterThanOrEqual(25);
+            expect(readRoutingWaits().elasticAttemptCount).toBeGreaterThanOrEqual(1);
+        });
+    });
+
+    test('does not bump global availability revision when invalidating one model', () => {
+        const manager = createManager([provider('gemini-a')]);
+        const providers = manager.providerStatus[providerType];
+        const otherModel = firstFallback;
+        const beforeOther = manager._getAntigravityAvailabilityScope(providerType, otherModel, providers);
+        const beforeSource = manager._getAntigravityAvailabilityScope(providerType, sourceModel, providers);
+        const globalBefore = manager._antigravityAvailabilityRevision;
+
+        manager.invalidateAntigravityAvailability(sourceModel);
+
+        expect(manager._antigravityAvailabilityRevision).toBe(globalBefore);
+        expect(manager._getAntigravityAvailabilityScope(providerType, sourceModel, providers)).not.toBe(beforeSource);
+        expect(manager._getAntigravityAvailabilityScope(providerType, otherModel, providers)).toBe(beforeOther);
+    });
+
+    test('coalesces wait-loop invalidations for the same model', async () => {
+        const manager = createManager([
+            provider('gemini-a', {
+                [sourceModel]: coolingUntil(1500),
+                [firstFallback]: coolingUntil(1500),
+                [secondFallback]: coolingUntil(1500)
+            })
+        ], { maxQueueWaitMs: 80, preferOriginalWaitMs: 0 });
+        const invalidate = jest.spyOn(manager, 'invalidateAntigravityAvailability');
+
+        await expect(manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: 'key-a'
+        })).rejects.toMatchObject({ code: 'QUEUE_WAIT_TIMEOUT' });
+
+        const waitLoopCalls = invalidate.mock.calls.filter(([, options]) => options?.minIntervalMs > 0);
+        expect(waitLoopCalls.length).toBeGreaterThan(0);
+        expect(waitLoopCalls.length).toBeLessThan(4);
+    });
+
+    test('reuses model-independent candidates across one elastic pass', async () => {
+        const manager = createManager([
+            provider('gemini-a', { [sourceModel]: coolingUntil(500) })
+        ], { preferOriginalWaitMs: 0 });
+        const planFilter = jest.spyOn(manager, '_filterAntigravityProvidersByPlan');
+
+        await manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: 'key-a'
+        });
+
+        expect(planFilter.mock.calls.length).toBe(1);
     });
 
     test('continues to 3.1 Flash Lite when 2.5 Flash is also cooling down', async () => {

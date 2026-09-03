@@ -33,7 +33,7 @@ import { getCodexRoutingConsistencyStatus } from './codex-routing-integrity.js';
 import { resolveCodexEntryModel } from '../providers/openai/codex-model-routing.js';
 import { performance } from 'node:perf_hooks';
 import { runtimeMetrics } from '../runtime/runtime-metrics.js';
-import requestContext, { accumulateRoutingWait, readRoutingWaits } from '../utils/context.js';
+import requestContext, { accumulateRoutingWait, computeSelectionStages } from '../utils/context.js';
 import { PotluckKeyConcurrencyLimiter } from '../plugins/api-potluck/key-concurrency-limiter.js';
 import { buildGeminiSelectionDiagnostic } from '../utils/gemini-diagnostics.js';
 
@@ -832,18 +832,18 @@ async function releasePotluckKeyConcurrencyLease() {
 // "the routing loop is slow"; the credential lease share is already reported as
 // redisLeaseMs, so the remainder is genuine selection computation.
 function recordProviderFilterStages(startedAt) {
-    const totalMs = performance.now() - startedAt;
-    const { keyQueueWaitMs, credentialLeaseWaitMs } = readRoutingWaits();
-    const selectionComputeMs = Math.max(0, totalMs - keyQueueWaitMs - credentialLeaseWaitMs);
-    runtimeMetrics.recordStage('providerFilterMs', totalMs);
+    const stages = computeSelectionStages(performance.now() - startedAt);
+    runtimeMetrics.recordStage('providerFilterMs', stages.providerFilterMs);
     const runtimeRequest = requestContext.get('runtimeRequest');
-    if (runtimeRequest?.recordStage) {
-        runtimeRequest.recordStage('keyQueueWaitMs', keyQueueWaitMs);
-        runtimeRequest.recordStage('selectionComputeMs', selectionComputeMs);
-    } else {
-        runtimeMetrics.recordStage('keyQueueWaitMs', keyQueueWaitMs);
-        runtimeMetrics.recordStage('selectionComputeMs', selectionComputeMs);
-    }
+    const record = (name, value) => {
+        if (runtimeRequest?.recordStage) runtimeRequest.recordStage(name, value);
+        else runtimeMetrics.recordStage(name, value);
+    };
+    record('keyQueueWaitMs', stages.keyQueueWaitMs);
+    record('elasticQueueWaitMs', stages.elasticQueueWaitMs);
+    record('availabilityRefreshMs', stages.availabilityRefreshMs);
+    record('elasticAttemptCount', stages.elasticAttemptCount);
+    record('selectionComputeMs', stages.selectionComputeMs);
 }
 
 async function acquirePotluckKeyConcurrencyLeaseIfNeeded(config, providerType, options, selectionDiagnostics) {

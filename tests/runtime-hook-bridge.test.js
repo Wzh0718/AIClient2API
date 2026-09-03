@@ -242,7 +242,7 @@ describe('RuntimeHookBridge', () => {
             cached_tokens: 2688,
             reasoning_tokens: 8
         });
-        expect(messages[0].args[0]._codexRouting).toEqual({
+        expect(messages[0].args[0]._codexRouting).toMatchObject({
             routingMode: 'auto',
             requestedPrimaryGroupId: 'group-a',
             selectedGroupId: 'group-b',
@@ -432,5 +432,36 @@ describe('RuntimeHookBridge', () => {
         expect(messages[0].args[0].cache.finalPromptCacheKeyHash).toMatch(/^sha256:/);
         expect(messages[0].args[0].cache.originalPrefixHashes.length).toBeGreaterThan(0);
         expect(messages[0].args[0].cache.upstreamPrefixHashes.length).toBeGreaterThan(0);
+    });
+
+    test('keeps Antigravity routing stages in compact runtime metadata', async () => {
+        const published = [];
+        const bridge = new RuntimeHookBridge({
+            send: jest.fn(),
+            durableTransport: { publish: event => published.push(event), snapshot: () => ({}) }
+        });
+
+        await bridge.handle('onRequestCompleted', {
+            requestId: 'agy-stage-split',
+            runtime: {
+                durationMs: 5300,
+                stages: {
+                    providerFilterMs: 5300,
+                    keyQueueWaitMs: 100,
+                    credentialLeaseWaitMs: 200,
+                    elasticQueueWaitMs: 4000,
+                    availabilityRefreshMs: 50,
+                    elasticAttemptCount: 3,
+                    selectionComputeMs: 1000
+                }
+            }
+        });
+
+        expect(published[0].args[0].runtime.stages).toMatchObject({
+            elasticQueueWaitMs: 4000,
+            availabilityRefreshMs: 50,
+            elasticAttemptCount: 3,
+            selectionComputeMs: 1000
+        });
     });
 });

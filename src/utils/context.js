@@ -52,18 +52,26 @@ class RequestContext {
 
 const requestContext = new RequestContext();
 
+const EMPTY_ROUTING_WAITS = Object.freeze({
+    keyQueueWaitMs: 0,
+    credentialLeaseWaitMs: 0,
+    elasticQueueWaitMs: 0,
+    availabilityRefreshMs: 0,
+    elasticAttemptCount: 0
+});
+
 /**
  * providerFilterMs mixes queueing with routing computation, which made a
- * seconds-long p50 look like a CPU hotspot. These accumulators keep the two
- * kinds of waiting separable for the request that is currently in flight.
- * @param {'keyQueueWaitMs'|'credentialLeaseWaitMs'} kind
+ * seconds-long p50 look like a CPU hotspot. These accumulators keep waiting
+ * separable for the request that is currently in flight.
+ * @param {'keyQueueWaitMs'|'credentialLeaseWaitMs'|'elasticQueueWaitMs'|'availabilityRefreshMs'|'elasticAttemptCount'} kind
  * @param {number} waitMs
  */
 export function accumulateRoutingWait(kind, waitMs) {
     const value = Math.max(0, Number(waitMs) || 0);
     if (value === 0) return;
     const store = requestContext.getStore();
-    if (!store.routingWaits) store.routingWaits = { keyQueueWaitMs: 0, credentialLeaseWaitMs: 0 };
+    if (!store.routingWaits) store.routingWaits = { ...EMPTY_ROUTING_WAITS };
     store.routingWaits[kind] = (store.routingWaits[kind] || 0) + value;
 }
 
@@ -71,7 +79,28 @@ export function readRoutingWaits() {
     const waits = requestContext.getStore().routingWaits;
     return {
         keyQueueWaitMs: Math.max(0, Number(waits?.keyQueueWaitMs) || 0),
-        credentialLeaseWaitMs: Math.max(0, Number(waits?.credentialLeaseWaitMs) || 0)
+        credentialLeaseWaitMs: Math.max(0, Number(waits?.credentialLeaseWaitMs) || 0),
+        elasticQueueWaitMs: Math.max(0, Number(waits?.elasticQueueWaitMs) || 0),
+        availabilityRefreshMs: Math.max(0, Number(waits?.availabilityRefreshMs) || 0),
+        elasticAttemptCount: Math.max(0, Number(waits?.elasticAttemptCount) || 0)
+    };
+}
+
+export function computeSelectionStages(totalMs, waits = readRoutingWaits()) {
+    const providerFilterMs = Math.max(0, Number(totalMs) || 0);
+    const keyQueueWaitMs = Math.max(0, Number(waits.keyQueueWaitMs) || 0);
+    const credentialLeaseWaitMs = Math.max(0, Number(waits.credentialLeaseWaitMs) || 0);
+    const elasticQueueWaitMs = Math.max(0, Number(waits.elasticQueueWaitMs) || 0);
+    const availabilityRefreshMs = Math.max(0, Number(waits.availabilityRefreshMs) || 0);
+    const elasticAttemptCount = Math.max(0, Number(waits.elasticAttemptCount) || 0);
+    return {
+        providerFilterMs,
+        keyQueueWaitMs,
+        credentialLeaseWaitMs,
+        elasticQueueWaitMs,
+        availabilityRefreshMs,
+        elasticAttemptCount,
+        selectionComputeMs: Math.max(0, providerFilterMs - keyQueueWaitMs - credentialLeaseWaitMs - elasticQueueWaitMs)
     };
 }
 
