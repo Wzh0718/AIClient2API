@@ -54,8 +54,27 @@ describe('upstream model registrations', () => {
     test('registers Gemini 3.7 Flash aliases for Gemini and Antigravity providers', () => {
         expect(getProviderModels('gemini-cli-oauth')).toContain('gemini-3.7-flash');
         expect(getProviderModels('gemini-antigravity')).toEqual(expect.arrayContaining([
+            'gemini-3.7-flash-low',
             'gemini-3.7-flash-medium',
+            'gemini-3.7-flash-high',
             'gemini-3.7-flash-tiered'
+        ]));
+        expect(getProviderModels('gemini-antigravity')).toEqual(expect.not.arrayContaining([
+            'gemini-3.7-flash'
+        ]));
+    });
+
+    test('registers Gemini 3.8 Flash effort tiers for Antigravity', () => {
+        expect(getProviderModels('gemini-cli-oauth')).toContain('gemini-3.8-flash');
+        expect(getProviderModels('gemini-antigravity')).toEqual(expect.arrayContaining([
+            'gemini-3.8-flash-low',
+            'gemini-3.8-flash-medium',
+            'gemini-3.8-flash-high'
+        ]));
+        expect(getProviderModels('gemini-antigravity')).toEqual(expect.not.arrayContaining([
+            'gemini-3.8-flash',
+            'gemini-3.8-flash-tiered',
+            'gemini-3.8-flash-cyber'
         ]));
     });
 
@@ -74,6 +93,7 @@ describe('Antigravity model identity mappings', () => {
         expect(source).not.toMatch(/'gemini-3\.5-flash-lite':\s*'[^']+'/);
         expect(source).not.toMatch(/'gemini-3\.6-flash':\s*'gemini-3\.6-flash-low'/);
         expect(source).not.toMatch(/'gemini-3\.7-flash':\s*'gemini-3\.7-flash-low'/);
+        expect(source).not.toMatch(/'gemini-3\.8-flash':\s*'gemini-3\.8-flash-low'/);
         expect(source).not.toMatch(/'gemini-3\.5-flash-high':\s*'gemini-3\.5-flash-low'/);
         expect(source).not.toMatch(/'gemini-3\.6-flash-high':\s*'gemini-3\.6-flash-low'/);
         expect(source).not.toMatch(/'gemini-3\.7-flash-high':\s*'gemini-3\.7-flash-low'/);

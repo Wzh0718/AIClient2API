@@ -72,16 +72,91 @@ describe('Antigravity elastic queue and model fallback', () => {
     test('uses one total fallback chain instead of same-series chains', () => {
         expect(getAntigravityElasticFallbackModels(
             'gemini-2.5-flash-lite',
-            ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3-flash', 'gemini-3.6-flash-medium', 'gemini-3.7-flash-medium']
+            [
+                'gemini-2.5-flash-lite',
+                'gemini-2.5-flash',
+                'gemini-3.1-flash-lite',
+                'gemini-3-flash',
+                'gemini-3.6-flash-low',
+                'gemini-3.6-flash-medium',
+                'gemini-3.6-flash-high',
+                'gemini-3.7-flash-low',
+                'gemini-3.7-flash-medium',
+                'gemini-3.7-flash-high',
+                'gemini-3.8-flash-low',
+                'gemini-3.8-flash-medium',
+                'gemini-3.8-flash-high'
+            ]
         )).toEqual([
-            'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3-flash', 'gemini-3.6-flash-medium', 'gemini-3.7-flash-medium'
+            'gemini-2.5-flash',
+            'gemini-3.1-flash-lite',
+            'gemini-3-flash',
+            'gemini-3.6-flash-low',
+            'gemini-3.6-flash-medium',
+            'gemini-3.6-flash-high',
+            'gemini-3.7-flash-low',
+            'gemini-3.7-flash-medium',
+            'gemini-3.7-flash-high',
+            'gemini-3.8-flash-low',
+            'gemini-3.8-flash-medium',
+            'gemini-3.8-flash-high'
         ]);
+    });
+
+    test('gemini-3-flash falls forward through 3.6/3.7/3.8 effort tiers', () => {
+        const configured = [
+            'gemini-2.5-flash-lite',
+            'gemini-2.5-flash',
+            'gemini-3.1-flash-lite',
+            'gemini-3-flash',
+            'gemini-3.6-flash-low',
+            'gemini-3.6-flash-medium',
+            'gemini-3.6-flash-high',
+            'gemini-3.7-flash-low',
+            'gemini-3.7-flash-medium',
+            'gemini-3.7-flash-high',
+            'gemini-3.8-flash-low',
+            'gemini-3.8-flash-medium',
+            'gemini-3.8-flash-high'
+        ];
+        expect(getAntigravityElasticFallbackModels('gemini-3-flash', configured)).toEqual([
+            'gemini-3.6-flash-low',
+            'gemini-3.6-flash-medium',
+            'gemini-3.6-flash-high',
+            'gemini-3.7-flash-low',
+            'gemini-3.7-flash-medium',
+            'gemini-3.7-flash-high',
+            'gemini-3.8-flash-low',
+            'gemini-3.8-flash-medium',
+            'gemini-3.8-flash-high'
+        ]);
+        expect(getAntigravityElasticFallbackModels('gemini-3.7-flash-medium', configured)).toEqual([
+            'gemini-3.7-flash-high',
+            'gemini-3.8-flash-low',
+            'gemini-3.8-flash-medium',
+            'gemini-3.8-flash-high'
+        ]);
+        expect(getAntigravityElasticFallbackModels('gemini-3.8-flash-high', configured)).toEqual([]);
     });
 
     test('does not generate a series-specific fallback chain', () => {
         expect(getAntigravityElasticFallbackModels(
             'gemini-3.7-flash',
-            ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3-flash', 'gemini-3.6-flash-medium', 'gemini-3.7-flash-medium']
+            [
+                'gemini-2.5-flash-lite',
+                'gemini-2.5-flash',
+                'gemini-3.1-flash-lite',
+                'gemini-3-flash',
+                'gemini-3.6-flash-low',
+                'gemini-3.6-flash-medium',
+                'gemini-3.6-flash-high',
+                'gemini-3.7-flash-low',
+                'gemini-3.7-flash-medium',
+                'gemini-3.7-flash-high',
+                'gemini-3.8-flash-low',
+                'gemini-3.8-flash-medium',
+                'gemini-3.8-flash-high'
+            ]
         )).toEqual([]);
     });
 

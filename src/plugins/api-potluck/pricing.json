@@ -23,7 +23,8 @@
         "gemini-3.1-flash-image": { "input": 0.25, "cachedInput": 0.25, "output": 30.00, "provider": "gemini", "source": "official:gemini-3.1-flash-lite-image" },
         "gemini-3.5-flash": { "input": 1.50, "cachedInput": 0.15, "output": 9.00, "provider": "gemini", "source": "official" },
         "gemini-3.6-flash": { "input": 1.50, "cachedInput": 0.15, "output": 7.50, "provider": "gemini", "source": "official" },
-        "gemini-3.7-flash": { "input": 1.50, "cachedInput": 0.15, "output": 7.50, "provider": "gemini", "source": "temporary:gemini-3.6-flash-assumed" }
+        "gemini-3.7-flash": { "input": 1.50, "cachedInput": 0.15, "output": 7.50, "provider": "gemini", "source": "temporary:gemini-3.6-flash-assumed" },
+        "gemini-3.8-flash": { "input": 0.75, "cachedInput": 0.075, "output": 3.75, "provider": "gemini", "source": "official:2026-09-02-intro" }
     },
     "modelPriceAliases": {
         "gpt5.6sol": "gpt-5.6-sol",
@@ -51,7 +52,11 @@
         "gemini-3.7-flash-low": "gemini-3.7-flash",
         "gemini-3.7-flash-high": "gemini-3.7-flash",
         "gemini-3.7-flash-medium": "gemini-3.7-flash",
-        "gemini-3.7-flash-tiered": "gemini-3.7-flash"
+        "gemini-3.7-flash-tiered": "gemini-3.7-flash",
+        "gemini-3.8-flash-low": "gemini-3.8-flash",
+        "gemini-3.8-flash-high": "gemini-3.8-flash",
+        "gemini-3.8-flash-medium": "gemini-3.8-flash",
+        "gemini-3.8-flash-tiered": "gemini-3.8-flash"
     },
     "modelPriceMultipliers": {
         "gpt-5.6-sol-fast": { "baseModel": "gpt-5.6-sol", "multiplier": 2.5, "source": "temporary:codex-fast-assumed" },

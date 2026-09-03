@@ -11,6 +11,8 @@ describe('Antigravity quota UI source', () => {
         expect(source).toContain('gemini-2.5-flash-lite');
         expect(source).toContain('gemini-3.6-flash-medium');
         expect(source).toContain('gemini-3.7-flash-medium');
+        expect(source).toContain('gemini-3.7-flash-low');
+        expect(source).toContain('gemini-3.8-flash-high');
         expect(source).toContain('models.routingOrder');
     });
 
@@ -29,8 +31,13 @@ describe('Antigravity quota UI source', () => {
             'gemini-3.6-flash-medium',
             'gemini-3.6-flash-low',
             'gemini-3.6-flash-tiered',
+            'gemini-3.7-flash-low',
             'gemini-3.7-flash-medium',
+            'gemini-3.7-flash-high',
             'gemini-3.7-flash-tiered',
+            'gemini-3.8-flash-low',
+            'gemini-3.8-flash-medium',
+            'gemini-3.8-flash-high',
             'gemini-claude-opus-4-6-thinking',
             'gemini-claude-sonnet-4-6',
             'claude-opus-4-6-thinking',

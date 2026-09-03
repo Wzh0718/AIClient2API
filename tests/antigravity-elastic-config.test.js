@@ -22,8 +22,15 @@ describe('Antigravity elastic routing config', () => {
                 'gemini-2.5-flash',
                 'gemini-3.1-flash-lite',
                 'gemini-3-flash',
+                'gemini-3.6-flash-low',
                 'gemini-3.6-flash-medium',
-                'gemini-3.7-flash-medium'
+                'gemini-3.6-flash-high',
+                'gemini-3.7-flash-low',
+                'gemini-3.7-flash-medium',
+                'gemini-3.7-flash-high',
+                'gemini-3.8-flash-low',
+                'gemini-3.8-flash-medium',
+                'gemini-3.8-flash-high'
             ],
             globalQueueLimit: 512,
             perKeyModelQueueLimit: 256,
