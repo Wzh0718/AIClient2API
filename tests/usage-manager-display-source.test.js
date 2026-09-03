@@ -230,6 +230,18 @@ describe('usage manager display source regressions', () => {
         expect(source).not.toContain("${instance.success ? '<i class=\"fas fa-check-circle status-success\"></i>' : '<i class=\"fas fa-times-circle status-error\"></i>'}");
     });
 
+    test('Codex quota badges distinguish not-applicable and unknown states', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+        const i18n = fs.readFileSync(path.join(process.cwd(), 'static/app/i18n.js'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain("state?.applicability === 'not_applicable'");
+        expect(source).toContain("state?.applicability === 'unknown'");
+        expect(i18n).toContain("'usage.card.status.notApplicable'");
+        expect(i18n).toContain("'usage.card.status.unknown'");
+        const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
+        expect(css).toContain('.badge-neutral');
+    });
+
     test('base status follows scheduler health instead of usage refresh outcome', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
         const functionSource = source.match(/function getBaseStatusState\(instance\) \{[\s\S]*?\n\}/)?.[0];

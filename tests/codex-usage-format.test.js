@@ -113,6 +113,23 @@ describe('Codex usage formatting', () => {
         expect(formatted.summary.resetAt).toBe(new Date(1780500000 * 1000).toISOString());
     });
 
+    test('exposes quota applicability alongside formatted usage', () => {
+        const formatted = formatCodexUsage({
+            account: 'codex@example.com',
+            plan_type: 'PRO',
+            rate_limit: {
+                primary_window: { used_percent: 92, limit_window_seconds: 604800 }
+            }
+        });
+
+        expect(formatted.summary.quotaApplicability).toMatchObject({
+            general: {
+                short: { status: 'not_applicable' },
+                weekly: { status: 'healthy' }
+            }
+        });
+    });
+
     test('extracts account token usage from Codex CLI profile payload', () => {
         const formatted = formatCodexUsage({
             account: 'codex@example.com',

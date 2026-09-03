@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
 import fs from 'fs';
 import path from 'path';
-import { getCodexModelFallbackTarget, ProviderPoolManager } from '../src/providers/provider-pool-manager.js';
+import { getCodexModelFallbackTarget, getCodexTokenQuotaStatus, ProviderPoolManager } from '../src/providers/provider-pool-manager.js';
 
 jest.mock('../src/providers/adapter.js', () => ({
     getServiceAdapter: jest.fn(),
@@ -566,6 +566,80 @@ describe('provider pool Codex token quota', () => {
         expect(provider.scheduledRecoveryTime).toBeUndefined();
         expect(provider.codexQuotaHealth.general.isHealthy).toBe(false);
         expect(provider.codexQuotaHealth.codex53?.isHealthy).not.toBe(false);
+    });
+
+    test('does not treat a Pro weekly-only general quota as unavailable 5h usage', async () => {
+        writeCodexUsageCache([
+            {
+                uuid: 'aaa-codex-over',
+                success: true,
+                usage: {
+                    summary: {
+                        plan: 'Pro',
+                        quotaApplicability: {
+                            general: {
+                                short: { status: 'not_applicable' },
+                                weekly: { status: 'healthy' }
+                            }
+                        }
+                    },
+                    items: [
+                        { id: 'primary_window', scope: 'general', windowKind: 'weekly', percent: 40, unit: 'percent' }
+                    ]
+                }
+            },
+            {
+                uuid: 'zzz-codex-ok',
+                success: true,
+                usage: {
+                    summary: { plan: 'Pro', quotaApplicability: { general: { short: { status: 'not_applicable' } } } },
+                    items: [
+                        { id: 'primary_window', scope: 'general', windowKind: 'weekly', percent: 20, unit: 'percent' }
+                    ]
+                }
+            }
+        ]);
+
+        const manager = createQuotaPoolManager();
+        const providers = manager.providerStatus['openai-codex-oauth'];
+        const allowed = manager._filterCodexProvidersByTokenQuota('openai-codex-oauth', providers, 'gpt-5.5');
+
+        expect(allowed.map(provider => provider.uuid)).toEqual(['aaa-codex-over', 'zzz-codex-ok']);
+        const snapshot = [...manager._codexQuotaFilterSnapshots.values()][0];
+        expect(snapshot.filterReasons).not.toHaveProperty('general_quota_unavailable');
+    });
+
+    test('does not warn for a Pro general 5h window that is explicitly not applicable', () => {
+        const status = getCodexTokenQuotaStatus('openai-codex-oauth', {
+            config: {
+                uuid: 'pro-weekly-only',
+                codexGeneralMax5hPercent: 80,
+                codexGeneralMaxWeeklyPercent: 90
+            }
+        }, {
+            providers: {
+                'openai-codex-oauth': {
+                    instances: [{
+                        uuid: 'pro-weekly-only',
+                        success: true,
+                        usage: {
+                            summary: {
+                                plan: 'Pro',
+                                quotaApplicability: {
+                                    general: {
+                                        short: { status: 'not_applicable' },
+                                        weekly: { status: 'healthy' }
+                                    }
+                                }
+                            },
+                            items: [{ id: 'primary_window', scope: 'general', windowKind: 'weekly', percent: 40 }]
+                        }
+                    }]
+                }
+            }
+        }, 'general');
+
+        expect(status).toMatchObject({ limited: true, exceeded: false, reason: null });
     });
 
     test('keeps a general-limited Codex account eligible for Codex 5.3 requests when its 5.3 quota is healthy', async () => {

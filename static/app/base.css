@@ -706,6 +706,8 @@ body {
 
 .status-success { color: var(--success-color); }
 .status-error { color: var(--danger-color); }
+.status-warning { color: var(--warning-color); }
+.status-neutral { color: var(--text-secondary); }
 
 /* Provider Cards Grid - Compact Version */
 .provider-cards-grid {

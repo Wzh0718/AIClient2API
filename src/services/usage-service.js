@@ -8,6 +8,7 @@ import { serviceInstances } from '../providers/adapter.js';
 import { MODEL_PROVIDER } from '../utils/common.js';
 import { getProviderModels } from '../providers/provider-models.js';
 import {
+    getCodexQuotaApplicability,
     normalizeCodexRateLimitWindows,
     selectCodexSummaryWindow
 } from '../utils/codex-rate-limit.js';
@@ -1155,7 +1156,8 @@ export function formatCodexUsage(usageData) {
             tokenUsageAvailable: Boolean(tokenUsage),
             tokenUsageUnavailableReason: tokenUsage ? null : 'official_usage_token_fields_missing',
             rateLimitResetCredits,
-            resetAvailableCount
+            resetAvailableCount,
+            quotaApplicability: getCodexQuotaApplicability(usageData)
         },
         user: { 
             email: usageData.account || null

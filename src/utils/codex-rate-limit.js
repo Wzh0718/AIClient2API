@@ -128,6 +128,47 @@ export function normalizeCodexRateLimitWindows(usageData = {}) {
     return windows;
 }
 
+function buildWindowApplicability(windows, scope, windowKind) {
+    const matching = windows.filter(window => window.scope === scope && window.windowKind === windowKind);
+    if (matching.length > 0) {
+        return { status: 'healthy', windowCount: matching.length };
+    }
+    return {
+        status: 'unknown',
+        windowCount: 0
+    };
+}
+
+function isProPlanWithoutPlus(plan) {
+    const normalized = String(plan || '').trim().toLowerCase();
+    return normalized.includes('pro') && !normalized.includes('plus') && !normalized.includes('+');
+}
+
+export function getCodexQuotaApplicability(usageData = {}) {
+    const rawUsage = usageData?.raw && typeof usageData.raw === 'object' ? usageData.raw : usageData;
+    const plan = usageData.summary?.plan || rawUsage.plan_type || rawUsage.planType || '';
+    const windows = Array.isArray(usageData)
+        ? usageData
+        : normalizeCodexRateLimitWindows(rawUsage);
+    const general = {
+        short: buildWindowApplicability(windows, 'general', 'short'),
+        weekly: buildWindowApplicability(windows, 'general', 'weekly')
+    };
+    if (general.short.status === 'unknown' && general.weekly.status === 'healthy' && isProPlanWithoutPlus(plan)) {
+        general.short = {
+            status: 'not_applicable',
+            reason: 'plan_weekly_only'
+        };
+    }
+    return {
+        general,
+        codex53: {
+            short: buildWindowApplicability(windows, 'model', 'short'),
+            weekly: buildWindowApplicability(windows, 'model', 'weekly')
+        }
+    };
+}
+
 export function selectCodexSummaryWindow(windows = []) {
     const general = windows.filter(window => window.scope === 'general');
     return general.find(window => window.windowKind === 'weekly')

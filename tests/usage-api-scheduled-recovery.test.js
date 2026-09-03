@@ -20,6 +20,55 @@ beforeEach(() => {
 });
 
 describe('usage api scheduled recovery handling', () => {
+    test('excludes skipped providers from refresh error counts', async () => {
+        getServiceAdapter.mockReturnValue({});
+        usageService.getFormattedUsage.mockResolvedValue({ summary: { plan: 'Pro' }, items: [] });
+        const usage = await getAllProvidersUsage({}, {
+            providerPools: {
+                'openai-codex-oauth': [
+                    { uuid: 'active-codex', isHealthy: true },
+                    { uuid: 'disabled-codex', isDisabled: true, isHealthy: false }
+                ]
+            }
+        });
+
+        expect(usage.providers['openai-codex-oauth']).toMatchObject({
+            totalCount: 2,
+            refreshableCount: 1,
+            successCount: 1,
+            errorCount: 0
+        });
+    });
+
+    test('returns refresh diagnostics split by plan, applicability, and error class', async () => {
+        getServiceAdapter
+            .mockReturnValueOnce({})
+            .mockReturnValueOnce({});
+        usageService.getFormattedUsage
+            .mockResolvedValueOnce({
+                summary: {
+                    plan: 'Pro',
+                    quotaApplicability: { general: { short: { status: 'not_applicable' } } }
+                },
+                items: []
+            })
+            .mockRejectedValueOnce(new Error('Request failed with status code 401'));
+
+        const usage = await getAllProvidersUsage({}, {
+            providerPools: {
+                'openai-codex-oauth': [
+                    { uuid: 'pro-codex', isHealthy: true },
+                    { uuid: 'plus-codex', isHealthy: true }
+                ]
+            }
+        });
+
+        expect(usage.diagnostics).toMatchObject({
+            plans: { Pro: 1 },
+            windows: { not_applicable: 1 },
+            errors: { auth_401: 1 }
+        });
+    });
     test('syncs the detected Antigravity plan back to the provider pool', async () => {
         const provider = {
             uuid: 'ultra-antigravity',

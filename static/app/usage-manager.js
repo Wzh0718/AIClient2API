@@ -519,6 +519,22 @@ function getBaseStatusState(instance) {
 }
 
 function getQuotaStatusState(state = {}) {
+    if (state?.applicability === 'not_applicable') {
+        return {
+            status: 'not_applicable',
+            isHealthy: true,
+            label: t('usage.card.status.notApplicable'),
+            title: state.reason || t('usage.card.status.notApplicable')
+        };
+    }
+    if (state?.applicability === 'unknown') {
+        return {
+            status: 'unknown',
+            isHealthy: true,
+            label: t('usage.card.status.unknown'),
+            title: state.lastErrorMessage || t('usage.card.status.unknown')
+        };
+    }
     const isHealthy = state?.isHealthy !== false;
     const titleParts = [];
     if (state?.lastErrorMessage) titleParts.push(state.lastErrorMessage);
@@ -531,7 +547,13 @@ function getQuotaStatusState(state = {}) {
 }
 
 function renderStatusIcon(label, state) {
-    const iconClass = state.isHealthy ? 'fa-check-circle status-success' : 'fa-times-circle status-error';
+    const iconClass = state.status === 'not_applicable'
+        ? 'fa-minus-circle status-neutral'
+        : state.status === 'unknown'
+        ? 'fa-question-circle status-warning'
+        : state.isHealthy
+        ? 'fa-check-circle status-success'
+        : 'fa-times-circle status-error';
     const title = `${label}：${state.label}${state.title && state.title !== state.label ? `；${state.title}` : ''}`;
     return `<i class="fas ${iconClass}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"></i>`;
 }
@@ -564,6 +586,12 @@ function renderCodexQuotaHealthBadges(instance, providerType) {
 
     const quotaHealth = instance.codexQuotaHealth || {};
     const renderBadge = (label, state = {}) => {
+        if (state.applicability === 'not_applicable') {
+            return `<span class="badge badge-neutral" title="${escapeHtml(state.reason || '不适用')}">${label}：不适用</span>`;
+        }
+        if (state.applicability === 'unknown') {
+            return `<span class="badge badge-warning" title="${escapeHtml(state.lastErrorMessage || '上游未提供')}">${label}：未知</span>`;
+        }
         const isHealthy = state.isHealthy !== false;
         const titleParts = [];
         if (state.lastErrorMessage) titleParts.push(state.lastErrorMessage);
@@ -1033,7 +1061,9 @@ function createProviderGroup(providerType, providerData) {
     group.setAttribute('data-provider', providerType);
 
     const instances = providerData.instances || [];
-    const successCount = instances.filter(i => i.success).length;
+    const refreshableInstances = instances.filter(i => !i?.skipped && !i?.isDisabled);
+    const successCount = refreshableInstances.filter(i => i.success).length;
+    const successTotal = refreshableInstances.length;
     const refreshedAt = providerData.lastSuccessfulRefreshAt;
     const refreshedDate = refreshedAt ? new Date(refreshedAt) : null;
     const hasValidRefreshTime = refreshedDate && Number.isFinite(refreshedDate.getTime());
@@ -1049,7 +1079,7 @@ function createProviderGroup(providerType, providerData) {
                 <span class="provider-name">${getProviderDisplayName(providerType)}</span>
                 <span class="instance-count">${t('usage.group.instances', { count: instances.length })}</span>
                 ${providerQuotaStack}
-                <span class="success-count ${successCount === instances.length ? 'all-success' : ''}">${t('usage.group.success', { count: successCount, total: instances.length })}</span>
+                <span class="success-count ${successCount === successTotal ? 'all-success' : ''}">${t('usage.group.success', { count: successCount, total: successTotal })}</span>
             </div>
             <div class="usage-group-actions">
                 <span class="provider-last-update" title="${escapeHtml(refreshTimeText)}">${escapeHtml(refreshTimeText)}</span>

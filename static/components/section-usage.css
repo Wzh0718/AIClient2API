@@ -478,6 +478,7 @@
 
 .badge-healthy { background: var(--success-bg); color: var(--success-text); }
 .badge-unhealthy { background: var(--danger-bg); color: var(--danger-text); }
+.badge-neutral { background: var(--surface-muted, #f3f4f6); color: var(--text-secondary, #6b7280); }
 .badge-disabled { background: var(--bg-tertiary); color: var(--text-secondary); }
 
 .usage-instance-content {

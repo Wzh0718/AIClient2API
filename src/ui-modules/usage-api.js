@@ -241,6 +241,7 @@ export async function getAllProvidersUsage(currentConfig, providerPoolManager) {
 
     // timestamp 表示完整快照生成完成时间，而不是开始采集时间。
     results.timestamp = new Date().toISOString();
+    results.diagnostics = buildUsageDiagnostics(results.providers);
 
     return results;
 }
@@ -361,6 +362,7 @@ function deriveCodexQuotaHealthFromUsage(currentHealth, usage, now = Date.now())
     const quotaHealth = currentHealth && typeof currentHealth === 'object'
         ? { ...currentHealth }
         : {};
+    const applicability = usage.summary?.quotaApplicability || null;
     const generalUsedPercent = getUsageItemMaxPercent(usage, item =>
         item.id === 'primary_window' || item.id === 'secondary_window'
     );
@@ -376,12 +378,41 @@ function deriveCodexQuotaHealthFromUsage(currentHealth, usage, now = Date.now())
         now
     );
 
-    quotaHealth.general = mergeQuotaHealthState(quotaHealth.general, generalUsedPercent, '通用额度', {
-        allowRecovery: true,
-        scheduledRecoveryTime: generalRecoveryTime,
-        now
-    });
+    const generalApplicability = applicability?.general?.short?.status;
+    if (generalApplicability === 'not_applicable') {
+        quotaHealth.general = {
+            ...(quotaHealth.general || {}),
+            isHealthy: true,
+            applicability: 'not_applicable',
+            lastErrorTime: null,
+            lastErrorMessage: null,
+            scheduledRecoveryTime: null
+        };
+    } else if (Number.isFinite(generalUsedPercent)) {
+        quotaHealth.general = mergeQuotaHealthState(quotaHealth.general, generalUsedPercent, '通用额度', {
+            allowRecovery: true,
+            scheduledRecoveryTime: generalRecoveryTime,
+            now
+        });
+        if (generalApplicability === 'unknown') {
+            quotaHealth.general.applicability = 'unknown';
+        }
+    } else if (generalApplicability === 'unknown') {
+        quotaHealth.general = {
+            ...(quotaHealth.general || {}),
+            isHealthy: quotaHealth.general?.isHealthy === false ? false : true,
+            applicability: 'unknown'
+        };
+    }
     quotaHealth.codex53 = mergeQuotaHealthState(quotaHealth.codex53, codex53UsedPercent, '5.3 额度');
+    if (applicability?.codex53) {
+        quotaHealth.codex53 = {
+            ...(quotaHealth.codex53 || {}),
+            applicability: applicability.codex53.short.status === 'healthy' || applicability.codex53.weekly.status === 'healthy'
+                ? 'healthy'
+                : 'unknown'
+        };
+    }
 
     return quotaHealth;
 }
@@ -415,15 +446,58 @@ function collectRefreshError(providerType, instance) {
         providerType,
         uuid: instance.uuid || null,
         name: instance.name || instance.uuid || providerType,
-        error: instance.error
+        error: instance.error,
+        errorClass: classifyUsageRefreshError(instance.error)
     };
+}
+
+function classifyUsageRefreshError(error) {
+    const message = String(error || '').toLowerCase();
+    if (/401|unauthorized|reauthori[sz]e|refresh token/.test(message)) return 'auth_401';
+    if (/timeout|timed out|etimedout/.test(message)) return 'timeout';
+    if (/econnreset|socket hang up|econnrefused|network/.test(message)) return 'network_reset';
+    if (/429|rate.?limit|too many/.test(message)) return 'upstream_429';
+    return 'refresh_error';
+}
+
+function incrementDiagnosticCounter(target, key) {
+    if (!key) return;
+    target[key] = (target[key] || 0) + 1;
+}
+
+function buildUsageDiagnostics(providers = {}) {
+    const diagnostics = {
+        plans: {},
+        windows: {},
+        errors: {}
+    };
+    for (const providerData of Object.values(providers)) {
+        for (const instance of providerData?.instances || []) {
+            if (instance?.skipped) continue;
+            const plan = instance?.usage?.summary?.plan;
+            incrementDiagnosticCounter(diagnostics.plans, plan || 'UNKNOWN');
+            const applicability = instance?.usage?.summary?.quotaApplicability;
+            for (const bucket of ['general', 'codex53']) {
+                for (const windowKind of ['short', 'weekly']) {
+                    const status = applicability?.[bucket]?.[windowKind]?.status;
+                    if (status) incrementDiagnosticCounter(diagnostics.windows, `${bucket}:${windowKind}:${status}`);
+                    if (status) incrementDiagnosticCounter(diagnostics.windows, status);
+                }
+            }
+            if (instance?.error) incrementDiagnosticCounter(diagnostics.errors, classifyUsageRefreshError(instance.error));
+        }
+    }
+    return diagnostics;
 }
 
 function recalculateProviderUsageCounts(providerData) {
     const instances = Array.isArray(providerData.instances) ? providerData.instances : [];
+    const activeInstances = instances.filter(inst => !inst.skipped && !inst.isDisabled);
     providerData.totalCount = instances.length;
-    providerData.successCount = instances.filter(inst => inst.success).length;
-    providerData.errorCount = instances.filter(inst => !inst.success).length;
+    providerData.refreshableCount = activeInstances.length;
+    providerData.successCount = activeInstances.filter(inst => inst.success).length;
+    providerData.errorCount = activeInstances.filter(inst => !inst.success).length;
+    providerData.skippedCount = instances.length - activeInstances.length;
     return providerData;
 }
 
@@ -435,7 +509,8 @@ function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderDa
             providerType,
             uuid: null,
             name: providerType,
-            error: freshProviderData.error
+            error: freshProviderData.error,
+            errorClass: classifyUsageRefreshError(freshProviderData.error)
         });
         return {
             providerData: {
@@ -581,6 +656,7 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
     const providers = loadProviderList(providerType, currentConfig, providerPoolManager);
 
     result.totalCount = providers.length;
+    result.refreshableCount = providers.filter(provider => !provider?.isDisabled).length;
 
     const accountTimeoutMs = normalizePositiveInteger(
         currentConfig.USAGE_REFRESH_ACCOUNT_TIMEOUT_MS,

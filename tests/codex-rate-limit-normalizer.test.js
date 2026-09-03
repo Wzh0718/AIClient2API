@@ -1,5 +1,9 @@
 import { describe, expect, test } from '@jest/globals';
-import { classifyCodexWindow, normalizeCodexRateLimitWindows } from '../src/utils/codex-rate-limit.js';
+import {
+    classifyCodexWindow,
+    getCodexQuotaApplicability,
+    normalizeCodexRateLimitWindows
+} from '../src/utils/codex-rate-limit.js';
 
 describe('Codex rate-limit window normalization', () => {
     test('classifies windows from their duration instead of source slot', () => {
@@ -34,5 +38,71 @@ describe('Codex rate-limit window normalization', () => {
                 scope: 'general'
             })
         ]);
+    });
+
+    test('marks a Pro weekly-only general quota as not applicable for 5h', () => {
+        expect(getCodexQuotaApplicability({
+            plan_type: 'PRO',
+            rate_limit: {
+                primary_window: { used_percent: 92, limit_window_seconds: 604800 }
+            }
+        })).toMatchObject({
+            general: {
+                short: { status: 'not_applicable' },
+                weekly: { status: 'healthy' }
+            }
+        });
+    });
+
+    test('marks a Plus weekly-only general quota as unknown for 5h', () => {
+        expect(getCodexQuotaApplicability({
+            plan_type: 'PLUS',
+            rate_limit: {
+                primary_window: { used_percent: 92, limit_window_seconds: 604800 }
+            }
+        })).toMatchObject({
+            general: {
+                short: { status: 'unknown' },
+                weekly: { status: 'healthy' }
+            }
+        });
+    });
+
+    test('keeps Spark model windows separate from general windows', () => {
+        const result = getCodexQuotaApplicability({
+            plan_type: 'PRO',
+            rate_limit: {
+                primary_window: { used_percent: 92, limit_window_seconds: 604800 }
+            },
+            additional_rate_limits: [{
+                limit_name: 'GPT-5.3-Codex-Spark',
+                rate_limit: {
+                    primary_window: { used_percent: 100, limit_window_seconds: 18000 },
+                    secondary_window: { used_percent: 80, limit_window_seconds: 604800 }
+                }
+            }]
+        });
+
+        expect(result).toMatchObject({
+            general: { short: { status: 'not_applicable' } },
+            codex53: {
+                short: { status: 'healthy' },
+                weekly: { status: 'healthy' }
+            }
+        });
+    });
+
+    test('does not infer a 5h window when duration is missing', () => {
+        expect(getCodexQuotaApplicability({
+            plan_type: 'PRO',
+            rate_limit: {
+                primary_window: { used_percent: 92 }
+            }
+        })).toMatchObject({
+            general: {
+                short: { status: 'unknown' },
+                weekly: { status: 'unknown' }
+            }
+        });
     });
 });

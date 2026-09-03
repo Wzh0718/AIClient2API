@@ -21,7 +21,7 @@ import {
     getCodexPlanStatusForProvider,
     readFreshUsageCacheSync
 } from '../utils/codex-plan.js';
-import { normalizeCodexRateLimitWindows } from '../utils/codex-rate-limit.js';
+import { getCodexQuotaApplicability, normalizeCodexRateLimitWindows } from '../utils/codex-rate-limit.js';
 import requestContext, { accumulateRoutingWait } from '../utils/context.js';
 import { SmoothWeightedRoundRobin } from './smooth-weighted-round-robin.js';
 import { performance } from 'node:perf_hooks';
@@ -480,7 +480,7 @@ function getCodexAutomaticHealthCheckCooldown(providerType, config = {}) {
     };
 }
 
-function getCodexTokenQuotaStatus(providerType, providerStatus, usageCache = null, bucket = CODEX_QUOTA_BUCKET.GENERAL) {
+export function getCodexTokenQuotaStatus(providerType, providerStatus, usageCache = null, bucket = CODEX_QUOTA_BUCKET.GENERAL) {
     const config = providerStatus?.config || {};
     const { max5hPercent, maxWeeklyPercent } = getCodexQuotaLimits(config, bucket);
     if (!max5hPercent && !maxWeeklyPercent) {
@@ -493,11 +493,19 @@ function getCodexTokenQuotaStatus(providerType, providerStatus, usageCache = nul
     }
 
     const warnings = [];
+    const cachedUsage = getCachedCodexUsageForProvider(providerType, uuid, usageCache);
+    const applicability = cachedUsage?.summary?.quotaApplicability
+        || getCodexQuotaApplicability(cachedUsage || {});
 
     if (max5hPercent) {
         const usagePercent = getCodexCachedUsagePercent(providerType, uuid, usageCache, 'primary_window', bucket);
         if (usagePercent === null) {
-            warnings.push(`official ${bucket} 5h usage percent unavailable`);
+            const status = bucket === CODEX_QUOTA_BUCKET.GENERAL
+                ? applicability?.general?.short?.status
+                : applicability?.codex53?.short?.status;
+            if (status !== 'not_applicable') {
+                warnings.push(`official ${bucket} 5h usage percent unavailable`);
+            }
         } else if (usagePercent >= max5hPercent) {
             return {
                 limited: true,
