@@ -1149,9 +1149,20 @@ export class AntigravityApiService {
         await this.loadCredentials();
 
         this.projectId = await this.discoverProjectAndModels(false);
+        this._scheduleAvailableModelsProbe();
 
         this.isInitialized = true;
         logger.info(`[Antigravity] Initialization complete. Project ID: ${this.projectId}`);
+    }
+
+    // Init stays on discoverProjectAndModels(false) so cold start does not block on
+    // upstream model probes, but elastic routing needs the probed list in the pool.
+    _scheduleAvailableModelsProbe() {
+        setImmediate(() => {
+            void this.fetchAvailableModels().catch(error => {
+                logger.warn(`[Antigravity] Background model probe failed: ${error.message}`);
+            });
+        });
     }
 
     initialize() {

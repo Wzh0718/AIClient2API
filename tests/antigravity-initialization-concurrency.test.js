@@ -66,7 +66,7 @@ describe('Antigravity initialization lifecycle', () => {
         await Promise.all([first, second]);
     });
 
-    test('does not probe models during provider initialization', async () => {
+    test('schedules a background model probe without blocking initialization', async () => {
         const service = createService();
         service.loadCredentials = jest.fn(async () => {});
         service.discoverProjectAndModels = jest.fn(async fetchModels => {
@@ -78,6 +78,9 @@ describe('Antigravity initialization lifecycle', () => {
         await service._initializeOnce();
         expect(service.fetchAvailableModels).not.toHaveBeenCalled();
         expect(service.isInitialized).toBe(true);
+
+        await new Promise(resolve => setImmediate(resolve));
+        expect(service.fetchAvailableModels).toHaveBeenCalledTimes(1);
     });
 
     test('shares one initialization promise across concurrent callers', async () => {

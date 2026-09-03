@@ -1104,11 +1104,24 @@ export class ProviderPoolManager {
         }
     }
 
+    _scheduleAntigravityModelProbes() {
+        for (const type in this.providerStatus) {
+            if (!isAntigravityProviderType(type)) continue;
+            const candidate = (this.providerStatus[type] || []).find(
+                provider => provider.config.isHealthy && !provider.config.isDisabled
+            );
+            if (candidate) {
+                void this._probeAntigravityAvailableModels(type, candidate);
+            }
+        }
+    }
+
     /**
      * 系统预热逻辑：按提供商分组，每组预热 warmupTarget 个节点
      * @returns {Promise<void>}
      */
     async warmupNodes() {
+        this._scheduleAntigravityModelProbes();
         if (this.warmupTarget <= 0) return;
         this._log('info', `Starting system warmup (Group Target: ${this.warmupTarget} nodes per provider)...`);
 
@@ -1560,6 +1573,7 @@ export class ProviderPoolManager {
                 config.lastHealthStateTime = new Date().toISOString();
                 if (isAntigravityProviderType(providerType)) {
                     invalidateServiceAdapter(providerType, config.uuid);
+                    void this._probeAntigravityAvailableModels(providerType, providerStatus);
                 }
                 
                 this._debouncedSave(providerType);
@@ -3378,6 +3392,31 @@ export class ProviderPoolManager {
      * empty set in production and the intersection filter silently degrades to
      * the hand-maintained static chain.
      */
+    async _probeAntigravityAvailableModels(providerType, providerStatus) {
+        if (!isAntigravityProviderType(providerType)) return false;
+        const config = providerStatus?.config;
+        if (!config || config.isDisabled) return false;
+
+        try {
+            const tempConfig = {
+                ...this.globalConfig,
+                ...config,
+                MODEL_PROVIDER: providerType
+            };
+            delete tempConfig.providerPools;
+            const serviceAdapter = this.serviceAdapterFactory(tempConfig);
+            const service = serviceAdapter?.antigravityApiService;
+            if (!service?.fetchAvailableModels) return false;
+
+            await service._ensureInitialized();
+            await service.fetchAvailableModels();
+            return true;
+        } catch (error) {
+            this._log('warn', `Antigravity model probe failed for ${this._getDisplayName(config)}: ${error.message}`);
+            return false;
+        }
+    }
+
     recordAntigravityAvailableModels(providerType, providerUuid, models) {
         if (!isAntigravityProviderType(providerType) || !providerUuid) return false;
         const provider = this._findProvider(providerType, providerUuid);

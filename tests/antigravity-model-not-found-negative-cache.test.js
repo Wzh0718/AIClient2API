@@ -210,6 +210,31 @@ describe('Antigravity model-not-found negative cache', () => {
 
             expect(attempts.mock.calls.map(([, model]) => model)).not.toContain(firstFallback);
         });
+
+        test('probes models through the adapter and writes them back to the pool', async () => {
+            const manager = createManager();
+            const fetchAvailableModels = jest.fn(async () => {});
+            manager.serviceAdapterFactory = jest.fn(() => ({
+                antigravityApiService: {
+                    _ensureInitialized: jest.fn(async () => {}),
+                    fetchAvailableModels
+                }
+            }));
+
+            await expect(manager._probeAntigravityAvailableModels(providerType, manager.providerStatus[providerType][0]))
+                .resolves.toBe(true);
+            expect(fetchAvailableModels).toHaveBeenCalledTimes(1);
+        });
+
+        test('schedules antigravity probes even when warmupTarget is zero', async () => {
+            const manager = createManager();
+            manager.warmupTarget = 0;
+            const probe = jest.spyOn(manager, '_probeAntigravityAvailableModels').mockResolvedValue(true);
+
+            await manager.warmupNodes();
+
+            expect(probe).toHaveBeenCalledTimes(1);
+        });
     });
 
     test('exposes every routing counter through the multi-worker aggregate', async () => {
