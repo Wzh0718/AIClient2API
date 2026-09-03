@@ -163,6 +163,11 @@ export function buildRequestAuditEvent(context = {}) {
     const consistencyStatus = selectedProviderUuid && actualProviderUuid
         ? selectedProviderUuid === actualProviderUuid ? 'consistent' : 'mismatch'
         : 'unverifiable';
+    const routing = context._codexRouting || {};
+    const hasExtendedRouting = [
+        'spilloverCause', 'groupWaitMs', 'groupRetryCount', 'fallbackAttemptCount',
+        'availabilityReason', 'candidateGroupId', 'candidateProviderCount', 'unavailableProviderCount'
+    ].some(field => Object.prototype.hasOwnProperty.call(routing, field));
 
     return {
         schemaVersion: 4,
@@ -232,6 +237,16 @@ export function buildRequestAuditEvent(context = {}) {
             keyQueueWaitMs: toNumber(context._codexRouting?.keyQueueWaitMs),
             keyQueueOutcome: context._codexRouting?.keyQueueOutcome || null,
             keyCapacityExhausted: context._codexRouting?.keyCapacityExhausted === true,
+            ...(hasExtendedRouting ? {
+                spilloverCause: context._codexRouting?.spilloverCause || null,
+                groupWaitMs: toNumber(context._codexRouting?.groupWaitMs),
+                groupRetryCount: toNumber(context._codexRouting?.groupRetryCount),
+                fallbackAttemptCount: toNumber(context._codexRouting?.fallbackAttemptCount),
+                availabilityReason: context._codexRouting?.availabilityReason || null,
+                candidateGroupId: context._codexRouting?.candidateGroupId || null,
+                candidateProviderCount: toNumber(context._codexRouting?.candidateProviderCount),
+                unavailableProviderCount: toNumber(context._codexRouting?.unavailableProviderCount)
+            } : {}),
             ...(context._temporaryKeyModelRouteResult ? {
                 temporaryModelRoute: {
                     id: context._temporaryKeyModelRouteResult.id || null,

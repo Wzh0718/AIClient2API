@@ -111,6 +111,87 @@ afterEach(() => {
 });
 
 describe('Service Manager Codex credential-group routing', () => {
+    test('waits inside the primary group before spilling over after an upstream rate limit', async () => {
+        writeGroupConfig({
+            groups: [
+                { id: 'group-a', credentialUuids: ['codex-a'] },
+                { id: 'group-b', credentialUuids: ['codex-b'] }
+            ],
+            keyAssignments: []
+        });
+        const config = createConfig({
+            providers: [provider('codex-a'), provider('codex-b')],
+            keyData: { routingMode: 'auto', primaryGroupId: 'group-a' },
+            extra: { CODEX_GROUP_RATE_LIMIT_WAIT_MS: 30 }
+        });
+        const manager = await initialize(config);
+        const rateLimit = new Error('upstream rate limited');
+        rateLimit.status = 429;
+        rateLimit.code = 429;
+        rateLimit.origin = 'upstream_codex';
+        rateLimit.details = { reason: 'UPSTREAM_RATE_LIMIT' };
+        rateLimit.nextRecoveryTime = new Date(Date.now() + 20).toISOString();
+        const selectSpy = jest.spyOn(manager, 'acquireSlotWithFallback')
+            .mockRejectedValueOnce(rateLimit)
+            .mockResolvedValueOnce({
+                config: provider('codex-a'),
+                actualProviderType: providerType,
+                isFallback: false
+            });
+
+        const startedAt = Date.now();
+        const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini', { acquireSlot: true });
+
+        expect(result.uuid).toBe('codex-a');
+        expect(selectSpy).toHaveBeenCalledTimes(2);
+        expect(Date.now() - startedAt).toBeGreaterThanOrEqual(15);
+        expect(config._codexRouting).toMatchObject({
+            selectedGroupId: 'group-a',
+            spillover: false
+        });
+    });
+
+    test('spills over only after the primary group rate-limit wait expires', async () => {
+        writeGroupConfig({
+            groups: [
+                { id: 'group-a', credentialUuids: ['codex-a'] },
+                { id: 'group-b', credentialUuids: ['codex-b'] }
+            ],
+            keyAssignments: []
+        });
+        const config = createConfig({
+            providers: [provider('codex-a'), provider('codex-b')],
+            keyData: { routingMode: 'auto', primaryGroupId: 'group-a' },
+            extra: { CODEX_GROUP_RATE_LIMIT_WAIT_MS: 20 }
+        });
+        const manager = await initialize(config);
+        const rateLimit = new Error('upstream rate limited');
+        rateLimit.status = 429;
+        rateLimit.code = 429;
+        rateLimit.origin = 'upstream_codex';
+        rateLimit.details = { reason: 'UPSTREAM_RATE_LIMIT' };
+        rateLimit.nextRecoveryTime = new Date(Date.now() + 15).toISOString();
+        const selectSpy = jest.spyOn(manager, 'acquireSlotWithFallback')
+            .mockRejectedValueOnce(rateLimit)
+            .mockRejectedValueOnce(rateLimit)
+            .mockResolvedValueOnce({
+                config: provider('codex-b'),
+                actualProviderType: providerType,
+                isFallback: false
+            });
+
+        const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini', { acquireSlot: true });
+
+        expect(result.uuid).toBe('codex-b');
+        expect(selectSpy).toHaveBeenCalledTimes(3);
+        expect(config._codexRouting).toMatchObject({
+            selectedGroupId: 'group-b',
+            spillover: true,
+            spilloverReason: 'PRIMARY_GROUP_UNAVAILABLE',
+            spilloverCause: 'RATE_LIMIT_WAIT_EXPIRED'
+        });
+    });
+
     test('fixed routing constrains both service entry points to the specified credential', async () => {
         writeGroupConfig({
             groups: [

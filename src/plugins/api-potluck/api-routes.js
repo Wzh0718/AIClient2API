@@ -668,7 +668,7 @@ function buildPublicCredentialGroupView(currentConfig, credentials, keys, now = 
         keys: publicKeys,
         policy: {
             fixed: 'strict-no-fallback',
-            auto: 'primary-group-with-cross-group-spillover'
+            auto: 'primary-group-rate-limit-wait-then-cross-group-spillover'
         }
     };
 }

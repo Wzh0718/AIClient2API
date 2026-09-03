@@ -2186,6 +2186,7 @@ export class ProviderPoolManager {
         const error = new Error('Too many requests: account concurrency limit and queue reached');
         error.status = 429;
         error.code = 429;
+        error.details = { reason: 'PROVIDER_QUEUE_EXHAUSTED' };
         throw error;
     }
 
@@ -2571,6 +2572,7 @@ export class ProviderPoolManager {
         const error = new Error('Too many requests: account concurrency limit and queue reached');
         error.status = 429;
         error.code = 429;
+        error.details = { reason: 'PROVIDER_QUEUE_EXHAUSTED' };
         throw error;
     }
 
@@ -2924,6 +2926,10 @@ export class ProviderPoolManager {
     }
 
     _filterCodexProvidersByTokenQuota(providerType, providers, requestedModel = null, selectionDiagnostics = null) {
+        if (selectionDiagnostics) {
+            selectionDiagnostics.candidateProviderCount = providers.length;
+            selectionDiagnostics.unavailableProviderCount = 0;
+        }
         const bucket = resolveCodexQuotaBucket(
             requestedModel,
             toStringArray(this.globalConfig?.CODEX_53_QUOTA_MODEL_PATTERNS || this.globalConfig?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS)
@@ -2941,11 +2947,19 @@ export class ProviderPoolManager {
             error.status = 429;
             error.code = 429;
             error.filterReasons = { ...cachedExhaustion.filterReasons };
+            error.details = {
+                reason: 'CODEX_QUOTA_EXHAUSTED',
+                candidateGroupId: selectionDiagnostics?.candidateGroupId || null,
+                candidateProviderCount: providers.length,
+                unavailableProviderCount: Number(Object.values(cachedExhaustion.filterReasons || {}).reduce((sum, value) => sum + Number(value || 0), 0))
+            };
             if (selectionDiagnostics) {
                 selectionDiagnostics.filterReasons = {
                     ...(selectionDiagnostics.filterReasons || {}),
                     ...cachedExhaustion.filterReasons
                 };
+                selectionDiagnostics.candidateProviderCount = providers.length;
+                selectionDiagnostics.unavailableProviderCount = error.details.unavailableProviderCount;
             }
             throw error;
         }
@@ -3066,12 +3080,19 @@ export class ProviderPoolManager {
                 .map(([reason, count]) => `${reason}=${count}`)
                 .join(', ');
             const message = reasonSummary
-                ? `All Codex providers exceeded configured usage quotas (${reasonSummary})`
-                : 'All Codex providers exceeded configured usage quotas';
+                ? `${selectionDiagnostics?.candidateGroupId ? `All Codex providers in credential group ${selectionDiagnostics.candidateGroupId}` : 'All Codex providers'} exceeded configured usage quotas (${reasonSummary})`
+                : `${selectionDiagnostics?.candidateGroupId ? `All Codex providers in credential group ${selectionDiagnostics.candidateGroupId}` : 'All Codex providers'} exceeded configured usage quotas`;
             const error = new Error(message);
             error.status = 429;
             error.code = 429;
             error.filterReasons = filterReasons;
+            error.details = {
+                reason: 'CODEX_QUOTA_EXHAUSTED',
+                candidateGroupId: selectionDiagnostics?.candidateGroupId || null,
+                candidateProviderCount: providers.length,
+                unavailableProviderCount: limitedCount
+            };
+            if (selectionDiagnostics) selectionDiagnostics.unavailableProviderCount = limitedCount;
             this._codexPoolExhaustedSnapshots.set(snapshotKey, {
                 exhausted: true,
                 expiresAt: Date.now() + snapshotTtlMs,

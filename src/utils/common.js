@@ -270,6 +270,28 @@ function isCodexTransientCredentialError(error) {
     return error?.isCodexOverload === true || error?.isCodexModelCapacity === true;
 }
 
+function isCodexUpstreamRateLimit(error, providerType) {
+    return isCodexProviderType(providerType)
+        && Number(getErrorStatusCode(error)) === 429
+        && error?.origin === 'upstream_codex'
+        && error?.isCodexModelCapacity !== true
+        && error?.isCodexOverload !== true
+        && error?.isCodexUsageLimit !== true
+        && error?.quotaScope !== 'general'
+        && error?.details?.reason === 'UPSTREAM_RATE_LIMIT';
+}
+
+function getCodexGroupRateLimitWaitMs(config, error) {
+    const configured = Number(config?.CODEX_GROUP_RATE_LIMIT_WAIT_MS ?? 30_000);
+    const maxWaitMs = Number.isFinite(configured) ? Math.min(300_000, Math.max(0, configured)) : 30_000;
+    if (maxWaitMs <= 0) return 0;
+    const recoveryMs = Date.parse(error?.nextRecoveryTime || error?.details?.nextRecoveryAt || '');
+    if (Number.isFinite(recoveryMs)) return Math.min(maxWaitMs, Math.max(0, recoveryMs - Date.now()));
+    const retryAfterMs = Number(error?.retryAfterMs || error?.retryAfter);
+    if (Number.isFinite(retryAfterMs) && retryAfterMs >= 0) return Math.min(maxWaitMs, retryAfterMs);
+    return maxWaitMs;
+}
+
 function isAntigravityTransientCapacityError(error, providerType) {
     if (providerType !== MODEL_PROVIDER.ANTIGRAVITY || getErrorStatusCode(error) !== 503) {
         return false;
@@ -2084,7 +2106,20 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 toProvider
             ].filter(Boolean);
             // Codex 上游容量/过载已由服务端进行受控轮转，避免额外等待；其他类型保留原有抖动。
-            const randomDelay = isProviderTransient ? 0 : Math.floor(Math.random() * 10000);
+            const groupRateLimitWaitMs = isCodexUpstreamRateLimit(error, toProvider)
+                ? getCodexGroupRateLimitWaitMs(CONFIG, error)
+                : 0;
+            const randomDelay = groupRateLimitWaitMs > 0
+                ? groupRateLimitWaitMs
+                : (isProviderTransient ? 0 : Math.floor(Math.random() * 10000));
+            if (groupRateLimitWaitMs > 0) {
+                CONFIG._codexRouting = {
+                    ...(CONFIG._codexRouting || {}),
+                    groupWaitMs: Number(CONFIG._codexRouting?.groupWaitMs || 0) + groupRateLimitWaitMs,
+                    groupRetryCount: Number(CONFIG._codexRouting?.groupRetryCount || 0) + 1,
+                    availabilityReason: 'UPSTREAM_RATE_LIMIT'
+                };
+            }
             updateGeminiRequestMetadata({ retryCount: currentRetry + 1 });
             logGeminiRetryDiagnostic({ mode: 'stream', model, providerType: toProvider, providerUuid: pooluuid, attempt: currentRetry + 1, maxRetries, error, backoffMs: randomDelay, switchedProvider: false, fallbackCount: retryContext?.geminiFallbackCount || 0, outcome: 'scheduled' });
             logger.info(`[Stream Retry] Credential switch requested. Waiting ${randomDelay}ms before retry ${currentRetry + 1}/${maxRetries} with different credential...`);
@@ -2104,6 +2139,10 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                     excludeProviderUuids: failedCredentialUuids,
                     deprioritizeProviderTypes: failedProviderTypes,
                     allowExcludedProviderFallback: isCodexTransient,
+                    ...(groupRateLimitWaitMs > 0 ? {
+                        retryReason: 'UPSTREAM_RATE_LIMIT',
+                        retryGroupId: CONFIG._codexRouting?.selectedGroupId || CONFIG._codexRouting?.requestedPrimaryGroupId || null
+                    } : {}),
                     ...(shouldForceCodexFamilyFallback(error, toProvider, model)
                         ? { forceCodexModelFallback: true, modelFallbackReason: 'UPSTREAM_429' }
                         : {}),
@@ -2484,7 +2523,20 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 toProvider
             ].filter(Boolean);
             // Codex 上游容量/过载已由服务端进行受控轮转，避免额外等待；其他类型保留原有抖动。
-            const randomDelay = isProviderTransient ? 0 : Math.floor(Math.random() * 10000);
+            const groupRateLimitWaitMs = isCodexUpstreamRateLimit(error, toProvider)
+                ? getCodexGroupRateLimitWaitMs(CONFIG, error)
+                : 0;
+            const randomDelay = groupRateLimitWaitMs > 0
+                ? groupRateLimitWaitMs
+                : (isProviderTransient ? 0 : Math.floor(Math.random() * 10000));
+            if (groupRateLimitWaitMs > 0) {
+                CONFIG._codexRouting = {
+                    ...(CONFIG._codexRouting || {}),
+                    groupWaitMs: Number(CONFIG._codexRouting?.groupWaitMs || 0) + groupRateLimitWaitMs,
+                    groupRetryCount: Number(CONFIG._codexRouting?.groupRetryCount || 0) + 1,
+                    availabilityReason: 'UPSTREAM_RATE_LIMIT'
+                };
+            }
             updateGeminiRequestMetadata({ retryCount: currentRetry + 1 });
             logGeminiRetryDiagnostic({ mode: 'unary', model, providerType: toProvider, providerUuid: pooluuid, attempt: currentRetry + 1, maxRetries, error, backoffMs: randomDelay, switchedProvider: false, fallbackCount: retryContext?.geminiFallbackCount || 0, outcome: 'scheduled' });
             logger.info(`[Unary Retry] Credential switch requested. Waiting ${randomDelay}ms before retry ${currentRetry + 1}/${maxRetries} with different credential...`);
@@ -2504,6 +2556,10 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                     excludeProviderUuids: failedCredentialUuids,
                     deprioritizeProviderTypes: failedProviderTypes,
                     allowExcludedProviderFallback: isCodexTransient,
+                    ...(groupRateLimitWaitMs > 0 ? {
+                        retryReason: 'UPSTREAM_RATE_LIMIT',
+                        retryGroupId: CONFIG._codexRouting?.selectedGroupId || CONFIG._codexRouting?.requestedPrimaryGroupId || null
+                    } : {}),
                     ...(shouldForceCodexFamilyFallback(error, toProvider, model)
                         ? { forceCodexModelFallback: true, modelFallbackReason: 'UPSTREAM_429' }
                         : {}),

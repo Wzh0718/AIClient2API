@@ -183,7 +183,15 @@ const CODEX_ROUTING_DIAGNOSTIC_FIELDS = new Set([
     'assignmentMissing',
     'keyQueueWaitMs',
     'keyQueueOutcome',
-    'keyCapacityExhausted'
+    'keyCapacityExhausted',
+    'spilloverCause',
+    'groupWaitMs',
+    'groupRetryCount',
+    'fallbackAttemptCount',
+    'availabilityReason',
+    'candidateGroupId',
+    'candidateProviderCount',
+    'unavailableProviderCount'
 ]);
 
 function updateCodexRoutingDiagnostics(config, patch = {}) {
@@ -237,9 +245,33 @@ function initializeSelectionDiagnostics(selectionDiagnostics = {}) {
         eligibleCandidateCount: 0,
         capacityExhausted: false,
         filterReasons: {},
-        attempts: []
+        attempts: [],
+        groupWaitMs: 0,
+        groupRetryCount: 0,
+        fallbackAttemptCount: 0,
+        availabilityReason: null
     });
     return selectionDiagnostics;
+}
+
+function isUpstreamCodexRateLimit(error) {
+    if (!error || error.origin !== 'upstream_codex') return false;
+    if (Number(error.response?.status || error.status || error.statusCode) !== 429) return false;
+    if (error.isCodexUsageLimit === true || error.quotaScope || error.filterReasons?.general_quota_exceeded) return false;
+    return error.details?.reason === 'UPSTREAM_RATE_LIMIT'
+        || error.isCodexRateLimit === true
+        || !error.filterReasons;
+}
+
+function getCodexGroupRateLimitWaitMs(config, error) {
+    const configured = Number(config?.CODEX_GROUP_RATE_LIMIT_WAIT_MS ?? 30_000);
+    const maxWaitMs = Number.isFinite(configured) ? Math.min(300_000, Math.max(0, configured)) : 30_000;
+    if (maxWaitMs <= 0) return 0;
+    const recoveryMs = Date.parse(error?.nextRecoveryTime || error?.details?.nextRecoveryAt || '');
+    if (Number.isFinite(recoveryMs)) return Math.min(maxWaitMs, Math.max(0, recoveryMs - Date.now()));
+    const retryAfterMs = Number(error?.retryAfterMs || error?.retryAfter);
+    if (Number.isFinite(retryAfterMs) && retryAfterMs >= 0) return Math.min(maxWaitMs, retryAfterMs);
+    return maxWaitMs;
 }
 
 function normalizeCredentialGroups(groups = []) {
@@ -647,33 +679,92 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
         assignmentMissing: false
     });
 
-    const attemptGroups = async ({ excludeProviderUuids, preferredProviderUuid }) => {
+    const attemptGroups = async ({ excludeProviderUuids, preferredProviderUuid, primaryOnly = false, onlyGroupId = null }) => {
         for (const group of orderedGroups) {
+            if (primaryOnly && group.id !== requestedPrimaryGroupId) continue;
+            if (onlyGroupId && group.id !== onlyGroupId) continue;
             if (group.credentialUuids.length === 0) continue;
-            const groupOptions = withStickyProviderAffinity(config, providerType, {
+            selectionDiagnostics.candidateGroupId = group.id;
+            selectionDiagnostics.candidateProviderCount = group.credentialUuids.length;
+            const groupOptions = () => withStickyProviderAffinity(config, providerType, {
                 ...options,
                 selectionDiagnostics,
                 requestedModel,
                 allowedProviderUuids: group.credentialUuids,
                 disableProviderFallback: true,
                 preferredProviderUuid,
-                excludeProviderUuids
+                excludeProviderUuids,
+                candidateGroupId: group.id
             });
             try {
-                const selectedResult = await selectFromPool(groupOptions);
+                const selectedResult = await selectFromPool(groupOptions());
                 if (selectedResult) return { selectedResult, group };
             } catch (error) {
                 if (!isCredentialAvailabilityError(error)) {
                     await releasePotluckKeyConcurrencyLease();
                     throw error;
                 }
-                availabilityError = error;
+                const isPrimaryGroup = group.id === requestedPrimaryGroupId;
+                if (isPrimaryGroup && isUpstreamCodexRateLimit(error) && !options.retryReason && !options._codexGroupRateLimitRetried) {
+                    const waitMs = getCodexGroupRateLimitWaitMs(config, error);
+                    selectionDiagnostics.groupRetryCount = Number(selectionDiagnostics.groupRetryCount || 0) + 1;
+                    selectionDiagnostics.groupWaitMs = Number(selectionDiagnostics.groupWaitMs || 0) + waitMs;
+                    selectionDiagnostics.availabilityReason = 'UPSTREAM_RATE_LIMIT';
+                    updateCodexRoutingDiagnostics(config, {
+                        candidateGroupId: group.id,
+                        candidateProviderCount: group.credentialUuids.length,
+                        groupRetryCount: selectionDiagnostics.groupRetryCount,
+                        groupWaitMs: selectionDiagnostics.groupWaitMs,
+                        availabilityReason: 'UPSTREAM_RATE_LIMIT'
+                    });
+                    if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+                    try {
+                        const retriedResult = await selectFromPool(groupOptions());
+                        if (retriedResult) return { selectedResult: retriedResult, group };
+                    } catch (retryError) {
+                        if (!isCredentialAvailabilityError(retryError)) {
+                            await releasePotluckKeyConcurrencyLease();
+                            throw retryError;
+                        }
+                        availabilityError = retryError;
+                        selectionDiagnostics.availabilityReason = 'RATE_LIMIT_WAIT_EXPIRED';
+                        continue;
+                    }
+                } else if (isPrimaryGroup && error?.filterReasons?.general_quota_exceeded) {
+                    selectionDiagnostics.availabilityReason = 'QUOTA_EXHAUSTED';
+                } else if (isPrimaryGroup && (error?.code === 'PROVIDER_CONCURRENCY_EXHAUSTED' || error?.details?.reason === 'PROVIDER_QUEUE_EXHAUSTED')) {
+                    selectionDiagnostics.availabilityReason = 'QUEUE_EXHAUSTED';
+                } else if (isPrimaryGroup && error?.details?.reason === 'key_capacity_exhausted') {
+                    selectionDiagnostics.availabilityReason = 'KEY_QUEUE_EXHAUSTED';
+                }
+                if (!availabilityError) availabilityError = error;
             }
+            selectionDiagnostics.fallbackAttemptCount = Number(selectionDiagnostics.fallbackAttemptCount || 0) + 1;
         }
         return null;
     };
 
-    let selected = await attemptGroups({
+    const retryGroupId = options.retryReason === 'UPSTREAM_RATE_LIMIT'
+        ? (options.retryGroupId || config._codexRouting?.selectedGroupId || requestedPrimaryGroupId)
+        : null;
+    let selected = retryGroupId
+        ? await attemptGroups({
+            onlyGroupId: retryGroupId,
+            preferredProviderUuid: null,
+            excludeProviderUuids: originalExcludedUuids
+        })
+        : null;
+
+    if (!selected && retryGroupId && options.retryReason === 'UPSTREAM_RATE_LIMIT') {
+        selected = await attemptGroups({
+            onlyGroupId: retryGroupId,
+            preferredProviderUuid: null,
+            excludeProviderUuids: []
+        });
+        if (!selected) selectionDiagnostics.availabilityReason = 'RATE_LIMIT_WAIT_EXPIRED';
+    }
+
+    if (!selected) selected = await attemptGroups({
         preferredProviderUuid: pinnedProviderUuid === pendingExcludedUuid ? null : pinnedProviderUuid,
         excludeProviderUuids: [...new Set([
             ...originalExcludedUuids,
@@ -718,6 +809,7 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
         selectedProviderUuid: selectedUuid,
         spillover,
         spilloverReason: spillover ? 'PRIMARY_GROUP_UNAVAILABLE' : null,
+        spilloverCause: spillover ? (selectionDiagnostics.availabilityReason || 'PRIMARY_GROUP_UNAVAILABLE') : null,
         hotShardApplied: selectionDiagnostics.hotShardApplied === true
     });
     return { handled: true, selectedResult: selected.selectedResult, availabilityError: null };
@@ -1886,6 +1978,13 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         config._codexRouting.keyQueueWaitMs = Number(selectionDiagnostics.keyQueueWaitMs || 0);
         config._codexRouting.keyQueueOutcome = selectionDiagnostics.keyQueueOutcome || null;
         config._codexRouting.keyCapacityExhausted = selectionDiagnostics.keyCapacityExhausted === true;
+        config._codexRouting.groupWaitMs = Number(selectionDiagnostics.groupWaitMs || config._codexRouting.groupWaitMs || 0);
+        config._codexRouting.groupRetryCount = Number(selectionDiagnostics.groupRetryCount || config._codexRouting.groupRetryCount || 0);
+        config._codexRouting.fallbackAttemptCount = Number(selectionDiagnostics.fallbackAttemptCount || 0);
+        config._codexRouting.availabilityReason = selectionDiagnostics.availabilityReason || config._codexRouting.availabilityReason || null;
+        config._codexRouting.candidateGroupId = selectionDiagnostics.candidateGroupId || null;
+        config._codexRouting.candidateProviderCount = Number(selectionDiagnostics.candidateProviderCount || 0);
+        config._codexRouting.unavailableProviderCount = Number(selectionDiagnostics.unavailableProviderCount || 0);
     }
 
     const fallbackMetadata = isFallback && actualModel !== actualModelName

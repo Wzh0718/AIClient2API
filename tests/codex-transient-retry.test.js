@@ -62,7 +62,60 @@ function createCapacityError() {
     return error;
 }
 
+function createRateLimitError() {
+    const error = new Error('429 Too Many Requests');
+    error.response = { status: 429, data: { detail: 'Rate limit exceeded' } };
+    error.origin = 'upstream_codex';
+    error.isCodexRateLimit = true;
+    error.details = { reason: 'UPSTREAM_RATE_LIMIT' };
+    error.nextRecoveryTime = new Date(Date.now() + 20).toISOString();
+    error.shouldSwitchCredential = true;
+    error.skipErrorCount = true;
+    return error;
+}
+
 describe('Codex transient credential retry', () => {
+    test('waits for the primary group recovery window before selecting another credential', async () => {
+        mockGetApiServiceWithFallback.mockReset();
+        const firstService = { generateContent: jest.fn().mockRejectedValue(createRateLimitError()) };
+        const secondService = { generateContent: jest.fn().mockResolvedValue({ id: 'resp_rate_limit_retry_success' }) };
+        mockGetApiServiceWithFallback.mockResolvedValueOnce({
+            service: secondService,
+            uuid: 'codex-b',
+            actualModel: 'gpt-5.5',
+            actualProviderType: 'openai-codex-oauth',
+            serviceConfig: {}
+        });
+        const providerPoolManager = createProviderPoolManager();
+        const res = new FakeResponse();
+        const config = { CREDENTIAL_SWITCH_MAX_RETRIES: 1, CODEX_GROUP_RATE_LIMIT_WAIT_MS: 20 };
+
+        await handleUnaryRequest(
+            res,
+            firstService,
+            'gpt-5.5',
+            { input: [] },
+            'openai-codex-oauth',
+            'openai-codex-oauth',
+            'none',
+            null,
+            providerPoolManager,
+            'codex-a',
+            'Codex A',
+            { CONFIG: config, maxRetries: 1 }
+        );
+
+        expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(config, 'gpt-5.5', expect.objectContaining({
+            retryReason: 'UPSTREAM_RATE_LIMIT',
+            allowExcludedProviderFallback: false
+        }));
+        expect(config._codexRouting).toMatchObject({
+            availabilityReason: 'UPSTREAM_RATE_LIMIT',
+            groupRetryCount: 1
+        });
+        expect(res.body).toContain('resp_rate_limit_retry_success');
+    });
+
     test('uses one final credential snapshot for usage metadata after switching providers', () => {
         expect(resolveFinalUsageAccountContext({
             selectedProviderUuid: 'codex-b',

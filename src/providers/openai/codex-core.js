@@ -521,6 +521,11 @@ export class CodexApiService {
                     continue;
                 }
 
+                if (error.response?.status === 429) {
+                    error.isCodexRateLimit = true;
+                    error.details = { ...(error.details || {}), reason: 'UPSTREAM_RATE_LIMIT' };
+                }
+
                 if (error.response?.status === 401) {
                     logger.info('[Codex] Received 401. Triggering background refresh...');
                     await normalizeProviderErrorMessage(error, { status: 401, context: 'non-stream' });
@@ -676,6 +681,11 @@ export class CodexApiService {
                     logger.warn(`[Codex] Upstream rate limited stream; retrying same credential once after ${delayMs}ms`);
                     if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
                     continue;
+                }
+
+                if (error.response?.status === 429) {
+                    error.isCodexRateLimit = true;
+                    error.details = { ...(error.details || {}), reason: 'UPSTREAM_RATE_LIMIT' };
                 }
 
                 if (error.response?.status === 401) {
