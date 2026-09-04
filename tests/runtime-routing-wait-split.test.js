@@ -33,7 +33,7 @@ describe('routing wait split', () => {
         expect(readRoutingWaits()).toEqual(emptyWaits);
     });
 
-    test('subtracts elastic queue wait from selectionComputeMs', () => {
+    test('subtracts elastic queue wait and availability refresh from selectionComputeMs', () => {
         requestContext.run({ requestId: 'split-elastic' }, () => {
             accumulateRoutingWait('keyQueueWaitMs', 100);
             accumulateRoutingWait('credentialLeaseWaitMs', 200);
@@ -48,12 +48,13 @@ describe('routing wait split', () => {
                 elasticQueueWaitMs: 4000,
                 availabilityRefreshMs: 50,
                 elasticAttemptCount: 3,
-                selectionComputeMs: 1000
+                selectionComputeMs: 950
             });
             expect(stages.providerFilterMs).toBe(
                 stages.keyQueueWaitMs
                 + stages.credentialLeaseWaitMs
                 + stages.elasticQueueWaitMs
+                + stages.availabilityRefreshMs
                 + stages.selectionComputeMs
             );
         });

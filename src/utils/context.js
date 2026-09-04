@@ -100,7 +100,7 @@ export function computeSelectionStages(totalMs, waits = readRoutingWaits()) {
         elasticQueueWaitMs,
         availabilityRefreshMs,
         elasticAttemptCount,
-        selectionComputeMs: Math.max(0, providerFilterMs - keyQueueWaitMs - credentialLeaseWaitMs - elasticQueueWaitMs)
+        selectionComputeMs: Math.max(0, providerFilterMs - keyQueueWaitMs - credentialLeaseWaitMs - elasticQueueWaitMs - availabilityRefreshMs)
     };
 }
 

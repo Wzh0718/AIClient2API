@@ -28,6 +28,27 @@ function safeFileName(eventId) {
     return `${createHash('sha256').update(String(eventId)).digest('hex')}.json`;
 }
 
+function decodeSpoolRecord(raw) {
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.wal === 1 && parsed.event && typeof parsed.event === 'object') {
+        return {
+            event: parsed.event,
+            streamId: parsed.streamId || null,
+            publishedAt: parsed.publishedAt || null
+        };
+    }
+    return { event: parsed, streamId: null, publishedAt: null };
+}
+
+function encodeSpoolRecord(event, streamId = null, publishedAt = null) {
+    return `${JSON.stringify({
+        wal: 1,
+        streamId,
+        publishedAt,
+        event
+    })}\n`;
+}
+
 function fieldsToObject(fields = []) {
     const result = {};
     for (let index = 0; index < fields.length; index += 2) result[fields[index]] = fields[index + 1];
@@ -123,8 +144,15 @@ export class RuntimeHookStream {
         this.spoolBytes = 0;
         if (!fs.existsSync(this.spoolDir)) return;
         for (const name of fs.readdirSync(this.spoolDir).filter(item => item.endsWith('.json'))) {
-            const stat = fs.statSync(path.join(this.spoolDir, name));
-            this.spoolEntries.set(name, { size: stat.size, mtimeMs: stat.mtimeMs });
+            const file = path.join(this.spoolDir, name);
+            const stat = fs.statSync(file);
+            let streamId = null;
+            try {
+                streamId = decodeSpoolRecord(fs.readFileSync(file, 'utf8')).streamId;
+            } catch {
+                // Keep the file indexed so a later flush/ack can drop or repair it.
+            }
+            this.spoolEntries.set(name, { size: stat.size, mtimeMs: stat.mtimeMs, streamId });
             this.spoolBytes += stat.size;
         }
     }
@@ -142,7 +170,7 @@ export class RuntimeHookStream {
     async _writeSpoolNow(event) {
         await fsp.mkdir(this.spoolDir, { recursive: true });
         this._initializeSpoolIndex();
-        const serialized = `${JSON.stringify(event)}\n`;
+        const serialized = encodeSpoolRecord(event);
         const target = path.join(this.spoolDir, safeFileName(event.eventId));
         const name = path.basename(target);
         const existingBytes = this.spoolEntries.get(name)?.size || 0;
@@ -157,7 +185,7 @@ export class RuntimeHookStream {
         const temp = `${target}.${process.pid}.tmp`;
         await fsp.writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600 });
         await fsp.rename(temp, target);
-        this.spoolEntries.set(name, { size: serializedBytes, mtimeMs: Date.now() });
+        this.spoolEntries.set(name, { size: serializedBytes, mtimeMs: Date.now(), streamId: null });
         this.spoolBytes = nextBytes;
         this.spoolFull = false;
         return target;
@@ -198,6 +226,12 @@ export class RuntimeHookStream {
                 : await Promise.all(commands.map(parts => this.redis.command(parts, { timeoutMs: this.redisCommandTimeoutMs })));
             this.lastPublishedAt = new Date().toISOString();
             this.lastError = null;
+            const publishedAt = this.lastPublishedAt;
+            await Promise.all(prepared.map((item, index) => (
+                streamIds[index]
+                    ? this._markPublished(item.event.eventId, streamIds[index], publishedAt)
+                    : Promise.resolve()
+            )));
             return prepared.map((item, index) => ({
                 persisted: true,
                 spooled: false,
@@ -208,6 +242,43 @@ export class RuntimeHookStream {
             this.lastError = error.message;
             return prepared.map(() => ({ persisted: true, spooled: true, streamId: null }));
         }
+    }
+
+    async _markPublished(eventId, streamId, publishedAt) {
+        if (!eventId || !streamId) return;
+        await this._enqueueSpoolMutation(() => this._markPublishedNow(eventId, streamId, publishedAt));
+    }
+
+    async _markPublishedNow(eventId, streamId, publishedAt) {
+        this._initializeSpoolIndex();
+        const name = safeFileName(eventId);
+        const existing = this.spoolEntries.get(name);
+        const file = path.join(this.spoolDir, name);
+        let record;
+        try {
+            record = decodeSpoolRecord(await fsp.readFile(file, 'utf8'));
+        } catch (error) {
+            if (error?.code === 'ENOENT') {
+                if (existing) {
+                    this.spoolEntries.delete(name);
+                    this.spoolBytes = Math.max(0, this.spoolBytes - existing.size);
+                }
+                return;
+            }
+            throw error;
+        }
+        const serialized = encodeSpoolRecord(record.event, streamId, publishedAt);
+        const serializedBytes = Buffer.byteLength(serialized, 'utf8');
+        const temp = `${file}.${process.pid}.tmp`;
+        await fsp.writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600 });
+        await fsp.rename(temp, file);
+        const previousBytes = existing?.size || 0;
+        this.spoolBytes = Math.max(0, this.spoolBytes - previousBytes + serializedBytes);
+        this.spoolEntries.set(name, {
+            size: serializedBytes,
+            mtimeMs: Date.now(),
+            streamId
+        });
     }
 
     async acknowledge(eventId) {
@@ -225,25 +296,70 @@ export class RuntimeHookStream {
     }
 
     async flushSpool() {
-        await this.spoolMutationTail;
         this._initializeSpoolIndex();
-        if (this.spoolEntries.size === 0) return 0;
-        let flushed = 0;
-        const files = [...this.spoolEntries.keys()];
-        for (const name of files) {
+        const unpublished = [...this.spoolEntries.entries()]
+            .filter(([, meta]) => !meta?.streamId)
+            .map(([name]) => name);
+        if (unpublished.length === 0) return 0;
+        const prepared = [];
+        for (const name of unpublished) {
             const file = path.join(this.spoolDir, name);
-            let event;
             try {
-                event = JSON.parse(await fsp.readFile(file, 'utf8'));
-                const result = await this.publish(event);
-                if (result.spooled) break;
-                flushed += 1;
+                const record = decodeSpoolRecord(await fsp.readFile(file, 'utf8'));
+                if (record.streamId) {
+                    const existing = this.spoolEntries.get(name);
+                    if (existing) this.spoolEntries.set(name, { ...existing, streamId: record.streamId });
+                    continue;
+                }
+                prepared.push({
+                    name,
+                    event: record.event,
+                    payload: JSON.stringify(record.event),
+                    createdAt: record.event?.createdAt || new Date().toISOString()
+                });
             } catch (error) {
+                if (error?.code === 'ENOENT') {
+                    const existing = this.spoolEntries.get(name);
+                    this.spoolEntries.delete(name);
+                    if (existing) this.spoolBytes = Math.max(0, this.spoolBytes - existing.size);
+                    continue;
+                }
                 this.lastError = error.message;
                 break;
             }
         }
-        return flushed;
+        if (prepared.length === 0) return 0;
+        try {
+            const memory = await this._getRedisMemorySnapshot();
+            if (memory.critical) {
+                const error = new Error(`Redis memory pressure is critical (${Math.round(memory.ratio * 100)}%)`);
+                error.code = 'REDIS_MEMORY_CRITICAL';
+                throw error;
+            }
+            const commands = prepared.map(item => ([
+                'XADD', this.streamKey, '*',
+                'eventId', item.event.eventId,
+                'sourceWorkerId', item.event.sourceWorkerId || this.workerId,
+                'createdAt', item.createdAt,
+                'payload', item.payload
+            ]));
+            const streamIds = typeof this.redis.commandPipeline === 'function'
+                ? await this.redis.commandPipeline(commands, { timeoutMs: this.redisCommandTimeoutMs })
+                : await Promise.all(commands.map(parts => this.redis.command(parts, { timeoutMs: this.redisCommandTimeoutMs })));
+            this.lastPublishedAt = new Date().toISOString();
+            this.lastError = null;
+            const publishedAt = this.lastPublishedAt;
+            await Promise.all(prepared.map((item, index) => (
+                streamIds[index]
+                    ? this._markPublished(item.event.eventId, streamIds[index], publishedAt)
+                    : Promise.resolve()
+            )));
+            return prepared.filter((_, index) => streamIds[index]).length;
+        } catch (error) {
+            if (/\bOOM\b|maxmemory/i.test(error.message || '')) this.oomCommandErrors++;
+            this.lastError = error.message;
+            return 0;
+        }
     }
 
     async ensureGroup() {

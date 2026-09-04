@@ -142,7 +142,7 @@ describe('RuntimeHookStream', () => {
         expect(stream.snapshot()).toMatchObject({ spooled: 1 });
 
         await stream.flushSpool();
-        expect(redis.command.mock.calls.filter(([parts]) => parts[0] === 'XADD')).toHaveLength(2);
+        expect(redis.command.mock.calls.filter(([parts]) => parts[0] === 'XADD')).toHaveLength(1);
         expect(stream.snapshot()).toMatchObject({ spooled: 1 });
 
         await stream.acknowledge(event.eventId);
@@ -505,6 +505,51 @@ describe('RuntimeHookStream', () => {
         await expect(stream.publish({ eventId: 'too-large', args: [{ value: 'x'.repeat(256) }] }))
             .rejects.toMatchObject({ code: 'RUNTIME_HOOK_SPOOL_FULL' });
         expect(stream.snapshot()).toMatchObject({ spoolFull: true });
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('does not block a live publish behind a held unpublished flush XADD', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-hook-flush-overlap-'));
+        const waiting = [];
+        const redis = {
+            command: jest.fn(async parts => {
+                if (parts[0] === 'INFO') {
+                    return 'used_memory:1024\r\nused_memory_peak:1024\r\nmaxmemory:805306368\r\n';
+                }
+                if (parts[0] !== 'XADD') return 'OK';
+                const eventId = parts[parts.indexOf('eventId') + 1];
+                if (String(eventId).startsWith('old-')) {
+                    await new Promise(resolve => waiting.push(resolve));
+                }
+                return '1-0';
+            })
+        };
+        const stream = new RuntimeHookStream({ redis, epoch: 'test', workerId: 'execution-1', spoolDir: dir });
+        stream.redis = { command: jest.fn(async () => { throw new Error('redis unavailable'); }) };
+        await stream.publish({ eventId: 'old-1', args: [] });
+        stream.redis = redis;
+
+        const flushPromise = stream.flushSpool();
+        await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('flush did not start old XADD')), 1000);
+            const poll = () => {
+                if (waiting.length > 0) {
+                    clearTimeout(timer);
+                    resolve();
+                    return;
+                }
+                setImmediate(poll);
+            };
+            poll();
+        });
+
+        await expect(stream.publish({ eventId: 'live-1', args: [] })).resolves.toMatchObject({
+            persisted: true,
+            spooled: false
+        });
+
+        while (waiting.length > 0) waiting.shift()();
+        await flushPromise;
         fs.rmSync(dir, { recursive: true, force: true });
     });
 });
