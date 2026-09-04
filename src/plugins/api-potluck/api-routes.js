@@ -108,7 +108,8 @@ const LIST_KEY_FIELDS = [
     'edgeAdmissionQueueTimeoutMs', 'edgeAuthRpmLimit', 'maskedKey',
     'weeklyUsage', 'weeklyPromptTokens', 'weeklyCompletionTokens', 'weeklyReasoningTokens',
     'weeklyTotalTokens', 'weeklyCachedTokens', 'todayCacheHitRatio', 'weeklyCacheHitRatio',
-    'totalCacheHitRatio', 'cost'
+    'totalCacheHitRatio', 'cost', 'displayUsageSource', 'displayUsageDate',
+    'displayUsageReadAt', 'displayUsageLastEventAt', 'displayUsageMemoryDelta'
 ];
 
 function getRequestDetailOptions(req) {
@@ -165,6 +166,113 @@ function getCachedStats(costOptions = {}) {
     return promise;
 }
 
+function usageDisplaySummary(bucket = {}) {
+    return {
+        requestCount: Number(bucket.requestCount || 0),
+        promptTokens: Number(bucket.promptTokens || 0),
+        completionTokens: Number(bucket.completionTokens || 0),
+        reasoningTokens: Number(bucket.reasoningTokens || 0),
+        totalTokens: Number(bucket.totalTokens || 0),
+        cachedTokens: Number(bucket.cachedTokens || 0),
+        cacheHitRatio: Number(bucket.cacheHitRatio || 0),
+        cost: bucket.cost || null,
+        lastUsedAt: bucket.lastUsedAt || null
+    };
+}
+
+function overlayUsageFields(target, summary, prefix = '') {
+    const usage = usageDisplaySummary(summary);
+    target[`${prefix}Usage`] = usage.requestCount;
+    target[`${prefix}PromptTokens`] = usage.promptTokens;
+    target[`${prefix}CompletionTokens`] = usage.completionTokens;
+    target[`${prefix}ReasoningTokens`] = usage.reasoningTokens;
+    target[`${prefix}TotalTokens`] = usage.totalTokens;
+    target[`${prefix}CachedTokens`] = usage.cachedTokens;
+    return usage;
+}
+
+function overlayDisplayUsageOnStats(stats, snapshots = {}) {
+    const today = snapshots.today?.summary || {};
+    const week = snapshots['7d']?.summary || {};
+    const total = snapshots.total?.summary || {};
+    const result = { ...stats };
+    result.todayTotalUsage = Number(today.requestCount || 0);
+    result.todayPromptTokens = Number(today.promptTokens || 0);
+    result.todayCompletionTokens = Number(today.completionTokens || 0);
+    result.todayReasoningTokens = Number(today.reasoningTokens || 0);
+    result.todayTotalTokens = Number(today.totalTokens || 0);
+    result.todayCachedTokens = Number(today.cachedTokens || 0);
+    result.totalUsage = Number(total.requestCount || 0);
+    result.totalPromptTokens = Number(total.promptTokens || 0);
+    result.totalCompletionTokens = Number(total.completionTokens || 0);
+    result.totalReasoningTokens = Number(total.reasoningTokens || 0);
+    result.totalTokens = Number(total.totalTokens || 0);
+    result.totalCachedTokens = Number(total.cachedTokens || 0);
+    result.weeklyUsage = Number(week.requestCount || 0);
+    result.weeklyPromptTokens = Number(week.promptTokens || 0);
+    result.weeklyCompletionTokens = Number(week.completionTokens || 0);
+    result.weeklyReasoningTokens = Number(week.reasoningTokens || 0);
+    result.weeklyTotalTokens = Number(week.totalTokens || 0);
+    result.weeklyCachedTokens = Number(week.cachedTokens || 0);
+    result.todayCacheHitRatio = Number(today.cacheHitRatio || 0);
+    result.totalCacheHitRatio = Number(total.cacheHitRatio || 0);
+    const todaySource = snapshots.today?.keySummarySource === 'sqlite-preaggregated'
+        ? 'sqlite-current-day'
+        : 'ledger';
+    const historySource = snapshots.total?.keySummarySource === 'sqlite-preaggregated'
+        ? 'ledger+sqlite-current-day'
+        : 'ledger';
+    result.displayUsageSource = { today: todaySource, history: historySource };
+    result.displayUsageDate = snapshots.today?.from || getBeijingDateKey();
+    result.displayUsageReadAt = new Date().toISOString();
+
+    result.keySummaries = (stats.keySummaries || []).map(key => {
+        const ref = hashSecret(key.id);
+        const todayKey = snapshots.today?.keySummaries?.[ref]?.summary || {};
+        const weekKey = snapshots['7d']?.keySummaries?.[ref]?.summary || {};
+        const totalKey = snapshots.total?.keySummaries?.[ref]?.summary || {};
+        const next = { ...key };
+        const displayToday = overlayUsageFields(next, todayKey, 'today');
+        const displayTotal = usageDisplaySummary(totalKey);
+        next.totalUsage = displayTotal.requestCount;
+        next.totalPromptTokens = displayTotal.promptTokens;
+        next.totalCompletionTokens = displayTotal.completionTokens;
+        next.totalReasoningTokens = displayTotal.reasoningTokens;
+        next.totalTokens = displayTotal.totalTokens;
+        next.totalCachedTokens = displayTotal.cachedTokens;
+        next.weeklyUsage = Number(weekKey.requestCount || 0);
+        next.weeklyPromptTokens = Number(weekKey.promptTokens || 0);
+        next.weeklyCompletionTokens = Number(weekKey.completionTokens || 0);
+        next.weeklyReasoningTokens = Number(weekKey.reasoningTokens || 0);
+        next.weeklyTotalTokens = Number(weekKey.totalTokens || 0);
+        next.weeklyCachedTokens = Number(weekKey.cachedTokens || 0);
+        next.todayCacheHitRatio = displayToday.cacheHitRatio;
+        next.weeklyCacheHitRatio = Number(weekKey.cacheHitRatio || 0);
+        next.totalCacheHitRatio = Number(totalKey.cacheHitRatio || 0);
+        next.cost = totalKey.cost || next.cost;
+        next.weeklyCost = weekKey.cost || next.weeklyCost;
+        next.displayUsageSource = result.displayUsageSource;
+        next.displayUsageDate = result.displayUsageDate;
+        next.displayUsageReadAt = result.displayUsageReadAt;
+        next.displayUsageLastEventAt = displayToday.lastUsedAt || totalKey.lastUsedAt || null;
+        next.displayUsageMemoryDelta = {
+            requestCount: displayToday.requestCount - Number(key.todayUsage || 0),
+            totalTokens: displayToday.totalTokens - Number(key.todayTotalTokens || 0)
+        };
+        return next;
+    });
+    return result;
+}
+
+async function loadDisplayUsageSnapshots(conversionModel) {
+    const [today, week, total] = await Promise.all([
+        loadLedgerRangeStatsForRange('today', conversionModel, { includeKeySummaries: true }),
+        loadLedgerRangeStatsForRange('7d', conversionModel, { includeKeySummaries: true }),
+        loadLedgerRangeStatsForRange('total', conversionModel, { includeKeySummaries: true })
+    ]);
+    return { today, '7d': week, total };
+}
+
 function getCachedOverview(costOptions = {}) {
     const cacheKey = getStatsCacheKey({ ...costOptions, compactHistory: true, compactAccounts: true });
     const now = Date.now();
@@ -177,7 +285,9 @@ function getCachedOverview(costOptions = {}) {
         compactHistory: true,
         compactAccounts: true,
         includeKeySummaries: true
-    }).then(stats => {
+    }).then(async stats => {
+        const snapshots = await loadDisplayUsageSnapshots(costOptions.conversionModel);
+        stats = overlayDisplayUsageOnStats(stats, snapshots);
         const keys = (stats.keySummaries || []).map(key => ({
             ...key,
             maskedKey: `${String(key.id || '').substring(0, 12)}...${String(key.id || '').slice(-4)}`
@@ -1233,7 +1343,12 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                 : detail === 'history'
                     ? { ...costOptions, compactAccounts: true }
                     : costOptions;
-            const stats = enrichPotluckStatsAccountEmails(shapeStatsByDetail(await getCachedStats(statsOptions), detail));
+            const rawStats = await getCachedStats(statsOptions);
+            const displayStats = overlayDisplayUsageOnStats(
+                rawStats,
+                await loadDisplayUsageSnapshots(costOptions.conversionModel)
+            );
+            const stats = enrichPotluckStatsAccountEmails(shapeStatsByDetail(displayStats, detail));
             sendJson(res, 200, { success: true, data: stats });
             return true;
         }

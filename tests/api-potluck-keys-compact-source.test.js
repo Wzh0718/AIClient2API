@@ -68,6 +68,17 @@ describe('api potluck keys list compact source', () => {
         expect(source).toContain('overviewCache');
     });
 
+    test('overlays overview display counters from ledger-backed SQLite range snapshots', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'src/plugins/api-potluck/api-routes.js'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain('loadDisplayUsageSnapshots');
+        expect(source).toContain("loadLedgerRangeStatsForRange('today'");
+        expect(source).toContain("loadLedgerRangeStatsForRange('7d'");
+        expect(source).toContain("loadLedgerRangeStatsForRange('total'");
+        expect(source).toContain('overlayDisplayUsageOnStats');
+        expect(source).toContain('displayUsageSource');
+    });
+
     test('renders compact keys stats before awaiting full stats', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/potluck.html'), 'utf8').replace(/\r\n/g, '\n');
 
@@ -75,6 +86,15 @@ describe('api potluck keys list compact source', () => {
         expect(source).toContain('renderStatsSummary(compactStats);');
         expect(source).not.toContain('loadFullStatsInBackground');
         expect(source).toContain('/range-stats?range=');
+    });
+
+    test('refreshes today cards from the same SQLite range snapshot and labels delayed statistics', () => {
+        const html = fs.readFileSync(path.join(process.cwd(), 'static/potluck.html'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(html).toContain('applyTodayDisplaySnapshot');
+        expect(html).toContain("range === 'today'");
+        expect(html).toContain('统计可能延迟数秒');
+        expect(html).toContain('key.dailyLimit');
     });
 
     test('uses an explicit list response allowlist and on-demand secret detail', () => {

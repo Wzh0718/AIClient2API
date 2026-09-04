@@ -2499,6 +2499,51 @@
                 document.getElementById('maxTps').textContent = (stats.maxTps || 0).toFixed(2);
         }
 
+        function applyTodayDisplaySnapshot(snapshot) {
+            if (!snapshot || !currentStats || !Array.isArray(allKeys)) return;
+            const summary = snapshot.summary || {};
+            currentStats = {
+                ...currentStats,
+                todayTotalUsage: Number(summary.requestCount || 0),
+                todayPromptTokens: Number(summary.promptTokens || 0),
+                todayCompletionTokens: Number(summary.completionTokens || 0),
+                todayReasoningTokens: Number(summary.reasoningTokens || 0),
+                todayTotalTokens: Number(summary.totalTokens || 0),
+                todayCachedTokens: Number(summary.cachedTokens || 0),
+                todayCacheHitRatio: Number(summary.cacheHitRatio || 0),
+                displayUsageSource: snapshot.source || 'sqlite/ledger',
+                displayUsageDate: snapshot.from || getTodayDateKey(),
+                displayUsageReadAt: new Date().toISOString()
+            };
+            const statsHealthBadge = document.getElementById('statsHealthBadge');
+            if (statsHealthBadge) {
+                statsHealthBadge.textContent = '统计可能延迟数秒';
+                statsHealthBadge.className = 'stats-meta-badge';
+                statsHealthBadge.title = '统计以 SQLite/ledger 为准，写入完成前可能存在秒级延迟。';
+            }
+            const keySummaries = snapshot.keySummaries || {};
+            allKeys = allKeys.map(key => {
+                const keySummary = keySummaries[key.keyRef || key.id];
+                if (!keySummary?.summary) return key;
+                const usage = keySummary.summary;
+                return {
+                    ...key,
+                    todayUsage: Number(usage.requestCount || 0),
+                    todayPromptTokens: Number(usage.promptTokens || 0),
+                    todayCompletionTokens: Number(usage.completionTokens || 0),
+                    todayReasoningTokens: Number(usage.reasoningTokens || 0),
+                    todayTotalTokens: Number(usage.totalTokens || 0),
+                    todayCachedTokens: Number(usage.cachedTokens || 0),
+                    todayCacheHitRatio: Number(usage.cacheHitRatio || 0),
+                    displayUsageSource: snapshot.source || 'sqlite/ledger',
+                    displayUsageDate: snapshot.from || getTodayDateKey(),
+                    displayUsageReadAt: currentStats.displayUsageReadAt,
+                    displayUsageLastEventAt: usage.lastUsedAt || null
+                };
+            });
+            renderStatsSummary(currentStats);
+        }
+
         async function loadData() {
             try {
                 loadReconciliationStatus();
@@ -2513,7 +2558,10 @@
                 allKeys = keys;
                 applyFilterAndSort();
                 // 先等 ledger 区间统计就绪再渲染分布，避免 live 兜底与 ledger 两套数据闪烁
-                await refreshLedgerRangeStats(currentUsageRange, { force: true });
+                const loadedRangeStats = await refreshLedgerRangeStats(currentUsageRange, { force: true });
+                if (loadedRangeStats && currentUsageRange === 'today') {
+                    applyTodayDisplaySnapshot(loadedRangeStats);
+                }
                 // 首次加载也要渲染日历；切换时间范围时 setUsageRange 会再次触发这里。
                 renderCalendar(currentStats?.usageHistory || {});
                 if (currentDetailKeyId) showKeyDetail(currentDetailKeyId);
@@ -3256,6 +3304,9 @@
                 if (currentDetailKeyId) showKeyDetail(currentDetailKeyId);
                 showToast('时间范围加载失败', 'error');
                 return;
+            }
+            if (loaded && currentUsageRange === 'today') {
+                applyTodayDisplaySnapshot(loaded);
             }
             applyFilterAndSort();
 
