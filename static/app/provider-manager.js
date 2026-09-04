@@ -447,12 +447,20 @@ function renderCredentialGroupKeyTable(keys, emptyKey = 'providers.credentialGro
             </tr></thead>
             <tbody>${visibleKeys.map(key => {
                 const fixed = key?.fixedCredential?.credentialRef || t('providers.credentialGroups.unknown');
-                const isFixed = key?.routingMode === 'fixed';
+                const routingMode = typeof key?.routingMode === 'string'
+                    ? key.routingMode.trim().toLowerCase()
+                    : 'pool';
+                const isFixed = routingMode === 'fixed';
+                const isAuto = routingMode === 'auto';
                 const routeBadge = credentialGroupBadge(
-                    isFixed ? t('providers.credentialGroups.route.fixed') : t('providers.credentialGroups.route.auto'),
-                    isFixed ? 'is-fixed' : 'is-auto'
+                    isFixed
+                        ? t('providers.credentialGroups.route.fixed')
+                        : isAuto
+                            ? t('providers.credentialGroups.route.auto')
+                            : t('providers.credentialGroups.route.pool'),
+                    isFixed ? 'is-fixed' : isAuto ? 'is-auto' : 'is-neutral'
                 );
-                const spillover = !isFixed && key?.spilloverPolicy === 'cross-group-when-primary-unavailable'
+                const spillover = isAuto && key?.spilloverPolicy === 'cross-group-when-primary-unavailable'
                     ? credentialGroupBadge(t('providers.credentialGroups.route.spillover'), 'is-neutral')
                     : '';
                 const lockBadge = key?.manualLock === true
@@ -464,7 +472,7 @@ function renderCredentialGroupKeyTable(keys, emptyKey = 'providers.credentialGro
                 const enabledBadge = key?.enabled === false
                     ? credentialGroupBadge(t('providers.credentialGroups.status.disabled'), 'is-disabled')
                     : credentialGroupBadge(t('providers.credentialGroups.status.available'), 'is-available');
-                const primaryGroup = isFixed
+                const primaryGroup = !isAuto
                     ? t('providers.credentialGroups.notAvailable')
                     : (key?.primaryGroupId || t('providers.credentialGroups.route.noPrimary'));
                 return `<tr>

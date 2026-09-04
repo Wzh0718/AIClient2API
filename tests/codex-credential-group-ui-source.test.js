@@ -141,6 +141,14 @@ describe('Codex credential-group UI source', () => {
         expect(potluckHtml).not.toMatch(/<div class="key-id">[^\n]+<\/div>\s*\$\{renderKeyRoutingSummary\(key\)\}/u);
     });
 
+    test('renders pool and auto routing distinctly in the credential-group key table', () => {
+        expect(providerManager).toContain("const routingMode = typeof key?.routingMode === 'string'");
+        expect(providerManager).toContain("const isAuto = routingMode === 'auto';");
+        expect(providerManager).toContain("t('providers.credentialGroups.route.pool')");
+        expect(providerManager).toContain("isAuto && key?.spilloverPolicy === 'cross-group-when-primary-unavailable'");
+        expect(providerManager).toContain("const primaryGroup = !isAuto");
+    });
+
     test('lets administrators switch a Key between pool, auto, and fixed routing', () => {
         expect(potluckHtml).toContain('id="editRoutingModal"');
         expect(potluckHtml).toContain('id="routingMode"');
