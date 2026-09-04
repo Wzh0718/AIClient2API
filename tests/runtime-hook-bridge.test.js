@@ -452,7 +452,10 @@ describe('RuntimeHookBridge', () => {
                     elasticQueueWaitMs: 4000,
                     availabilityRefreshMs: 50,
                     elasticAttemptCount: 3,
-                    selectionComputeMs: 1000
+                    selectionPlanFilterMs: 10,
+                    selectionRankMs: 20,
+                    selectionHydrateMs: 400,
+                    selectionComputeMs: 520
                 }
             }
         });
@@ -461,7 +464,10 @@ describe('RuntimeHookBridge', () => {
             elasticQueueWaitMs: 4000,
             availabilityRefreshMs: 50,
             elasticAttemptCount: 3,
-            selectionComputeMs: 1000
+            selectionPlanFilterMs: 10,
+            selectionRankMs: 20,
+            selectionHydrateMs: 400,
+            selectionComputeMs: 520
         });
     });
 });

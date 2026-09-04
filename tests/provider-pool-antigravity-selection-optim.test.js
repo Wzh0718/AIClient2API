@@ -1,6 +1,7 @@
 import { jest } from '@jest/globals';
 import crypto from 'crypto';
 import { ProviderPoolManager } from '../src/providers/provider-pool-manager.js';
+import requestContext, { readRoutingWaits } from '../src/utils/context.js';
 
 jest.mock('../src/providers/adapter.js', () => ({
     getServiceAdapter: jest.fn(),
@@ -66,5 +67,45 @@ describe('Antigravity selection hot-path optimizations', () => {
         spy.mockRestore();
         expect(first).toBe(second);
         expect(created).toBe(1);
+    });
+
+    test('does not hydrate Codex pool snapshots for Antigravity acquireSlot', async () => {
+        const coordination = {
+            getRuntimeSnapshot: jest.fn(async () => null),
+            acquireRuntimeSnapshotLock: jest.fn(async () => 'lock-owner'),
+            releaseRuntimeSnapshotLock: jest.fn(async () => true),
+            setRuntimeSnapshot: jest.fn(async () => true),
+            acquire: jest.fn(async candidates => ({
+                leaseId: 'lease-1',
+                providerType: candidates[0].providerType,
+                uuid: candidates[0].uuid
+            })),
+            release: jest.fn(async () => true)
+        };
+        const manager = createManager([
+            provider('agy-a'),
+            provider('agy-b', { lastUsed: new Date(Date.now() - 30_000).toISOString() })
+        ]);
+        manager.coordination = coordination;
+
+        await requestContext.run({ requestId: 'no-codex-hydrate' }, async () => {
+            const selected = await manager.acquireSlot(providerType, 'gemini-2.5-flash-lite');
+            expect(selected?.uuid).toBeTruthy();
+            const waits = readRoutingWaits();
+            expect(waits.selectionHydrateMs).toBe(0);
+            expect(coordination.getRuntimeSnapshot.mock.calls
+                .map(([scope]) => String(scope || ''))
+                .filter(scope => scope.startsWith('codex-pool:'))).toEqual([]);
+            expect(coordination.acquireRuntimeSnapshotLock.mock.calls
+                .map(([scope]) => String(scope || ''))
+                .filter(scope => scope.startsWith('codex-pool:'))).toEqual([]);
+            expect(Object.keys(waits)).toEqual(expect.arrayContaining([
+                'selectionPlanFilterMs',
+                'selectionRankMs',
+                'selectionHydrateMs',
+                'availabilityRefreshMs',
+                'credentialLeaseWaitMs'
+            ]));
+        });
     });
 });

@@ -147,3 +147,8 @@ DECISION: 本轮只写诊断和观测计划，不改指纹默认、不改生产�
 关键决策：本地快照按候选 UUID、bucket、状态指纹和 usage timestamp 复用；共享快照作为跨 worker best-effort hydration；不缓存最终 provider 选择。
 验证：5 个相关 Jest suite、65 个测试通过；Node 语法检查和 git diff --check 通过；全量 Jest 运行超过 90 秒无输出后停止，未计为通过。
 边界修正：全池耗尽时不写普通空候选快照，继续保持 exhausted snapshot 的 429/fallback 语义。
+
+## Antigravity selection p50 - DONE - 2026-09-04T11:45:00+08:00
+产物：src/utils/context.js、src/providers/provider-pool-manager.js、src/services/service-manager.js、src/runtime/runtime-metrics.js、src/runtime/runtime-hook-bridge.js，以及对应 Jest。
+DECISION: 不能复用 Codex hydrate 到 Antigravity，acquireSlot 每次 Redis GET/锁等待才是 p50≈667ms 的未计量残差；分段计时后跳过该路径，冷却未到期的模型不再每秒 lease。
+验证：`npx.cmd jest tests/provider-pool- tests/antigravity- tests/runtime- --runInBand` 56 suites / 393 tests 通过。

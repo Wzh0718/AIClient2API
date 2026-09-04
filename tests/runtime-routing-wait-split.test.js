@@ -6,7 +6,10 @@ const emptyWaits = {
     credentialLeaseWaitMs: 0,
     elasticQueueWaitMs: 0,
     availabilityRefreshMs: 0,
-    elasticAttemptCount: 0
+    elasticAttemptCount: 0,
+    selectionPlanFilterMs: 0,
+    selectionRankMs: 0,
+    selectionHydrateMs: 0
 };
 
 describe('routing wait split', () => {
@@ -40,6 +43,9 @@ describe('routing wait split', () => {
             accumulateRoutingWait('elasticQueueWaitMs', 4000);
             accumulateRoutingWait('availabilityRefreshMs', 50);
             accumulateRoutingWait('elasticAttemptCount', 3);
+            accumulateRoutingWait('selectionPlanFilterMs', 10);
+            accumulateRoutingWait('selectionRankMs', 20);
+            accumulateRoutingWait('selectionHydrateMs', 400);
             const stages = computeSelectionStages(5300);
             expect(stages).toEqual({
                 providerFilterMs: 5300,
@@ -48,13 +54,19 @@ describe('routing wait split', () => {
                 elasticQueueWaitMs: 4000,
                 availabilityRefreshMs: 50,
                 elasticAttemptCount: 3,
-                selectionComputeMs: 950
+                selectionPlanFilterMs: 10,
+                selectionRankMs: 20,
+                selectionHydrateMs: 400,
+                selectionComputeMs: 520
             });
             expect(stages.providerFilterMs).toBe(
                 stages.keyQueueWaitMs
                 + stages.credentialLeaseWaitMs
                 + stages.elasticQueueWaitMs
                 + stages.availabilityRefreshMs
+                + stages.selectionPlanFilterMs
+                + stages.selectionRankMs
+                + stages.selectionHydrateMs
                 + stages.selectionComputeMs
             );
         });

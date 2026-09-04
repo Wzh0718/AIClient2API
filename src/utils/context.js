@@ -57,14 +57,17 @@ const EMPTY_ROUTING_WAITS = Object.freeze({
     credentialLeaseWaitMs: 0,
     elasticQueueWaitMs: 0,
     availabilityRefreshMs: 0,
-    elasticAttemptCount: 0
+    elasticAttemptCount: 0,
+    selectionPlanFilterMs: 0,
+    selectionRankMs: 0,
+    selectionHydrateMs: 0
 });
 
 /**
  * providerFilterMs mixes queueing with routing computation, which made a
  * seconds-long p50 look like a CPU hotspot. These accumulators keep waiting
  * separable for the request that is currently in flight.
- * @param {'keyQueueWaitMs'|'credentialLeaseWaitMs'|'elasticQueueWaitMs'|'availabilityRefreshMs'|'elasticAttemptCount'} kind
+ * @param {'keyQueueWaitMs'|'credentialLeaseWaitMs'|'elasticQueueWaitMs'|'availabilityRefreshMs'|'elasticAttemptCount'|'selectionPlanFilterMs'|'selectionRankMs'|'selectionHydrateMs'} kind
  * @param {number} waitMs
  */
 export function accumulateRoutingWait(kind, waitMs) {
@@ -82,7 +85,10 @@ export function readRoutingWaits() {
         credentialLeaseWaitMs: Math.max(0, Number(waits?.credentialLeaseWaitMs) || 0),
         elasticQueueWaitMs: Math.max(0, Number(waits?.elasticQueueWaitMs) || 0),
         availabilityRefreshMs: Math.max(0, Number(waits?.availabilityRefreshMs) || 0),
-        elasticAttemptCount: Math.max(0, Number(waits?.elasticAttemptCount) || 0)
+        elasticAttemptCount: Math.max(0, Number(waits?.elasticAttemptCount) || 0),
+        selectionPlanFilterMs: Math.max(0, Number(waits?.selectionPlanFilterMs) || 0),
+        selectionRankMs: Math.max(0, Number(waits?.selectionRankMs) || 0),
+        selectionHydrateMs: Math.max(0, Number(waits?.selectionHydrateMs) || 0)
     };
 }
 
@@ -93,6 +99,9 @@ export function computeSelectionStages(totalMs, waits = readRoutingWaits()) {
     const elasticQueueWaitMs = Math.max(0, Number(waits.elasticQueueWaitMs) || 0);
     const availabilityRefreshMs = Math.max(0, Number(waits.availabilityRefreshMs) || 0);
     const elasticAttemptCount = Math.max(0, Number(waits.elasticAttemptCount) || 0);
+    const selectionPlanFilterMs = Math.max(0, Number(waits.selectionPlanFilterMs) || 0);
+    const selectionRankMs = Math.max(0, Number(waits.selectionRankMs) || 0);
+    const selectionHydrateMs = Math.max(0, Number(waits.selectionHydrateMs) || 0);
     return {
         providerFilterMs,
         keyQueueWaitMs,
@@ -100,7 +109,10 @@ export function computeSelectionStages(totalMs, waits = readRoutingWaits()) {
         elasticQueueWaitMs,
         availabilityRefreshMs,
         elasticAttemptCount,
-        selectionComputeMs: Math.max(0, providerFilterMs - keyQueueWaitMs - credentialLeaseWaitMs - elasticQueueWaitMs - availabilityRefreshMs)
+        selectionPlanFilterMs,
+        selectionRankMs,
+        selectionHydrateMs,
+        selectionComputeMs: Math.max(0, providerFilterMs - keyQueueWaitMs - credentialLeaseWaitMs - elasticQueueWaitMs - availabilityRefreshMs - selectionPlanFilterMs - selectionRankMs - selectionHydrateMs)
     };
 }
 

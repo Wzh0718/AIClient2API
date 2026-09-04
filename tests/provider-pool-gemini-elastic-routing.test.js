@@ -251,6 +251,80 @@ describe('Antigravity elastic queue and model fallback', () => {
         expect(firstPass).toEqual([sourceModel, firstFallback, secondFallback]);
     });
 
+    test('skips models no credential supports and fast-fails a fully cooling chain', async () => {
+        const longCool = coolingUntil(60_000);
+        const manager = createManager([
+            provider('gemini-a', {
+                [sourceModel]: longCool,
+                [firstFallback]: longCool,
+                [secondFallback]: longCool
+            })
+        ], {
+            maxQueueWaitMs: 4000,
+            preferOriginalWaitMs: 0,
+            fallbackModels: [firstFallback, secondFallback, 'gemini-3.8-flash-high']
+        });
+        const attempts = jest.spyOn(manager, '_tryAntigravityElasticModel');
+
+        await expect(manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: 'key-a'
+        })).rejects.toMatchObject({
+            status: 429,
+            code: 'ALL_MODELS_UNAVAILABLE'
+        });
+
+        const modelsTried = attempts.mock.calls.map(([, model]) => model);
+        expect(modelsTried).toEqual([sourceModel, firstFallback, secondFallback]);
+        expect(modelsTried).not.toContain('gemini-3.8-flash-high');
+    });
+
+    test('does not re-lease models whose cooldown has not expired', async () => {
+        const manager = createManager([
+            provider('gemini-a', {
+                [sourceModel]: coolingUntil(60_000),
+                [firstFallback]: coolingUntil(80),
+                [secondFallback]: coolingUntil(60_000)
+            })
+        ], { maxQueueWaitMs: 220, preferOriginalWaitMs: 0 });
+        const attempts = jest.spyOn(manager, '_tryAntigravityElasticModel');
+
+        const result = await manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: 'key-a'
+        });
+
+        expect(result.actualModel).toBe(firstFallback);
+        expect(attempts.mock.calls.filter(([, model]) => model === sourceModel)).toHaveLength(1);
+        expect(attempts.mock.calls.filter(([, model]) => model === secondFallback)).toHaveLength(1);
+        expect(attempts.mock.calls.filter(([, model]) => model === firstFallback).length).toBeGreaterThanOrEqual(2);
+    });
+
+    test('waits for short model recovery instead of re-leasing on a one-second cadence', async () => {
+        const coordination = {
+            acquire: jest.fn(async candidates => ({
+                leaseId: `lease-${candidates[0].uuid}`,
+                providerType: candidates[0].providerType,
+                uuid: candidates[0].uuid
+            })),
+            acquireGeminiQueueSlot: jest.fn(async () => ({ leaseId: 'queue-1' })),
+            releaseGeminiQueueSlot: jest.fn(async () => true),
+            release: jest.fn(async () => true)
+        };
+        const manager = createCoordinatedManager([
+            provider('gemini-a', {
+                [sourceModel]: coolingUntil(1500),
+                [firstFallback]: coolingUntil(1500),
+                [secondFallback]: coolingUntil(1500)
+            })
+        ], coordination, { maxQueueWaitMs: 1400, preferOriginalWaitMs: 0 });
+        const attempts = jest.spyOn(manager, '_tryAntigravityElasticModel');
+
+        await expect(manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: 'key-a'
+        })).rejects.toMatchObject({ status: 429 });
+
+        expect(attempts.mock.calls.length).toBeLessThanOrEqual(6);
+    });
+
     test('retries quota-cooled models after a wake and succeeds when they recover', async () => {
         const manager = createManager([
             provider('gemini-a', {

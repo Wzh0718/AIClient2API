@@ -1943,7 +1943,17 @@ export class ProviderPoolManager {
     }
 
     async _hydrateCodexPoolSnapshot(providerType, providers, requestedModel) {
+        if (!isCodexProviderType(providerType)) return;
         if (!this.coordination?.getRuntimeSnapshot || !providers?.length) return;
+        const startedAt = performance.now();
+        try {
+            await this._hydrateCodexPoolSnapshotUnmetered(providerType, providers, requestedModel);
+        } finally {
+            accumulateRoutingWait('selectionHydrateMs', performance.now() - startedAt);
+        }
+    }
+
+    async _hydrateCodexPoolSnapshotUnmetered(providerType, providers, requestedModel) {
         const bucket = resolveCodexQuotaBucket(
             requestedModel,
             toStringArray(this.globalConfig?.CODEX_53_QUOTA_MODEL_PATTERNS || this.globalConfig?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS)
@@ -3255,6 +3265,15 @@ export class ProviderPoolManager {
     }
 
     _filterAntigravityProvidersByPlan(providerType, providers, selectionDiagnostics = null) {
+        const startedAt = performance.now();
+        try {
+            return this._filterAntigravityProvidersByPlanUnmetered(providerType, providers, selectionDiagnostics);
+        } finally {
+            accumulateRoutingWait('selectionPlanFilterMs', performance.now() - startedAt);
+        }
+    }
+
+    _filterAntigravityProvidersByPlanUnmetered(providerType, providers, selectionDiagnostics = null) {
         const usageCache = readFreshUsageCacheSync();
         if (this._antigravityPlanFilterCache.usageCache !== usageCache) {
             this._antigravityPlanFilterCache = { usageCache, byUuid: new Map() };
@@ -4101,17 +4120,27 @@ export class ProviderPoolManager {
     }
 
     _shouldFastFailAntigravityModels(errors, models) {
-        const recoveryTimes = (errors || [])
-            .map(error => this._getRecoveryTimeFromError(error))
-            .filter(value => Number.isFinite(value) && value > Date.now());
-        const nearestRecoveryMs = recoveryTimes.length > 0
-            ? Math.min(...recoveryTimes) - Date.now()
+        if (!Array.isArray(errors) || errors.length !== models.length || errors.length === 0) return false;
+        if (!errors.every(error => error?.quotaScope === 'model')) return false;
+        const recoveryTimes = errors.map(error => this._getRecoveryTimeFromError(error));
+        if (recoveryTimes.some(value => Number.isFinite(value) && value <= Date.now())) return false;
+        const futureRecoveries = recoveryTimes.filter(value => Number.isFinite(value) && value > Date.now());
+        const nearestRecoveryMs = futureRecoveries.length > 0
+            ? Math.min(...futureRecoveries) - Date.now()
             : null;
+        return nearestRecoveryMs === null || nearestRecoveryMs > 2000;
+    }
+
+    _isAntigravityModelStillCooling(error, now = Date.now()) {
+        if (error?.quotaScope !== 'model') return false;
+        const recovery = this._getRecoveryTimeFromError(error);
+        return Number.isFinite(recovery) && recovery > now;
+    }
+
+    _shouldWaitOnlyForModelRecovery(errors) {
         return Array.isArray(errors)
-            && errors.length === models.length
             && errors.length > 0
-            && errors.every(error => error?.quotaScope === 'model')
-            && (nearestRecoveryMs === null || nearestRecoveryMs > 2000);
+            && errors.every(error => error?.quotaScope === 'model');
     }
 
     async _acquireAntigravityElasticSlot(providerType, requestedModel, options = {}) {
@@ -4122,6 +4151,7 @@ export class ProviderPoolManager {
             attemptedModels: [],
             passAttemptedModels: [],
             skippedNotFoundModels: [],
+            modelErrors: {},
             negativeCacheVersion: this._antigravityAvailabilityRevision,
             sourceModelCooldownMs: null
         };
@@ -4131,6 +4161,9 @@ export class ProviderPoolManager {
         requestRouting.skippedNotFoundModels = Array.isArray(requestRouting.skippedNotFoundModels)
             ? requestRouting.skippedNotFoundModels
             : [];
+        requestRouting.modelErrors = requestRouting.modelErrors && typeof requestRouting.modelErrors === 'object'
+            ? requestRouting.modelErrors
+            : {};
         requestStore.antigravityRouting = requestRouting;
         const configuredFallbacks = Array.isArray(policy.fallbackModels) ? policy.fallbackModels : [];
         const availableModels = this._getAntigravityVerifiedModels(providerType);
@@ -4171,6 +4204,12 @@ export class ProviderPoolManager {
                     this._antigravityRoutingMetrics.retrySuppressed += 1;
                     continue;
                 }
+                const priorError = requestRouting.modelErrors[model];
+                if (this._isAntigravityModelStillCooling(priorError)) {
+                    this._antigravityRoutingMetrics.retrySuppressed += 1;
+                    latestErrors.push(priorError);
+                    continue;
+                }
                 if (requestRouting.passAttemptedModels.includes(model)) {
                     this._antigravityRoutingMetrics.retrySuppressed += 1;
                     continue;
@@ -4197,6 +4236,7 @@ export class ProviderPoolManager {
                     };
                 }
                 markStructuralSkip(model, attempt.error);
+                if (attempt.error) requestRouting.modelErrors[model] = attempt.error;
                 latestErrors.push(attempt.error);
             }
             return null;
@@ -4220,6 +4260,7 @@ export class ProviderPoolManager {
                     };
                 }
                 markStructuralSkip(requestedModel, sourceAttempt.error);
+                if (sourceAttempt.error) requestRouting.modelErrors[requestedModel] = sourceAttempt.error;
             }
 
             const sourceRecovery = this._getRecoveryTimeFromError(sourceAttempt.error);
@@ -4261,6 +4302,7 @@ export class ProviderPoolManager {
                         queueWaitMs: Date.now() - startedAt
                     };
                 }
+                if (recovered.error) requestRouting.modelErrors[requestedModel] = recovered.error;
             }
 
             const immediateFallback = await attemptModels({ includeSource: false });
@@ -4285,8 +4327,10 @@ export class ProviderPoolManager {
                 const nearestRecovery = recoveryTimes.length > 0 ? Math.min(...recoveryTimes) : null;
                 const remainingMs = Math.max(1, deadline - now);
                 const recoveryDelay = nearestRecovery ? Math.max(1, nearestRecovery - now) : remainingMs;
+                const quotaOnly = nearestRecovery !== null && this._shouldWaitOnlyForModelRecovery(latestErrors);
+                const wakeCapMs = (!quotaOnly && this.coordination) ? 1000 : remainingMs;
                 await this._waitForGeminiElasticWakeTracked({
-                    timeoutMs: Math.min(remainingMs, recoveryDelay, this.coordination ? 1000 : remainingMs),
+                    timeoutMs: Math.min(remainingMs, recoveryDelay, wakeCapMs),
                     abortSignal: options.abortSignal,
                     providerType
                 });
@@ -4301,6 +4345,9 @@ export class ProviderPoolManager {
                 if (selected) {
                     selected.queueOutcome = selected.isFallback ? 'fallback_after_wait' : 'recovered_original';
                     return selected;
+                }
+                if (this._shouldFastFailAntigravityModels(latestErrors, models)) {
+                    throw this._createAntigravityAllModelsUnavailableError(requestedModel, latestErrors);
                 }
             }
 
@@ -5162,6 +5209,15 @@ export class ProviderPoolManager {
     }
 
     _orderCoordinatedCandidates(candidates, providerType, requestedModel, options = {}) {
+        const startedAt = performance.now();
+        try {
+            return this._orderCoordinatedCandidatesUnmetered(candidates, providerType, requestedModel, options);
+        } finally {
+            accumulateRoutingWait('selectionRankMs', performance.now() - startedAt);
+        }
+    }
+
+    _orderCoordinatedCandidatesUnmetered(candidates, providerType, requestedModel, options = {}) {
         if (candidates.length <= 1) return candidates;
         if (options.stickyProviderKey) {
             const remaining = [...candidates];

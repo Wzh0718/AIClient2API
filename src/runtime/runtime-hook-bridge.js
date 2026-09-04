@@ -78,6 +78,7 @@ function compactMetadata(context = {}) {
     const allowedStages = new Set([
         'providerFilterMs', 'keyQueueWaitMs', 'selectionComputeMs',
         'redisLeaseMs', 'elasticQueueWaitMs', 'availabilityRefreshMs', 'elasticAttemptCount',
+        'selectionPlanFilterMs', 'selectionRankMs', 'selectionHydrateMs',
         'identityReadMs', 'identityPersistLockWaitMs',
         'identityPersistIoMs', 'requestConvertMs', 'systemPromptPersistMs',
         'upstreamFirstByteMs', 'upstreamCompleteMs', 'responseFinalizeMs', 'complete'

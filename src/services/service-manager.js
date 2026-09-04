@@ -843,6 +843,9 @@ function recordProviderFilterStages(startedAt) {
     record('elasticQueueWaitMs', stages.elasticQueueWaitMs);
     record('availabilityRefreshMs', stages.availabilityRefreshMs);
     record('elasticAttemptCount', stages.elasticAttemptCount);
+    record('selectionPlanFilterMs', stages.selectionPlanFilterMs);
+    record('selectionRankMs', stages.selectionRankMs);
+    record('selectionHydrateMs', stages.selectionHydrateMs);
     record('selectionComputeMs', stages.selectionComputeMs);
 }
 
