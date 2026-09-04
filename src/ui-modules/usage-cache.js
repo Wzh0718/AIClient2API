@@ -86,10 +86,45 @@ function recalculateProviderCounts(providerData = {}) {
     return providerData;
 }
 
+export function mergeCodexResetCreditsWithLastSuccessfulUsage(incomingInstance, cachedInstance, cachedAt) {
+    if (!incomingInstance?.success || !incomingInstance?.usage?.summary || incomingInstance?.usage?.summary?.rateLimitResetCredits) {
+        return incomingInstance;
+    }
+
+    const cachedSummary = cachedInstance?.success ? cachedInstance.usage?.summary : null;
+    const cachedCredits = cachedSummary?.rateLimitResetCredits;
+    if (!cachedCredits || typeof cachedCredits !== 'object') return incomingInstance;
+
+    const error = incomingInstance.usage.summary.rateLimitResetCreditsRefreshError
+        || incomingInstance.lastRefreshError
+        || incomingInstance.error
+        || 'upstream_unavailable';
+    const errorClass = /429/.test(error) ? 'upstream_429'
+        : /503/.test(error) ? 'upstream_503'
+            : /econnreset|socket hang up|econnrefused|network|timeout/i.test(error) ? 'network'
+                : 'upstream_unavailable';
+    return {
+        ...incomingInstance,
+        usage: {
+            ...incomingInstance.usage,
+            summary: {
+                ...incomingInstance.usage.summary,
+                rateLimitResetCredits: cachedCredits,
+                rateLimitResetCreditsStale: true,
+                rateLimitResetCreditsLastSuccessfulAt: cachedSummary.rateLimitResetCreditsLastSuccessfulAt
+                    || cachedInstance.lastSuccessfulUsageAt
+                    || cachedAt
+                    || null,
+                rateLimitResetCreditsRefreshError: errorClass
+            }
+        }
+    };
+}
+
 function mergeInstanceWithLastSuccessfulUsage(incomingInstance, cachedByUuid, cachedAt) {
     const cachedInstance = cachedByUuid.get(incomingInstance?.uuid);
     if (incomingInstance?.success || !incomingInstance?.error) {
-        return incomingInstance;
+        return mergeCodexResetCreditsWithLastSuccessfulUsage(incomingInstance, cachedInstance, cachedAt);
     }
 
     if (!cachedInstance?.success || !cachedInstance.usage) {

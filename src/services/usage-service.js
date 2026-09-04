@@ -1115,6 +1115,7 @@ export function formatCodexUsage(usageData) {
         extractCodexProfileTokenUsage(usageData)
     );
     const rateLimitResetCredits = extractCodexRateLimitResetCredits(usageData);
+    const resetCreditsError = usageData.rate_limit_reset_credits_error || usageData.rateLimitResetCreditsError || null;
     const summaryUsedPercent = summaryWindow?.usedPercent ?? 0;
     const summaryResetAtTimestamp = summaryWindow?.resetAt ?? null;
     if (tokenUsage) {
@@ -1156,6 +1157,15 @@ export function formatCodexUsage(usageData) {
             tokenUsageAvailable: Boolean(tokenUsage),
             tokenUsageUnavailableReason: tokenUsage ? null : 'official_usage_token_fields_missing',
             rateLimitResetCredits,
+            rateLimitResetCreditsStale: false,
+            rateLimitResetCreditsLastSuccessfulAt: null,
+            rateLimitResetCreditsRefreshError: resetCreditsError?.status === 429
+                ? 'upstream_429'
+                : resetCreditsError?.status === 503
+                    ? 'upstream_503'
+                    : resetCreditsError
+                        ? (/timeout|network|econnreset|socket hang up/i.test(String(resetCreditsError.message || '')) ? 'network' : 'upstream_unavailable')
+                        : null,
             resetAvailableCount,
             quotaApplicability: getCodexQuotaApplicability(usageData)
         },

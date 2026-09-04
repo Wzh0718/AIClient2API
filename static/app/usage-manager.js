@@ -1304,20 +1304,26 @@ function renderUsageDetails(usage, accountSummary = null, instance = {}) {
         container.appendChild(total);
     }
 
-    if (summary?.rateLimitResetCredits) {
+    if (summary?.rateLimitResetCredits || summary?.rateLimitResetCreditsStale) {
         const credits = summary.rateLimitResetCredits;
         const availableCount = getCodexResetAvailableCount(credits);
         const canReset = canUseCodexRateLimitReset(credits);
-        const resetCreditsTooltip = formatCodexResetCreditsTooltip(credits);
+        const stale = summary.rateLimitResetCreditsStale === true;
+        const staleAt = summary.rateLimitResetCreditsLastSuccessfulAt
+            ? formatDate(summary.rateLimitResetCreditsLastSuccessfulAt)
+            : '--';
+        const resetCreditsTooltip = stale
+            ? `上次成功数据 · ${staleAt}`
+            : formatCodexResetCreditsTooltip(credits);
         const buttonTitle = canReset
             ? `Use Codex rate-limit reset (${availableCount} available)`
             : 'No Codex rate-limit resets available';
         const resetInfo = document.createElement('div');
-        resetInfo.className = 'usage-section usage-reset-credits';
+        resetInfo.className = `usage-section usage-reset-credits${stale ? ' is-stale' : ''}`;
         resetInfo.innerHTML = `
             <div class="codex-reset-action-row">
                 <div class="codex-reset-meta">
-                    <span class="codex-reset-icon"><i class="fas fa-rotate-left"></i></span>
+                    <span class="codex-reset-icon"><i class="fas fa-rotate-left"></i>${stale ? '<i class="fas fa-circle-exclamation codex-reset-stale-icon" aria-label="上次成功数据"></i>' : ''}</span>
                     <div class="codex-reset-copy">
                         <span class="codex-reset-label">Rate-limit resets</span>
                         <span class="codex-reset-count" title="${escapeHtml(resetCreditsTooltip)}">${availableCount} available</span>

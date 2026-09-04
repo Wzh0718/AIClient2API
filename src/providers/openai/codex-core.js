@@ -1477,6 +1477,7 @@ export class CodexApiService {
             }
 
             let rateLimitResetCredits = usageData.rate_limit_reset_credits || usageData.rateLimitResetCredits || null;
+            let rateLimitResetCreditsError = null;
             try {
                 rateLimitResetCredits = await this.requestCodexUsageJson(resetCreditsUrl, headers);
             } catch (resetCreditsError) {
@@ -1484,12 +1485,17 @@ export class CodexApiService {
                     throw resetCreditsError;
                 }
                 logger.warn('[Codex] Failed to get rate limit reset credit details:', resetCreditsError.message);
+                rateLimitResetCreditsError = {
+                    status: resetCreditsError.response?.status || null,
+                    message: resetCreditsError.message
+                };
             }
 
             return {
                 ...usageData,
                 token_usage_profile: tokenUsageProfile,
                 rate_limit_reset_credits: rateLimitResetCredits,
+                rate_limit_reset_credits_error: rateLimitResetCreditsError,
                 account: this.email
             };
         } catch (error) {

@@ -196,6 +196,85 @@ describe('usage cache TTL', () => {
         expect(cache.providers['openai-codex-oauth'].errorCount).toBe(0);
     });
 
+    test('write reuses last successful Codex reset credits when the current field is unavailable', async () => {
+        writeCache({
+            timestamp: '2026-06-16T11:50:00.000Z',
+            providers: {
+                'openai-codex-oauth': {
+                    providerType: 'openai-codex-oauth',
+                    lastSuccessfulRefreshAt: '2026-06-16T11:50:00.000Z',
+                    instances: [{
+                        uuid: 'codex-a',
+                        success: true,
+                        usage: {
+                            summary: {
+                                usedPercent: 42,
+                                rateLimitResetCredits: { availableCount: 1, canReset: true }
+                            }
+                        }
+                    }]
+                }
+            }
+        });
+
+        const { writeUsageCache, readUsageCache } = await loadUsageCacheModule();
+        await writeUsageCache({
+            timestamp: '2026-06-16T12:00:00.000Z',
+            providers: {
+                'openai-codex-oauth': {
+                    providerType: 'openai-codex-oauth',
+                    instances: [{
+                        uuid: 'codex-a',
+                        success: true,
+                        usage: {
+                            summary: { usedPercent: 55, rateLimitResetCredits: null }
+                        }
+                    }]
+                }
+            }
+        });
+
+        const cache = await readUsageCache({ maxAgeMs: null });
+        const summary = cache.providers['openai-codex-oauth'].instances[0].usage.summary;
+        expect(summary.usedPercent).toBe(55);
+        expect(summary.rateLimitResetCredits).toEqual({ availableCount: 1, canReset: true });
+        expect(summary.rateLimitResetCreditsStale).toBe(true);
+        expect(summary.rateLimitResetCreditsLastSuccessfulAt).toBe('2026-06-16T11:50:00.000Z');
+    });
+
+    test('write treats a successful zero reset-credit response as authoritative', async () => {
+        writeCache({
+            timestamp: '2026-06-16T11:50:00.000Z',
+            providers: {
+                'openai-codex-oauth': {
+                    instances: [{
+                        uuid: 'codex-a',
+                        success: true,
+                        usage: { summary: { rateLimitResetCredits: { availableCount: 1, canReset: true } } }
+                    }]
+                }
+            }
+        });
+
+        const { writeUsageCache, readUsageCache } = await loadUsageCacheModule();
+        await writeUsageCache({
+            providers: {
+                'openai-codex-oauth': {
+                    instances: [{
+                        uuid: 'codex-a',
+                        success: true,
+                        usage: { summary: { rateLimitResetCredits: { availableCount: 0, canReset: false } } }
+                    }]
+                }
+            }
+        });
+
+        const cache = await readUsageCache({ maxAgeMs: null });
+        const summary = cache.providers['openai-codex-oauth'].instances[0].usage.summary;
+        expect(summary.rateLimitResetCredits).toEqual({ availableCount: 0, canReset: false });
+        expect(summary.rateLimitResetCreditsStale).not.toBe(true);
+    });
+
     test('provider refresh stores an independent last successful refresh time', async () => {
         writeCache({
             timestamp: '2026-06-16T11:50:00.000Z',

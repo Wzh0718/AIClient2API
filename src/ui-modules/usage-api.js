@@ -6,7 +6,7 @@ import { readUsageCache, readUsageDisplayCache, writeUsageCache, writeUsageCache
 import { PROVIDER_MAPPINGS } from '../utils/provider-utils.js';
 import { MODEL_PROVIDER, getRequestBody } from '../utils/common.js';
 import { withFileLock } from '../utils/file-lock.js';
-import { normalizeAntigravityQuotaHealth } from './usage-cache.js';
+import { normalizeAntigravityQuotaHealth, mergeCodexResetCreditsWithLastSuccessfulUsage } from './usage-cache.js';
 import path from 'path';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import {
@@ -556,7 +556,7 @@ function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderDa
     const instances = (freshProviderData.instances || []).map(instance => {
         if (instance.success) {
             return {
-                ...instance,
+                ...mergeCodexResetCreditsWithLastSuccessfulUsage(instance, cachedByUuid.get(instance.uuid), cachedSuccessfulAt),
                 lastRefreshError: null
             };
         }
@@ -1276,10 +1276,20 @@ export async function handlePostCodexRateLimitReset(req, res, currentConfig, pro
         return true;
     } catch (error) {
         logger.error(`[UI API] Failed to reset Codex rate limit for ${providerType}:${uuid}:`, error);
+        const upstreamStatus = Number(error?.response?.status) || null;
+        const errorClass = upstreamStatus === 401
+            ? 'auth_401'
+            : upstreamStatus === 429
+                ? 'upstream_429'
+                : upstreamStatus === 503
+                    ? 'upstream_503'
+                    : classifyUsageRefreshError(error?.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             error: {
-                message: `Failed to reset Codex rate limit for ${providerType}:${uuid}: ` + error.message
+                message: `Failed to reset Codex rate limit for ${providerType}:${uuid}: ` + error.message,
+                class: errorClass,
+                upstreamStatus
             }
         }));
         return true;

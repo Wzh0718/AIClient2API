@@ -880,6 +880,17 @@
     padding: 0.5rem 0.625rem;
 }
 
+.usage-reset-credits.is-stale {
+    border-color: var(--warning-color, #f59e0b);
+}
+
+.usage-reset-credits.is-stale .codex-reset-stale-icon {
+    color: var(--warning-color, #f59e0b);
+    font-size: 0.72em;
+    margin-left: 0.2rem;
+    vertical-align: top;
+}
+
 .codex-reset-action-row {
     display: flex;
     align-items: center;
