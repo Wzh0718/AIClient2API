@@ -94,7 +94,9 @@ RUN mkdir -p /app/logs
 EXPOSE 3000 8085 8086 19876-19880
 
 # 添加健康检查
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+# 多 worker 启动期间 /health 会先返回 503 等待 provider 配置收敛，实测需要 35s 以上，
+# 5s 的 start-period 会让正常的滚动切换被误判成 unhealthy。
+HEALTHCHECK --interval=30s --timeout=3s --start-period=180s --retries=3 \
   CMD node healthcheck.js || exit 1
 
 # 设置启动命令
