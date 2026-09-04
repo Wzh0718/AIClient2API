@@ -579,6 +579,25 @@ function normalizeKeyRouting(routing = {}, { strict = false } = {}) {
     };
 }
 
+function resolveDefaultKeyRouting() {
+    try {
+        const filePath = process.env.CODEX_CREDENTIAL_GROUPS_FILE_PATH
+            || path.join(process.cwd(), 'configs', 'codex-credential-groups.json');
+        const store = JSON.parse(readFileSync(filePath, 'utf8'));
+        const revisions = Array.isArray(store.revisions) ? store.revisions : [];
+        const current = revisions.find(item => Number(item?.revision) === Number(store.currentRevision));
+        const firstGroup = (current?.config?.groups || []).find(group => (
+            typeof group?.id === 'string' && group.id.trim()
+        ));
+        if (firstGroup) return { routingMode: 'auto', primaryGroupId: firstGroup.id.trim() };
+    } catch (error) {
+        if (error?.code !== 'ENOENT') {
+            logger.warn(`[API Potluck] Failed to resolve default credential group: ${error.message}`);
+        }
+    }
+    return { routingMode: 'pool', primaryGroupId: null };
+}
+
 function createInvalidKeyRoutingAssignmentsError(message, details = null) {
     const error = new Error(message);
     error.code = 'INVALID_KEY_ROUTING_ASSIGNMENTS';
@@ -1992,7 +2011,7 @@ function checkAndResetDailyCount(keyData) {
  * @param {string} name - Key 名称
  * @param {number} [dailyLimit] - 每日限额，不传则使用配置的默认值
  */
-export async function createKey(name = '', dailyLimit = null) {
+export async function createKey(name = '', dailyLimit = null, options = {}) {
     ensureLoaded();
     const config = getConfig();
     const actualDailyLimit = dailyLimit ?? config.defaultDailyLimit ?? DEFAULT_CONFIG.defaultDailyLimit;
@@ -2001,6 +2020,7 @@ export async function createKey(name = '', dailyLimit = null) {
     const now = new Date().toISOString();
     const today = getTodayDateString();
 
+    const defaultRouting = normalizeKeyRouting(options.defaultRouting || resolveDefaultKeyRouting());
     const keyData = {
         id: apiKey,
         name: name || `Key-${Object.keys(keyStore.keys).length + 1}`,
@@ -2030,10 +2050,10 @@ export async function createKey(name = '', dailyLimit = null) {
         queueLimit: 0,
         queueTimeoutMs: 300000,
         concurrencyMode: 'shadow',
-        routingMode: 'pool',
-        primaryGroupId: null,
-        fixedCredential: null,
-        manualLock: false,
+        routingMode: defaultRouting.routingMode,
+        primaryGroupId: defaultRouting.primaryGroupId,
+        fixedCredential: defaultRouting.fixedCredential,
+        manualLock: defaultRouting.manualLock,
         usageHistory: {}
     };
 
@@ -2810,7 +2830,7 @@ export async function getStats(options = {}) {
                 maxTps: Math.max(toNumber(key.maxTps), rates.maxTps),
                 maxRpm: Math.max(toNumber(key.maxRpm), rates.maxRpm),
                 routingMode: key.routingMode || 'pool',
-                primaryGroupId: key.primaryGroupId || null,
+                primaryGroupId: key.routingMode === 'auto' ? (key.primaryGroupId || null) : null,
                 manualLock: key.manualLock === true,
                 edgeAdmissionMode: edgeAdmission.edgeAdmissionMode,
                 edgeAdmissionConcurrencyLimit: toNumber(edgeAdmission.edgeAdmissionConcurrencyLimit),

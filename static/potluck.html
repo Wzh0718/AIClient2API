@@ -594,6 +594,10 @@
             background: rgba(14, 165, 233, 0.10);
             border-color: rgba(14, 165, 233, 0.28);
         }
+        .key-routing-summary.is-invalid {
+            color: var(--danger-color);
+            border-color: color-mix(in srgb, var(--danger-color) 35%, var(--border-color));
+        }
         .key-concurrency-summary {
             margin-left: 6px;
             color: var(--text-secondary);
@@ -3427,18 +3431,22 @@
         }
 
         function renderKeyRoutingSummary(key) {
-            const isFixed = key?.routingMode === 'fixed';
-            const isPool = key?.routingMode === 'pool' || (key?.routingMode === 'auto' && !key?.primaryGroupId);
+            const routingMode = typeof key?.routingMode === 'string' ? key.routingMode.trim().toLowerCase() : '';
             const manualLockSuffix = key?.manualLock === true ? ' · 手工锁定' : '';
-            if (isFixed) {
+            if (routingMode === 'fixed') {
                 const summary = `固定凭据 · 禁止降级${manualLockSuffix}`;
                 const lockIcon = key?.manualLock === true ? '<i class="fas fa-lock" aria-hidden="true"></i>' : '';
                 return `<span class="key-routing-summary is-fixed" title="${escapeHtml(summary)}" aria-label="${escapeHtml(summary)}">fixed${lockIcon}</span>`;
             }
-            if (isPool) {
+            if (routingMode === 'pool') {
                 const summary = `全池加权 · 按权重、额度与负载选择${manualLockSuffix}`;
                 const lockIcon = key?.manualLock === true ? '<i class="fas fa-lock" aria-hidden="true"></i>' : '';
                 return `<span class="key-routing-summary is-pool" title="${escapeHtml(summary)}" aria-label="${escapeHtml(summary)}">pool${lockIcon}</span>`;
+            }
+
+            if (routingMode !== 'auto' || !String(key?.primaryGroupId || '').trim()) {
+                const summary = `路由状态异常 · 缺少有效路由配置${manualLockSuffix}`;
+                return `<span class="key-routing-summary is-invalid" title="${escapeHtml(summary)}" aria-label="${escapeHtml(summary)}">异常</span>`;
             }
 
             const primaryGroupId = typeof key?.primaryGroupId === 'string'

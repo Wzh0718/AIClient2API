@@ -25,4 +25,13 @@ describe('Potluck Key list UI layout source contract', () => {
         expect(html).toContain('key-action-danger');
         expect(html).toContain('@media (prefers-reduced-motion: reduce)');
     });
+
+    test('renders routing badges from explicit routing mode and flags incomplete auto assignments', () => {
+        const html = read('static/potluck.html');
+
+        expect(html).toContain("routingMode === 'pool'");
+        expect(html).toContain("routingMode !== 'auto' || !String(key?.primaryGroupId || '').trim()");
+        expect(html).toContain('路由状态异常');
+        expect(html).not.toContain("key?.routingMode === 'auto' && !key?.primaryGroupId");
+    });
 });

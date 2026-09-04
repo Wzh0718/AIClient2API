@@ -269,17 +269,49 @@ describe('API Potluck key credential routing', () => {
         expect(fixedRangeResponse.body.data.range).toBe('30d');
     });
 
-    test('creates new keys with explicit whole-pool routing defaults', async () => {
+    test('creates new keys with the first configured credential group as auto routing default', async () => {
+        fs.writeFileSync(
+            path.join(tempDir, 'configs', 'codex-credential-groups.json'),
+            JSON.stringify({
+                version: 1,
+                currentRevision: 1,
+                revisions: [{
+                    revision: 1,
+                    action: 'apply',
+                    createdAt: '2026-08-13T03:00:00.000Z',
+                    config: {
+                        groups: [
+                            { id: 'group-7', name: 'First', credentialUuids: ['cred-1'] },
+                            { id: 'group-2', name: 'Second', credentialUuids: ['cred-2'] }
+                        ],
+                        keyAssignments: []
+                    }
+                }]
+            }),
+            'utf8'
+        );
         const { plugin } = await loadPotluckModules();
         const created = await plugin.exports.createKey('Default Routing', 1000);
 
         expect(created).toMatchObject({
-            routingMode: 'pool',
-            primaryGroupId: null,
+            routingMode: 'auto',
+            primaryGroupId: 'group-7',
             fixedCredential: null,
             manualLock: false
         });
         expect(readStore().keys[created.id]).toMatchObject({
+            routingMode: 'auto',
+            primaryGroupId: 'group-7',
+            fixedCredential: null,
+            manualLock: false
+        });
+    });
+
+    test('falls back to whole-pool routing when no credential groups exist', async () => {
+        const { plugin } = await loadPotluckModules();
+        const created = await plugin.exports.createKey('No Group Routing', 1000);
+
+        expect(created).toMatchObject({
             routingMode: 'pool',
             primaryGroupId: null,
             fixedCredential: null,
