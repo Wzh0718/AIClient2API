@@ -152,3 +152,10 @@ DECISION: 本轮只写诊断和观测计划，不改指纹默认、不改生产�
 产物：src/utils/context.js、src/providers/provider-pool-manager.js、src/services/service-manager.js、src/runtime/runtime-metrics.js、src/runtime/runtime-hook-bridge.js，以及对应 Jest。
 DECISION: 不能复用 Codex hydrate 到 Antigravity，acquireSlot 每次 Redis GET/锁等待才是 p50≈667ms 的未计量残差；分段计时后跳过该路径，冷却未到期的模型不再每秒 lease。
 验证：`npx.cmd jest tests/provider-pool- tests/antigravity- tests/runtime- --runInBand` 56 suites / 393 tests 通过。
+
+## 生产发布 aa71dac - DONE - 2026-09-04T15:54:00+08:00
+生产 27 已从 d5e10df 切到 aa71dac，healthy，rollback state 保留在 /root/deployments/aiclient2api-20260904-154831。
+DECISION: 7226492 首次切换被误判 unhealthy 并自动回滚，根因是镜像 HEALTHCHECK start-period 只有 5s，而多 worker 启动期 /health 要等 provider 配置收敛约 35s 以上（回滚后的 d5e10df 自身也先返回 503）。改 Dockerfile 放宽到 180s，interval/timeout/retries 不变。
+DECISION: 不跑 blue-green prepare，因为它会对 23G 的 /root/ai_client_configs 打快照，而根分区只剩 3.2G。改用 cutover.sh 直接换容器，依赖其自动回滚。
+验证（切换后 4 分钟，n=2738）：selectionComputeMs p50 15ms / p95 144ms（目标 <150 / <500 达成，原 p50≈667ms、p95≈2.5s）；selectionHydrateMs p50 0 确认 Antigravity 不再走 Codex 快照；elasticAttemptCount p50/p95/p99 均为 1（原 p99=24）；elasticQueueWaitMs 全 0。
+待办：responseFinalizeMs p50 6.8s / p95 23s / p99 70s 与容器 CPU 318% 成为新的主要瓶颈；根分区 96%，request-audit 18G、usage-events 4G 未收敛。
