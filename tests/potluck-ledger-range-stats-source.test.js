@@ -1,11 +1,36 @@
 import fs from 'fs';
 import path from 'path';
+import { createLedgerRangeAggregator } from '../src/plugins/api-potluck/ledger-range-stats.js';
 
 function loadSource(relativePath) {
     return fs.readFileSync(path.join(process.cwd(), ...relativePath.split('/')), 'utf8').replace(/\r\n/g, '\n');
 }
 
 describe('API Potluck ledger range stats surface', () => {
+    test('range aggregation preserves the maximum peak rates across rows', () => {
+        const aggregator = createLedgerRangeAggregator();
+        aggregator.addRow({
+            date: '2026-09-03',
+            provider: 'provider-a',
+            model: 'model-a',
+            usage: { requestCount: 10, totalTokens: 100, maxQps: 2.5, maxRpm: 150, maxTps: 900 }
+        });
+        aggregator.addRow({
+            date: '2026-09-04',
+            provider: 'provider-a',
+            model: 'model-a',
+            usage: { requestCount: 20, totalTokens: 200, maxQps: 4.25, maxRpm: 255, maxTps: 1200 }
+        });
+
+        const result = aggregator.result();
+
+        expect(result.summary.maxQps).toBe(4.25);
+        expect(result.summary.maxRpm).toBe(255);
+        expect(result.summary.maxTps).toBe(1200);
+        expect(result.daily['2026-09-03'].maxQps).toBe(2.5);
+        expect(result.daily['2026-09-04'].maxTps).toBe(1200);
+    });
+
     test('admin API exposes ledger-backed range stats endpoint', () => {
         const source = loadSource('src/plugins/api-potluck/api-routes.js');
 
@@ -76,6 +101,17 @@ describe('API Potluck ledger range stats surface', () => {
         expect(source).toContain('await refreshLedgerRangeStats(currentUsageRange, { force: true });');
         expect(source).toContain('from=${encodeURIComponent(currentCustomRange.from)}');
         expect(source).toContain('to=${encodeURIComponent(currentCustomRange.to)}');
+    });
+
+    test('key cards and detail modal render peaks from the selected range summary', () => {
+        const source = loadSource('static/potluck.html');
+
+        expect(source).toContain('rangeSummary.summary?.maxQps');
+        expect(source).toContain('rangeSummary.summary?.maxRpm');
+        expect(source).toContain('rangeSummary.summary?.maxTps');
+        expect(source).not.toContain('峰值: ${(key.maxQps || 0).toFixed(2)} QPS');
+        expect(source).not.toContain('峰值: ${(key.maxRpm || 0).toFixed(0)} RPM');
+        expect(source).not.toContain('峰值: ${(key.maxTps || 0).toFixed(1)} TPS');
     });
 
     test('uses sanitized key references consistently for range summaries and local full-key search', () => {

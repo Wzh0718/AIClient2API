@@ -3596,14 +3596,14 @@
                         <div class="key-stat">
                             <div class="label">请求频率</div>
                             <div class="value">${rangeRate.qps.toFixed(2)} QPS / ${rangeRate.rpm.toFixed(0)} RPM</div>
-                            <div class="value muted">所选范围平均 · 峰值: ${(key.maxQps || 0).toFixed(2)} QPS / ${(key.maxRpm || 0).toFixed(0)} RPM</div>
+                            <div class="value muted">所选范围平均 · 峰值: ${(rangeSummary.summary?.maxQps || 0).toFixed(2)} QPS / ${(rangeSummary.summary?.maxRpm || 0).toFixed(0)} RPM</div>
                         </div>
                     </div>
                     <div class="key-stats key-secondary-stats">
                         <div class="key-stat">
                             <div class="label">Token 速率</div>
                             <div class="value">${(key.tps || 0).toFixed(1)} TPS</div>
-                            <div class="value muted">峰值: ${(key.maxTps || 0).toFixed(1)} TPS</div>
+                            <div class="value muted">峰值: ${(rangeSummary.summary?.maxTps || 0).toFixed(1)} TPS</div>
                         </div>
                         <div class="key-stat">
                             <div class="label">最后调用</div>
@@ -4001,9 +4001,9 @@
                     <div class="detail-section">
                         <h4><i class="fas fa-gauge-high"></i> 峰值速率</h4>
                         <div class="detail-list">
-                            <div class="detail-list-item"><span class="name">QPS 峰值</span><span class="count">${(key.maxQps || 0).toFixed(2)}</span></div>
-                            <div class="detail-list-item"><span class="name">RPM 峰值</span><span class="count">${(key.maxRpm || 0).toFixed(0)}</span></div>
-                            <div class="detail-list-item"><span class="name">TPS 峰值</span><span class="count">${(key.maxTps || 0).toFixed(1)}</span></div>
+                            <div class="detail-list-item"><span class="name">QPS 峰值</span><span class="count">${(rangeSummary.summary?.maxQps || 0).toFixed(2)}</span></div>
+                            <div class="detail-list-item"><span class="name">RPM 峰值</span><span class="count">${(rangeSummary.summary?.maxRpm || 0).toFixed(0)}</span></div>
+                            <div class="detail-list-item"><span class="name">TPS 峰值</span><span class="count">${(rangeSummary.summary?.maxTps || 0).toFixed(1)}</span></div>
                         </div>
                     </div>
                 </div>
