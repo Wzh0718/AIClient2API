@@ -150,11 +150,21 @@ function isGeminiProviderType(providerType) {
 }
 
 function normalizeAntigravityPlan(plan) {
-    const value = String(plan || '').trim();
+    const value = String(plan || '')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .replace(/\s*\(\s*/g, '(')
+        .replace(/\s*\)\s*/g, ')');
     if (!value) return { plan: 'unknown', isFree: false };
+    const normalized = value.toLowerCase();
     return {
         plan: value,
-        isFree: /^(?:antigravity\s+)?(?:starter\s+)?quota\s*\(\s*free\s*\)$/i.test(value)
+        isFree: normalized === 'quota'
+            || normalized === 'quota(free)'
+            || normalized === 'starter quota'
+            || normalized === 'starter quota(free)'
+            || normalized === 'antigravity starter quota'
+            || normalized === 'antigravity starter quota(free)'
     };
 }
 

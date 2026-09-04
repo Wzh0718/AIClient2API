@@ -605,6 +605,38 @@ describe('Antigravity elastic queue and model fallback', () => {
         });
     });
 
+    test.each([
+        'Quota',
+        'Quota (Free)',
+        'Starter Quota',
+        'Antigravity Starter Quota',
+        '  antigravity   starter   quota  '
+    ])('treats %j as a free plan and excludes it from scheduling', async plan => {
+        const freeProvider = provider(`gemini-free-${plan}`);
+        freeProvider.lastKnownAntigravityPlan = plan;
+        const manager = createManager([freeProvider]);
+
+        await expect(manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: `key-${plan}`
+        })).rejects.toMatchObject({
+            status: 503,
+            code: 'PROVIDER_CREDENTIALS_UNAVAILABLE',
+            filterReasons: { plan_free: 1 }
+        });
+    });
+
+    test.each(['Pro', 'Ultra'])('keeps %s plans eligible for scheduling', async plan => {
+        const paidProvider = provider(`gemini-${plan.toLowerCase()}`);
+        paidProvider.lastKnownAntigravityPlan = plan;
+        const manager = createManager([paidProvider]);
+
+        const result = await manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: `key-${plan}`
+        });
+
+        expect(result.config.uuid).toBe(paidProvider.uuid);
+    });
+
     test('absorbs 35 simultaneous short cooldown requests without any 500 result', async () => {
         const cooldowns = {
             [sourceModel]: coolingUntil(20),
