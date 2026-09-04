@@ -44,8 +44,8 @@ const ANTIGRAVITY_MODEL_NOT_FOUND_TTL_MS = 60 * 60 * 1000;
 const ANTIGRAVITY_MODEL_NOT_FOUND_SYNC_INTERVAL_MS = 5000;
 const ANTIGRAVITY_ELASTIC_DEFAULTS = Object.freeze({
     enabled: true,
-    maxQueueWaitMs: 45_000,
-    preferOriginalWaitMs: 10_000,
+    maxQueueWaitMs: 30_000,
+    preferOriginalWaitMs: 5_000,
     fallbackModels: ANTIGRAVITY_ELASTIC_MODEL_ORDER,
     globalQueueLimit: 512,
     perKeyModelQueueLimit: 256,

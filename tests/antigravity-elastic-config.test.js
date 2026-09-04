@@ -16,7 +16,7 @@ describe('Antigravity elastic routing config', () => {
         expect(config.antigravityElasticRouting).toEqual(expect.objectContaining({
             enabled: true,
             maxQueueWaitMs: 12000,
-            preferOriginalWaitMs: 10000,
+            preferOriginalWaitMs: 5000,
             fallbackModels: [
                 'gemini-2.5-flash-lite',
                 'gemini-2.5-flash',

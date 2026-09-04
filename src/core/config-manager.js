@@ -13,8 +13,8 @@ const ALL_MODEL_PROVIDERS = Object.values(MODEL_PROVIDER);
 const BYTES_PER_MB = 1024 * 1024;
 const ANTIGRAVITY_ELASTIC_ROUTING_DEFAULTS = Object.freeze({
     enabled: true,
-    maxQueueWaitMs: 45_000,
-    preferOriginalWaitMs: 10_000,
+    maxQueueWaitMs: 30_000,
+    preferOriginalWaitMs: 5_000,
     fallbackModels: [...ANTIGRAVITY_ELASTIC_MODEL_ORDER],
     globalQueueLimit: 512,
     perKeyModelQueueLimit: 256,
