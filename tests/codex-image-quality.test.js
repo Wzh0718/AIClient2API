@@ -27,6 +27,63 @@ afterEach(() => {
 });
 
 describe('Codex image generation tool options', () => {
+    test('routes gpt-image-2 through gpt-5.6-luna while preserving the external image model', async () => {
+        const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
+
+        try {
+            const body = await service.prepareRequestBody('gpt-image-2', {
+                model: 'gpt-image-2',
+                input: [{
+                    role: 'user',
+                    content: [{ type: 'input_text', text: 'draw one green circle' }]
+                }]
+            }, false);
+
+            expect(body.model).toBe('gpt-5.6-luna');
+            expect(body.tools).toEqual([{ type: 'image_generation' }]);
+        } finally {
+            service.stopCacheCleanup();
+        }
+    });
+
+    test('routes gpt-image-2-fast through the same gpt-5.6-luna image shell', async () => {
+        const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
+
+        try {
+            const body = await service.prepareRequestBody('gpt-image-2-fast', {
+                model: 'gpt-image-2-fast',
+                input: [{
+                    role: 'user',
+                    content: [{ type: 'input_text', text: 'draw one green circle' }]
+                }]
+            }, false);
+
+            expect(body.model).toBe('gpt-5.6-luna');
+            expect(body.tools).toEqual([{ type: 'image_generation' }]);
+        } finally {
+            service.stopCacheCleanup();
+        }
+    });
+
+    test('does not rewrite ordinary Codex models when preparing image-capable requests', async () => {
+        const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
+
+        try {
+            const body = await service.prepareRequestBody('gpt-5.5', {
+                model: 'gpt-5.5',
+                input: [{
+                    role: 'user',
+                    content: [{ type: 'input_text', text: 'hello' }]
+                }]
+            }, true);
+
+            expect(body.model).toBe('gpt-5.5');
+            expect(body.model).not.toBe('gpt-5.6-luna');
+        } finally {
+            service.stopCacheCleanup();
+        }
+    });
+
     test('maps internal image quality onto the image_generation tool', async () => {
         const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
 
@@ -148,7 +205,7 @@ describe('Codex image generation tool options', () => {
         }
     });
 
-    test('does not inject hosted image_generation for Spark models', async () => {
+    test('injects hosted image_generation for retired Spark model names the same as other Codex models', async () => {
         const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
 
         try {
@@ -157,7 +214,7 @@ describe('Codex image generation tool options', () => {
                 input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }]
             }, true);
 
-            expect(body.tools.filter(tool => tool.type === 'image_generation')).toHaveLength(0);
+            expect(body.tools.some(tool => tool.type === 'image_generation')).toBe(true);
         } finally {
             service.stopCacheCleanup();
         }

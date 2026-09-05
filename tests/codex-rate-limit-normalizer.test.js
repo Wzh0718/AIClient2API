@@ -68,7 +68,7 @@ describe('Codex rate-limit window normalization', () => {
         });
     });
 
-    test('keeps Spark model windows separate from general windows', () => {
+    test('omits retired Spark windows from Codex quota applicability', () => {
         const result = getCodexQuotaApplicability({
             plan_type: 'PRO',
             rate_limit: {
@@ -83,13 +83,13 @@ describe('Codex rate-limit window normalization', () => {
             }]
         });
 
-        expect(result).toMatchObject({
-            general: { short: { status: 'not_applicable' } },
-            codex53: {
-                short: { status: 'healthy' },
-                weekly: { status: 'healthy' }
+        expect(result).toEqual({
+            general: {
+                short: { status: 'not_applicable', reason: 'plan_weekly_only' },
+                weekly: { status: 'healthy', windowCount: 1 }
             }
         });
+        expect(result.codex53).toBeUndefined();
     });
 
     test('does not infer a 5h window when duration is missing', () => {

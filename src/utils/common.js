@@ -914,36 +914,8 @@ function getCodexRateLimitCooldownRecoveryTime(error, config = {}, now = Date.no
 }
 
 const CODEX_QUOTA_BUCKET = {
-    GENERAL: 'general',
-    CODEX_53: 'codex53'
+    GENERAL: 'general'
 };
-
-const DEFAULT_CODEX_53_MODEL_PATTERNS = [
-    '*5.3*',
-    '*codexspark*',
-    '*codex-spark*',
-    '*codex_spark*'
-];
-
-function globPatternToRegExp(pattern) {
-    const escaped = String(pattern)
-        .replace(/[|\\{}()[\]^$+?.]/g, '\\$&')
-        .replace(/\*/g, '.*');
-    return new RegExp(`^${escaped}$`);
-}
-
-function modelMatchesAnyPattern(model, patterns) {
-    if (!model || patterns.length === 0) return false;
-    return patterns.some(pattern => globPatternToRegExp(pattern).test(model));
-}
-
-function toStringArray(value) {
-    if (Array.isArray(value)) return value.map(item => String(item)).filter(Boolean);
-    if (typeof value === 'string') {
-        return value.split(',').map(item => item.trim()).filter(Boolean);
-    }
-    return [];
-}
 
 function isCodexProviderType(providerType) {
     return providerType === MODEL_PROVIDER.CODEX_API || providerType?.startsWith(`${MODEL_PROVIDER.CODEX_API}-`);
@@ -960,14 +932,10 @@ function isCodexUsageLimitReached(error) {
         message.includes('usage limit has been reached');
 }
 
-export function resolveCodexQuotaBucketForModel(requestedModel = null, patterns = DEFAULT_CODEX_53_MODEL_PATTERNS) {
+export function resolveCodexQuotaBucketForModel(requestedModel = null) {
     const model = String(requestedModel || '').trim();
     if (!model) return null;
-
-    const normalizedPatterns = toStringArray(patterns).map(pattern => pattern.toLowerCase());
-    return modelMatchesAnyPattern(model.toLowerCase(), normalizedPatterns)
-        ? CODEX_QUOTA_BUCKET.CODEX_53
-        : CODEX_QUOTA_BUCKET.GENERAL;
+    return CODEX_QUOTA_BUCKET.GENERAL;
 }
 
 export function applyProviderRateLimitCooldown({
@@ -1033,10 +1001,7 @@ export function applyProviderRateLimitCooldown({
             ? new Date(Date.now() + resetDelayMs)
             : rateLimitRecoveryTime;
         if (quotaRecoveryTime && typeof providerPoolManager.markCodexQuotaBucketUnhealthy === 'function') {
-            const bucket = resolveCodexQuotaBucketForModel(
-                requestedModel,
-                config?.CODEX_53_QUOTA_MODEL_PATTERNS || config?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS
-            );
+            const bucket = resolveCodexQuotaBucketForModel(requestedModel);
             if (bucket) {
                 if (rateLimitRecoveryTime === null) {
                     logger.info(`${loggerPrefix} Persisting Codex ${bucket} quota exhaustion for ${providerType} (${providerUuid}) until ${quotaRecoveryTime.toISOString()}`);
@@ -1052,10 +1017,7 @@ export function applyProviderRateLimitCooldown({
     }
 
     if (isCodexProvider && isCodexUsageLimitReached(error)) {
-        const bucket = resolveCodexQuotaBucketForModel(
-            requestedModel,
-            config?.CODEX_53_QUOTA_MODEL_PATTERNS || config?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS
-        );
+        const bucket = resolveCodexQuotaBucketForModel(requestedModel);
 
         if (bucket && typeof providerPoolManager.markCodexQuotaBucketUnhealthy === 'function') {
             logger.info(`${loggerPrefix} Applying Codex ${bucket} quota cooldown for ${providerType} (${providerUuid}) until ${rateLimitRecoveryTime.toISOString()}`);
@@ -1070,10 +1032,7 @@ export function applyProviderRateLimitCooldown({
     }
 
     if (isCodexProvider && typeof providerPoolManager.markCodexRateLimitCooldown === 'function') {
-        const bucket = resolveCodexQuotaBucketForModel(
-            requestedModel,
-            config?.CODEX_53_QUOTA_MODEL_PATTERNS || config?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS
-        );
+        const bucket = resolveCodexQuotaBucketForModel(requestedModel);
         if (bucket) {
             logger.info(`${loggerPrefix} Applying Codex ${bucket} rate-limit cooldown for ${providerType} (${providerUuid}) until ${rateLimitRecoveryTime.toISOString()}`);
             try {
@@ -1768,6 +1727,14 @@ function getUsageTrackingModel(model, requestBody, toProvider) {
         !/-fast$/i.test(normalizedModel)
     ) {
         return `${normalizedModel}-fast`;
+    }
+
+    if (
+        isCodexProvider(toProvider) &&
+        requestBody?.service_tier === 'ultrafast' &&
+        !/-ultrafast$/i.test(normalizedModel)
+    ) {
+        return `${normalizedModel}-ultrafast`;
     }
 
     return normalizedModel;

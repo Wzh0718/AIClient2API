@@ -202,7 +202,7 @@ describe('usage manager display source regressions', () => {
         expect(source).not.toContain('${renderAccountUsageCoverageNotice(accountUsageSummaryMeta)}');
     });
 
-    test('Codex usage cards render separate general and Codex 5.3 quota health badges', () => {
+    test('Codex usage cards render general quota health badges without Spark 5.3', () => {
         const usageApiSource = fs.readFileSync(path.join(process.cwd(), 'src/ui-modules/usage-api.js'), 'utf8').replace(/\r\n/g, '\n');
         const usageManagerSource = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
 
@@ -210,22 +210,22 @@ describe('usage manager display source regressions', () => {
         expect(usageApiSource).toContain('deriveCodexQuotaHealthFromUsage(instanceResult.codexQuotaHealth, usage)');
         expect(usageManagerSource).toContain('function renderCodexQuotaHealthBadges(instance, providerType)');
         expect(usageManagerSource).toContain("renderBadge('通用', quotaHealth.general)");
-        expect(usageManagerSource).toContain("renderBadge('5.3', quotaHealth.codex53)");
-        expect(usageApiSource).toContain('quotaHealth.codex53');
-        expect(usageApiSource).toContain('codex53UsedPercent');
+        expect(usageManagerSource).not.toContain("renderBadge('5.3', quotaHealth.codex53)");
+        expect(usageApiSource).toContain('delete quotaHealth.codex53');
+        expect(usageApiSource).not.toContain('codex53UsedPercent');
         expect(usageManagerSource).not.toContain("renderBadge('通用额度'");
         expect(usageManagerSource).not.toContain("renderBadge('5.3额度'");
         expect(usageManagerSource).toContain('renderCodexQuotaHealthBadges(instance, providerType)');
     });
 
-    test('Codex collapsed header renders base, general, and Codex 5.3 status icons separately', () => {
+    test('Codex collapsed header renders base and general status icons separately', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
 
         expect(source).toContain('function getBaseStatusState(instance)');
         expect(source).toContain('function renderCollapsedStatusIcons(instance, providerType)');
         expect(source).toContain("renderStatusIcon('基础状态', getBaseStatusState(instance))");
         expect(source).toContain("renderStatusIcon('通用额度', getQuotaStatusState(instance.codexQuotaHealth?.general))");
-        expect(source).toContain("renderStatusIcon('5.3额度', getQuotaStatusState(instance.codexQuotaHealth?.codex53))");
+        expect(source).not.toContain("renderStatusIcon('5.3额度', getQuotaStatusState(instance.codexQuotaHealth?.codex53))");
         expect(source).toContain('${renderCollapsedStatusIcons(instance, providerType)}');
         expect(source).not.toContain("${instance.success ? '<i class=\"fas fa-check-circle status-success\"></i>' : '<i class=\"fas fa-times-circle status-error\"></i>'}");
     });

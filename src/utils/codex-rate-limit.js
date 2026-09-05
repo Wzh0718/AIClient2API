@@ -84,6 +84,11 @@ function normalizeWindow({ windowData, sourceWindow, scope, limitName = null, id
     };
 }
 
+function isRetiredCodexSparkWindow(window = {}) {
+    const haystack = `${window.id || ''} ${window.limitName || ''} ${window.label || ''}`.toLowerCase();
+    return haystack.includes('5.3') || haystack.includes('spark');
+}
+
 export function normalizeCodexRateLimitWindows(usageData = {}) {
     const windows = [];
     const rateLimit = usageData.rate_limit || usageData.rateLimit;
@@ -98,7 +103,7 @@ export function normalizeCodexRateLimitWindows(usageData = {}) {
             scope: 'general',
             id: sourceWindow
         });
-        if (normalized) windows.push(normalized);
+        if (normalized && !isRetiredCodexSparkWindow(normalized)) windows.push(normalized);
     }
 
     const additional = Array.isArray(usageData.additional_rate_limits)
@@ -121,7 +126,7 @@ export function normalizeCodexRateLimitWindows(usageData = {}) {
                 limitName,
                 id: `additional_${slug}_${sourceWindow}`
             });
-            if (normalized) windows.push(normalized);
+            if (normalized && !isRetiredCodexSparkWindow(normalized)) windows.push(normalized);
         }
     });
 
@@ -161,11 +166,7 @@ export function getCodexQuotaApplicability(usageData = {}) {
         };
     }
     return {
-        general,
-        codex53: {
-            short: buildWindowApplicability(windows, 'model', 'short'),
-            weekly: buildWindowApplicability(windows, 'model', 'weekly')
-        }
+        general
     };
 }
 

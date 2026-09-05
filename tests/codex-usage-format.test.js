@@ -182,7 +182,7 @@ describe('Codex usage formatting', () => {
         ]));
     });
 
-    test('keeps Codex Spark additional rate limits visible without counting them in total summary', () => {
+    test('hides retired Codex Spark additional rate limits without counting them in total summary', () => {
         const formatted = formatCodexUsage({
             account: 'codex@example.com',
             plan_type: 'PRO',
@@ -203,18 +203,15 @@ describe('Codex usage formatting', () => {
         });
 
         expect(formatted.summary.usedPercent).toBe(60);
-        expect(formatted.items).toEqual(expect.arrayContaining([
+        expect(formatted.items).not.toEqual(expect.arrayContaining([
             expect.objectContaining({
-                id: 'additional_gpt_5_3_codex_spark_primary_window',
-                label: 'GPT-5.3-Codex-Spark (5h)',
-                percent: 91
+                id: 'additional_gpt_5_3_codex_spark_primary_window'
             }),
             expect.objectContaining({
-                id: 'additional_gpt_5_3_codex_spark_secondary_window',
-                label: 'GPT-5.3-Codex-Spark (Weekly)',
-                percent: 64
+                id: 'additional_gpt_5_3_codex_spark_secondary_window'
             })
         ]));
+        expect(formatted.items.some(item => String(item.id || '').includes('spark') || String(item.label || '').includes('5.3'))).toBe(false);
     });
 
     test('extracts available Codex rate limit reset credits from official usage payload', () => {
@@ -305,15 +302,9 @@ describe('Codex usage formatting', () => {
                 windowKind: 'weekly',
                 durationSeconds: 604800,
                 percent: 3
-            }),
-            expect.objectContaining({
-                id: 'additional_gpt_5_3_codex_spark_primary_window',
-                label: 'GPT-5.3-Codex-Spark (Weekly)',
-                windowKind: 'weekly',
-                durationSeconds: 604800,
-                percent: 48
             })
         ]));
+        expect(formatted.items.some(item => String(item.id || '').includes('spark') || String(item.label || '').includes('Spark'))).toBe(false);
         expect(formatted.items.filter(item => item.unit === 'percent').map(item => item.label).join(' ')).not.toContain('5h');
     });
 

@@ -62,6 +62,8 @@ class FakeResponse extends EventEmitter {
 describe('temporary key model content routing', () => {
     beforeEach(() => {
         jest.clearAllMocks();
+        mockGetApiServiceWithFallback.mockReset();
+        mockExecuteHook.mockReset();
     });
 
     afterEach(() => {
@@ -161,6 +163,7 @@ describe('temporary key model content routing', () => {
                 models: ['gpt-5.4-mini', 'gpt-5.3-codex-spark'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
+                fallbackModel: 'gpt-5.6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }]
@@ -263,6 +266,7 @@ describe('temporary key model content routing', () => {
                 models: ['gpt-5.4-mini', 'gpt-5.3-codex-spark'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
+                fallbackModel: 'gpt-5.6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }]
@@ -346,6 +350,7 @@ describe('temporary key model content routing', () => {
                 models: ['gpt-5.4-mini'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
+                fallbackModel: 'gpt-5.6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }]
@@ -392,7 +397,7 @@ describe('temporary key model content routing', () => {
             })
         );
         const payload = JSON.parse(response.body);
-        expect(payload.model).toBe('gpt-5.6-luna');
+        expect(payload.model).toBe('gpt-5.4-mini');
         expect(payload.output).toEqual(expect.arrayContaining([
             expect.objectContaining({
                 type: 'function_call',
@@ -462,6 +467,7 @@ describe('temporary key model content routing', () => {
                 models: ['gpt-5.4-mini'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
+                fallbackModel: 'gpt-5.6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }]
@@ -524,6 +530,10 @@ describe('temporary key model content routing', () => {
     });
 
     test('bypasses Gemini selection and executes Luna once during a statutory workday blackout', async () => {
+        jest.useFakeTimers({
+            now: new Date('2026-08-18T04:00:00.000Z'),
+            doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate']
+        });
         const apiKey = 'maki_scheduled_blackout_unary';
         const lunaService = {
             generateContent: jest.fn().mockResolvedValue({
@@ -571,6 +581,7 @@ describe('temporary key model content routing', () => {
                 modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
+                fallbackModel: 'gpt-5.6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true,
                 targetBlackout: {
@@ -614,7 +625,7 @@ describe('temporary key model content routing', () => {
         expect(mockGetApiServiceWithFallback.mock.calls.some(([, model]) => model === 'gemini-2.5-flash')).toBe(false);
         expect(providerPoolManager.recordGeminiSchedulingEvent).not.toHaveBeenCalled();
         expect(lunaService.generateContent).toHaveBeenCalledWith('gpt-5.6-luna', expect.any(Object));
-        expect(JSON.parse(response.body).model).toBe('gpt-5.6-luna');
+        expect(JSON.parse(response.body).model).toBe('gpt-5.4-mini');
         expect(config._temporaryKeyModelRouteResult).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
             actualModel: 'gpt-5.6-luna',
@@ -626,6 +637,10 @@ describe('temporary key model content routing', () => {
     });
 
     test('bypasses Gemini selection for a scheduled Chat Completions stream without duplicate usage', async () => {
+        jest.useFakeTimers({
+            now: new Date('2026-08-18T04:00:00.000Z'),
+            doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate']
+        });
         const apiKey = 'maki_scheduled_blackout_stream';
         const lunaService = {
             generateContentStream: jest.fn(async function* () {
@@ -675,6 +690,7 @@ describe('temporary key model content routing', () => {
                 modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
+                fallbackModel: 'gpt-5.6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true,
                 targetBlackout: {
@@ -760,9 +776,6 @@ describe('temporary key model content routing', () => {
                 serviceConfig: { customName: 'Antigravity quota' },
                 isFallback: false
             })
-            .mockRejectedValueOnce(Object.assign(new Error('No alternate Gemini credential available'), {
-                status: 429
-            }))
             .mockResolvedValueOnce({
                 service: lunaService,
                 actualProviderType: 'openai-codex-oauth',
@@ -791,6 +804,7 @@ describe('temporary key model content routing', () => {
                 modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
+                fallbackModel: 'gpt-5.6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }]
@@ -821,8 +835,7 @@ describe('temporary key model content routing', () => {
             '/v1/responses'
         );
 
-        expect(mockGetApiServiceWithFallback).toHaveBeenNthCalledWith(
-            3,
+        expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(
             expect.objectContaining({ MODEL_PROVIDER: 'openai-codex-oauth' }),
             'gpt-5.6-luna',
             expect.objectContaining({ disableProviderFallback: true })
@@ -886,9 +899,6 @@ describe('temporary key model content routing', () => {
                 serviceConfig: { customName: 'Antigravity stream quota' },
                 isFallback: false
             })
-            .mockRejectedValueOnce(Object.assign(new Error('No alternate Gemini credential available'), {
-                status: 429
-            }))
             .mockResolvedValueOnce({
                 service: lunaService,
                 actualProviderType: 'openai-codex-oauth',
@@ -923,6 +933,7 @@ describe('temporary key model content routing', () => {
                 modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
+                fallbackModel: 'gpt-5.6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }]
@@ -953,8 +964,7 @@ describe('temporary key model content routing', () => {
             requestPath
         );
 
-        expect(mockGetApiServiceWithFallback).toHaveBeenNthCalledWith(
-            3,
+        expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(
             expect.objectContaining({ MODEL_PROVIDER: 'openai-codex-oauth' }),
             'gpt-5.6-luna',
             expect.objectContaining({ disableProviderFallback: true })

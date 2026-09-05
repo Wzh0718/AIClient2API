@@ -38,21 +38,17 @@ function createQuotaPoolManager(overrides = {}) {
             {
                 uuid: 'aaa-codex-over',
                 customName: 'Over',
-                supportedModels: ['gpt-5.5', 'gpt-5.3-codex-spark'],
+                supportedModels: ['gpt-5.5', 'gpt-5.6-luna'],
                 codexGeneralMax5hPercent: 80,
                 codexGeneralMaxWeeklyPercent: 90,
-                codex53Max5hPercent: 80,
-                codex53MaxWeeklyPercent: 90,
                 ...overrides.over
             },
             {
                 uuid: 'zzz-codex-ok',
                 customName: 'OK',
-                supportedModels: ['gpt-5.5', 'gpt-5.3-codex-spark'],
+                supportedModels: ['gpt-5.5', 'gpt-5.6-luna'],
                 codexGeneralMax5hPercent: 80,
                 codexGeneralMaxWeeklyPercent: 90,
-                codex53Max5hPercent: 80,
-                codex53MaxWeeklyPercent: 90,
                 ...overrides.ok
             }
         ]
@@ -94,19 +90,14 @@ afterEach(() => {
 });
 
 describe('provider pool Codex token quota', () => {
-    test.each(['gpt-5.4', 'gpt-5.4-fast', 'gpt-5.4-mini', 'gpt-5.4-mini-fast'])(
-        'uses GPT-5.6 Luna as the default unavailable-model fallback for %s',
-        model => {
-            expect(getCodexModelFallbackTarget(model, {
-                CODEX_UNAVAILABLE_MODEL_FALLBACKS: {
-                    'gpt-5.4': 'gpt-5.6-luna',
-                    'gpt-5.4-fast': 'gpt-5.6-luna',
-                    'gpt-5.4-mini': 'gpt-5.6-luna',
-                    'gpt-5.4-mini-fast': 'gpt-5.6-luna'
-                }
-            })).toBe('gpt-5.6-luna');
-        }
-    );
+    test('honors an explicit unavailable-model fallback map without a built-in 5.4 default', () => {
+        expect(getCodexModelFallbackTarget('gpt-5.4-mini')).toBeNull();
+        expect(getCodexModelFallbackTarget('gpt-5.4-mini', {
+            CODEX_UNAVAILABLE_MODEL_FALLBACKS: {
+                'gpt-5.4-mini': 'gpt-5.6-luna'
+            }
+        })).toBe('gpt-5.6-luna');
+    });
     test('reuses a quota filter snapshot for repeated selection state', () => {
         const usageTimestamp = new Date().toISOString();
         writeCodexUsageCache([
@@ -623,7 +614,6 @@ describe('provider pool Codex token quota', () => {
         expect(provider.isHealthy).toBe(true);
         expect(provider.scheduledRecoveryTime).toBeUndefined();
         expect(provider.codexQuotaHealth.general.isHealthy).toBe(false);
-        expect(provider.codexQuotaHealth.codex53?.isHealthy).not.toBe(false);
     });
 
     test('does not treat a Pro weekly-only general quota as unavailable 5h usage', async () => {
@@ -700,43 +690,6 @@ describe('provider pool Codex token quota', () => {
         expect(status).toMatchObject({ limited: true, exceeded: false, reason: null });
     });
 
-    test('keeps a general-limited Codex account eligible for Codex 5.3 requests when its 5.3 quota is healthy', async () => {
-        writeCodexUsageCache([
-            {
-                uuid: 'aaa-codex-over',
-                success: true,
-                usage: {
-                    summary: { plan: 'Pro' },
-                    items: [
-                        { id: 'primary_window', percent: 81, unit: 'percent' },
-                        { id: 'secondary_window', percent: 20, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_primary_window', label: 'GPT-5.3-Codex-Spark (5h)', percent: 40, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_secondary_window', label: 'GPT-5.3-Codex-Spark (Weekly)', percent: 30, unit: 'percent' }
-                    ]
-                }
-            },
-            {
-                uuid: 'zzz-codex-ok',
-                success: true,
-                usage: {
-                    summary: { plan: 'Plus' },
-                    items: [
-                        { id: 'primary_window', percent: 20, unit: 'percent' },
-                        { id: 'secondary_window', percent: 70, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_primary_window', label: 'GPT-5.3-Codex-Spark (5h)', percent: 90, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_secondary_window', label: 'GPT-5.3-Codex-Spark (Weekly)', percent: 20, unit: 'percent' }
-                    ]
-                }
-            }
-        ]);
-
-        const manager = createQuotaPoolManager();
-
-        const selected = await manager.selectProvider('openai-codex-oauth', 'gpt-5.3-codex-spark');
-
-        expect(selected.uuid).toBe('aaa-codex-over');
-    });
-
     test('does not mark the Codex provider unhealthy when a health check reports quota exhaustion', () => {
         const manager = createQuotaPoolManager();
         const provider = manager.providerStatus['openai-codex-oauth'][0].config;
@@ -798,7 +751,7 @@ describe('provider pool Codex token quota', () => {
                 lastErrorMessage: '429 Too Many Requests: {"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}',
                 scheduledRecoveryTime: '2099-01-08T00:00:00.000Z',
                 codexQuotaHealth: {
-                    codex53: {
+                    general: {
                         isHealthy: false,
                         scheduledRecoveryTime: '2099-01-08T00:00:00.000Z'
                     }
@@ -814,149 +767,9 @@ describe('provider pool Codex token quota', () => {
             lastErrorMessage: null,
             scheduledRecoveryTime: null
         });
-        expect(provider.codexQuotaHealth.codex53).toMatchObject({
+        expect(provider.codexQuotaHealth.general).toMatchObject({
             isHealthy: false,
             scheduledRecoveryTime: '2099-01-08T00:00:00.000Z'
-        });
-    });
-
-    test('skips Codex accounts whose Codex 5.3 official quota exceeds the Codex 5.3 percent limit without blocking general requests', async () => {
-        writeCodexUsageCache([
-            {
-                uuid: 'aaa-codex-over',
-                success: true,
-                usage: {
-                    summary: { plan: 'Pro' },
-                    items: [
-                        { id: 'primary_window', percent: 20, unit: 'percent' },
-                        { id: 'secondary_window', percent: 20, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_primary_window', label: 'GPT-5.3-Codex-Spark (5h)', percent: 91, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_secondary_window', label: 'GPT-5.3-Codex-Spark (Weekly)', percent: 30, unit: 'percent' }
-                    ]
-                }
-            },
-            {
-                uuid: 'zzz-codex-ok',
-                success: true,
-                usage: {
-                    summary: { plan: 'Plus' },
-                    items: [
-                        { id: 'primary_window', percent: 85, unit: 'percent' },
-                        { id: 'secondary_window', percent: 20, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_primary_window', label: 'GPT-5.3-Codex-Spark (5h)', percent: 40, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_secondary_window', label: 'GPT-5.3-Codex-Spark (Weekly)', percent: 20, unit: 'percent' }
-                    ]
-                }
-            }
-        ]);
-
-        const manager = createQuotaPoolManager();
-
-        const sparkSelected = await manager.selectProvider('openai-codex-oauth', 'gpt-5.3-codex-spark');
-        const generalSelected = await manager.selectProvider('openai-codex-oauth', 'gpt-5.5');
-
-        expect(sparkSelected.uuid).toBe('zzz-codex-ok');
-        expect(generalSelected.uuid).toBe('aaa-codex-over');
-        const provider = manager.providerStatus['openai-codex-oauth'][0].config;
-        expect(provider.isHealthy).toBe(true);
-        expect(provider.codexQuotaHealth.codex53.isHealthy).toBe(false);
-        expect(provider.codexQuotaHealth.general?.isHealthy).not.toBe(false);
-    });
-
-    test('falls back Codex 5.3 Spark requests to GPT-5.6 Luna when every 5.3 quota bucket is exhausted', async () => {
-        writeCodexUsageCache([
-            {
-                uuid: 'aaa-codex-over',
-                success: true,
-                usage: {
-                    summary: { plan: 'Pro' },
-                    items: [
-                        { id: 'primary_window', percent: 20, unit: 'percent' },
-                        { id: 'secondary_window', percent: 20, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_primary_window', label: 'GPT-5.3-Codex-Spark (5h)', percent: 91, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_secondary_window', label: 'GPT-5.3-Codex-Spark (Weekly)', percent: 30, unit: 'percent' }
-                    ]
-                }
-            },
-            {
-                uuid: 'zzz-codex-ok',
-                success: true,
-                usage: {
-                    summary: { plan: 'Plus' },
-                    items: [
-                        { id: 'primary_window', percent: 20, unit: 'percent' },
-                        { id: 'secondary_window', percent: 20, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_primary_window', label: 'GPT-5.3-Codex-Spark (5h)', percent: 93, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_secondary_window', label: 'GPT-5.3-Codex-Spark (Weekly)', percent: 30, unit: 'percent' }
-                    ]
-                }
-            }
-        ]);
-
-        const manager = createQuotaPoolManager({
-            over: { supportedModels: ['gpt-5.4-mini', 'gpt-5.3-codex-spark'] },
-            ok: { supportedModels: ['gpt-5.4-mini', 'gpt-5.3-codex-spark'] }
-        });
-
-        const selected = await manager.selectProviderWithFallback('openai-codex-oauth', 'gpt-5.3-codex-spark');
-
-        expect(selected).toMatchObject({
-            actualProviderType: 'openai-codex-oauth',
-            isFallback: true,
-            actualModel: 'gpt-5.6-luna'
-        });
-        expect(['aaa-codex-over', 'zzz-codex-ok']).toContain(selected.config.uuid);
-    });
-
-    test('uses 100 percent as the default Codex 5.3 bucket limit when no override is configured', async () => {
-        writeCodexUsageCache([
-            {
-                uuid: 'aaa-codex-over',
-                success: true,
-                usage: {
-                    summary: { plan: 'Pro' },
-                    items: [
-                        { id: 'primary_window', percent: 0, unit: 'percent' },
-                        { id: 'secondary_window', percent: 0, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_primary_window', label: 'GPT-5.3-Codex-Spark (5h)', percent: 0, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_secondary_window', label: 'GPT-5.3-Codex-Spark (Weekly)', percent: 100, unit: 'percent' }
-                    ]
-                }
-            },
-            {
-                uuid: 'zzz-codex-ok',
-                success: true,
-                usage: {
-                    summary: { plan: 'Plus' },
-                    items: [
-                        { id: 'primary_window', percent: 0, unit: 'percent' },
-                        { id: 'secondary_window', percent: 0, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_primary_window', label: 'GPT-5.3-Codex-Spark (5h)', percent: 0, unit: 'percent' },
-                        { id: 'additional_gpt_5_3_codex_spark_secondary_window', label: 'GPT-5.3-Codex-Spark (Weekly)', percent: 100, unit: 'percent' }
-                    ]
-                }
-            }
-        ]);
-
-        const manager = createQuotaPoolManager({
-            over: {
-                supportedModels: ['gpt-5.4-mini', 'gpt-5.3-codex-spark'],
-                codex53Max5hPercent: undefined,
-                codex53MaxWeeklyPercent: undefined
-            },
-            ok: {
-                supportedModels: ['gpt-5.4-mini', 'gpt-5.3-codex-spark'],
-                codex53Max5hPercent: undefined,
-                codex53MaxWeeklyPercent: undefined
-            }
-        });
-
-        const selected = await manager.selectProviderWithFallback('openai-codex-oauth', 'gpt-5.3-codex-spark');
-
-        expect(selected).toMatchObject({
-            actualProviderType: 'openai-codex-oauth',
-            isFallback: true,
-            actualModel: 'gpt-5.6-luna'
         });
     });
 
@@ -975,108 +788,17 @@ describe('provider pool Codex token quota', () => {
         expect(selected).toBeNull();
     });
 
-    test('memoizes an exhausted Codex 5.3 pool for the short snapshot TTL', async () => {
-        writeCodexUsageCache([
-            {
-                uuid: 'aaa-codex-over', success: true,
-                usage: { summary: { plan: 'Pro' }, items: [
-                    { id: 'primary_window', percent: 20, unit: 'percent' },
-                    { id: 'secondary_window', percent: 20, unit: 'percent' },
-                    { id: 'additional_gpt_5_3_codex_spark_primary_window', percent: 91, unit: 'percent' },
-                    { id: 'additional_gpt_5_3_codex_spark_secondary_window', percent: 91, unit: 'percent' }
-                ] }
-            },
-            {
-                uuid: 'zzz-codex-ok', success: true,
-                usage: { summary: { plan: 'Plus' }, items: [
-                    { id: 'primary_window', percent: 20, unit: 'percent' },
-                    { id: 'secondary_window', percent: 20, unit: 'percent' },
-                    { id: 'additional_gpt_5_3_codex_spark_primary_window', percent: 91, unit: 'percent' },
-                    { id: 'additional_gpt_5_3_codex_spark_secondary_window', percent: 91, unit: 'percent' }
-                ] }
-            }
-        ]);
-
-        const manager = createQuotaPoolManager();
-        await expect(manager.selectProvider('openai-codex-oauth', 'gpt-5.3-codex-spark')).rejects.toMatchObject({ status: 429 });
-        const firstSnapshot = manager._codexPoolExhaustedSnapshots.get('openai-codex-oauth:codex53');
-        expect(firstSnapshot).toBeDefined();
-
-        await expect(manager.selectProvider('openai-codex-oauth', 'gpt-5.3-codex-spark')).rejects.toMatchObject({ status: 429 });
-        expect(manager._codexPoolExhaustedSnapshots.get('openai-codex-oauth:codex53')).toBe(firstSnapshot);
-    });
-
-    test('uses an exhausted snapshot fast path for repeated Spark fallback without rescanning Codex 5.3 providers', async () => {
-        writeCodexUsageCache([
-            { uuid: 'aaa-codex-over', success: true, usage: { summary: { plan: 'Pro' }, items: [
-                { id: 'primary_window', percent: 20, unit: 'percent' },
-                { id: 'secondary_window', percent: 20, unit: 'percent' },
-                { id: 'additional_gpt_5_3_codex_spark_primary_window', percent: 91, unit: 'percent' },
-                { id: 'additional_gpt_5_3_codex_spark_secondary_window', percent: 91, unit: 'percent' }
-            ] } },
-            { uuid: 'zzz-codex-ok', success: true, usage: { summary: { plan: 'Plus' }, items: [
-                { id: 'primary_window', percent: 20, unit: 'percent' },
-                { id: 'secondary_window', percent: 20, unit: 'percent' },
-                { id: 'additional_gpt_5_3_codex_spark_primary_window', percent: 91, unit: 'percent' },
-                { id: 'additional_gpt_5_3_codex_spark_secondary_window', percent: 91, unit: 'percent' }
-            ] } }
-        ]);
-        const manager = createQuotaPoolManager();
-        const filterSpy = jest.spyOn(manager, '_filterCodexProvidersByTokenQuota');
-
-        await expect(manager.selectProvider('openai-codex-oauth', 'gpt-5.3-codex-spark')).rejects.toMatchObject({ status: 429 });
-        const scannedAfterFirst = manager._codexQuotaFilterMetrics.providersScanned;
-        const selected = await manager.selectProviderWithFallback('openai-codex-oauth', 'gpt-5.3-codex-spark');
-
-        expect(manager._codexQuotaFilterMetrics).toMatchObject({ fastPathHits: 1, fastPathMisses: 0 });
-        expect(selected).toMatchObject({
-            actualProviderType: 'openai-codex-oauth',
-            actualModel: 'gpt-5.6-luna',
-            isFallback: true,
-            modelFallbackReason: 'CODEX53_POOL_EXHAUSTED'
-        });
-        expect(manager._codexQuotaFilterMetrics.providersScanned).toBe(scannedAfterFirst + 2);
-        expect(filterSpy).toHaveBeenCalledTimes(2);
-        expect(filterSpy.mock.calls[1][2]).toBe('gpt-5.6-luna');
-        expect(manager.getCodexQuotaFilterMetrics()).toMatchObject({ fastPathHits: 1, fastPathMisses: 0 });
-    });
-
     test('does not persist unchanged quota or cooldown state repeatedly', () => {
         const manager = createQuotaPoolManager();
         const provider = manager.providerStatus['openai-codex-oauth'][0].config;
         jest.spyOn(manager, '_debouncedSave').mockImplementation(() => {});
 
-        manager.markCodexQuotaBucketUnhealthy('openai-codex-oauth', provider, 'codex53', 'exhausted', '2026-09-01T00:00:00.000Z');
-        manager.markCodexQuotaBucketUnhealthy('openai-codex-oauth', provider, 'codex53', 'exhausted', '2026-09-01T00:00:00.000Z');
-        manager.markCodexRateLimitCooldown('openai-codex-oauth', provider, 'codex53', '429', '2026-09-01T00:00:00.000Z');
-        manager.markCodexRateLimitCooldown('openai-codex-oauth', provider, 'codex53', '429', '2026-09-01T00:00:00.000Z');
+        manager.markCodexQuotaBucketUnhealthy('openai-codex-oauth', provider, 'general', 'exhausted', '2026-09-01T00:00:00.000Z');
+        manager.markCodexQuotaBucketUnhealthy('openai-codex-oauth', provider, 'general', 'exhausted', '2026-09-01T00:00:00.000Z');
+        manager.markCodexRateLimitCooldown('openai-codex-oauth', provider, 'general', '429', '2026-09-01T00:00:00.000Z');
+        manager.markCodexRateLimitCooldown('openai-codex-oauth', provider, 'general', '429', '2026-09-01T00:00:00.000Z');
 
         expect(manager._debouncedSave).toHaveBeenCalledTimes(2);
-    });
-
-    test('falls back to GPT-5.6 Luna when Codex 5.3 Spark has no selectable provider', async () => {
-        writeCodexUsageCache([
-            { uuid: 'aaa-codex-over', success: true, usage: { summary: { plan: 'Pro' }, items: [] } },
-            { uuid: 'zzz-codex-ok', success: true, usage: { summary: { plan: 'Plus' }, items: [] } }
-        ]);
-        const manager = createQuotaPoolManager({
-            over: {
-                supportedModels: ['gpt-5.4-mini'],
-                notSupportedModels: ['gpt-5.3-codex-spark']
-            },
-            ok: {
-                supportedModels: ['gpt-5.4-mini'],
-                notSupportedModels: ['gpt-5.3-codex-spark']
-            }
-        });
-
-        const selected = await manager.selectProviderWithFallback('openai-codex-oauth', 'gpt-5.3-codex-spark');
-
-        expect(selected).toMatchObject({
-            actualProviderType: 'openai-codex-oauth',
-            isFallback: true,
-            actualModel: 'gpt-5.6-luna'
-        });
     });
 
     test('does not apply the Luna mapping to unrelated models', async () => {
@@ -1168,38 +890,4 @@ describe('provider pool Codex token quota', () => {
         expect(selected.uuid).toBe('aaa-codex-over');
     });
 
-    test('applies a Spark weekly-only primary window to the Spark weekly threshold', async () => {
-        writeCodexUsageCache([
-            {
-                uuid: 'aaa-codex-over',
-                success: true,
-                usage: {
-                    summary: { plan: 'Pro' },
-                    items: [
-                        {
-                            id: 'primary_window',
-                            windowKind: 'weekly',
-                            durationSeconds: 604800,
-                            percent: 10,
-                            unit: 'percent'
-                        },
-                        {
-                            id: 'additional_gpt_5_3_codex_spark_primary_window',
-                            label: 'GPT-5.3-Codex-Spark (Weekly)',
-                            scope: 'model',
-                            windowKind: 'weekly',
-                            durationSeconds: 604800,
-                            percent: 85,
-                            unit: 'percent'
-                        }
-                    ]
-                }
-            }
-        ]);
-
-        const manager = createQuotaPoolManager({ ok: { isDisabled: true } });
-        const selected = await manager.selectProvider('openai-codex-oauth', 'gpt-5.3-codex-spark');
-
-        expect(selected.uuid).toBe('aaa-codex-over');
-    });
 });

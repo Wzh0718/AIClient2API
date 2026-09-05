@@ -29,7 +29,7 @@ function codexProvider(uuid, overrides = {}) {
         uuid,
         customName: uuid,
         lastKnownCodexPlan: 'pro',
-        supportedModels: ['gpt-5.3-codex-spark', 'gpt-5.4-mini', 'gpt-5.5'],
+        supportedModels: ['gpt-5.4-mini', 'gpt-5.5'],
         ...overrides
     };
 }
@@ -258,7 +258,7 @@ describe('provider pool fallback disabling', () => {
         });
     });
 
-    test('disableProviderFallback prevents Codex model quota fallback', async () => {
+    test('disableProviderFallback does not invent a Spark-to-Luna pool fallback', async () => {
         const manager = createManager({
             codex: [codexProvider('codex-primary')],
             globalConfig: {

@@ -30,8 +30,6 @@ const PROXY_POOL_PROVIDER_LABELS = {
 const CODEX_QUOTA_PERCENT_FIELDS = new Set([
     'codexGeneralMax5hPercent',
     'codexGeneralMaxWeeklyPercent',
-    'codex53Max5hPercent',
-    'codex53MaxWeeklyPercent',
     'antigravityGeminiMax5hPercent',
     'antigravityGeminiMaxWeeklyPercent',
     'antigravityThirdPartyMax5hPercent',

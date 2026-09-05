@@ -328,7 +328,7 @@ describe('provider auth failure health marking', () => {
         expect(res.body).toContain('token has been invalidated');
     });
 
-    test('marks a unary Codex 5.3 usage_limit_reached error as Codex 5.3 quota bucket cooldown without globally unhealthy provider', async () => {
+    test('marks a unary Codex Spark usage_limit_reached error as the general quota bucket without globally unhealthy provider', async () => {
         const error = createCodexUsageLimitError();
         const service = {
             generateContent: jest.fn().mockRejectedValue(error)
@@ -360,7 +360,7 @@ describe('provider auth failure health marking', () => {
         expect(providerPoolManager.markCodexQuotaBucketUnhealthy).toHaveBeenCalledWith(
             'openai-codex-oauth',
             { uuid: 'codex-provider-1' },
-            'codex53',
+            'general',
             '429 Too Many Requests - short cooldown',
             expect.any(Date)
         );
@@ -410,7 +410,7 @@ describe('provider auth failure health marking', () => {
         expect(providerPoolManager.releaseSlot).toHaveBeenCalledWith('openai-codex-oauth', 'codex-provider-1');
     });
 
-    test('marks a stream Codex 5.3 usage_limit_reached error as Codex 5.3 quota bucket cooldown without globally unhealthy provider', async () => {
+    test('marks a stream Codex Spark usage_limit_reached error as the general quota bucket without globally unhealthy provider', async () => {
         const error = createCodexUsageLimitError();
         const service = {
             async *generateContentStream() {
@@ -444,7 +444,7 @@ describe('provider auth failure health marking', () => {
         expect(providerPoolManager.markCodexQuotaBucketUnhealthy).toHaveBeenCalledWith(
             'openai-codex-oauth',
             { uuid: 'codex-provider-1' },
-            'codex53',
+            'general',
             '429 Too Many Requests - short cooldown',
             expect.any(Date)
         );

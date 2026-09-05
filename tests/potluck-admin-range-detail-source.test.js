@@ -291,6 +291,7 @@ describe('API Potluck admin range and key detail UI source', () => {
         expect(source).toContain("emptyText: '当前范围暂无模型数据'");
         expect(source).toContain('filter: usage => usageTokens(usage) > 0');
         expect(source).toContain('const MODEL_DISPLAY_ALIASES = {');
+        expect(source).toContain("'gpt-5.3codexspark': 'gpt-5.6-luna'");
         expect(source).toContain("'gtp-5.1': 'gpt-5.3-codex-spark'");
         expect(source).toContain("'gpt-5.1': 'gpt-5.3-codex-spark'");
         expect(source).toContain("'gpt-5': 'gpt-5.3-codex-spark'");

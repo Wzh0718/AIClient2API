@@ -12,10 +12,10 @@ describe('provider config normalizer', () => {
 
         expect(normalized).toMatchObject({
             codexGeneralMax5hPercent: 80,
-            codexGeneralMaxWeeklyPercent: 90,
-            codex53Max5hPercent: 70,
-            codex53MaxWeeklyPercent: 75
+            codexGeneralMaxWeeklyPercent: 90
         });
+        expect(normalized).not.toHaveProperty('codex53Max5hPercent');
+        expect(normalized).not.toHaveProperty('codex53MaxWeeklyPercent');
     });
 
     test('normalizes Antigravity family quota limits as non-negative numbers', () => {

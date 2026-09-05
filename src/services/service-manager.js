@@ -2,10 +2,7 @@
 import logger from '../utils/logger.js';
 import {
     ProviderPoolManager,
-    getCodexModelFallbackTarget,
-    getCodex53QuotaFallbackModel,
-    shouldTryCodex53QuotaModelFallback,
-    isCodex53SparkModel
+    getCodexModelFallbackTarget
 } from '../providers/provider-pool-manager.js';
 import deepmerge from 'deepmerge';
 import crypto from 'crypto';
@@ -332,36 +329,6 @@ function getProviderCredentialCatalog(providerType) {
         .filter(Boolean);
 }
 
-async function getCodex53QuotaFallbackService(config, requestedModel, options = {}) {
-    const fallbackModel = getCodex53QuotaFallbackModel(config);
-    const fallbackResult = await getApiServiceWithFallback(config, fallbackModel, {
-        ...options,
-        forceCodexModelFallback: false,
-        modelFallbackAttempted: true,
-        allowCodexFixedFallbackToOtherCredentials: true,
-        excludeProviderUuids: []
-    });
-    const actualModel = fallbackResult.actualModel || fallbackModel;
-    const result = {
-        ...fallbackResult,
-        isFallback: true,
-        actualModel,
-        modelFallbackFrom: requestedModel,
-        modelFallbackTo: actualModel,
-        modelFallbackReason: 'CODEX53_QUOTA_EXHAUSTED'
-    };
-    finalizeCodexRouteResult(config, {
-        selectedProviderUuid: result.uuid,
-        actualProviderType: result.actualProviderType,
-        serviceConfig: result.serviceConfig,
-        actualModel,
-        modelFallbackFrom: requestedModel,
-        modelFallbackTo: actualModel,
-        modelFallbackReason: result.modelFallbackReason
-    });
-    return result;
-}
-
 function getProviderStatusByUuid(providerType, uuid) {
     return (providerPoolManager?.providerStatus?.[providerType] || [])
         .find(provider => String(provider?.uuid || provider?.config?.uuid || '') === String(uuid));
@@ -413,10 +380,6 @@ function createFixedCredentialUnavailableError(cause = null, route = {}, configR
     };
     if (cause) error.cause = cause;
     return error;
-}
-
-function shouldFallbackUnavailableCodex53(config, requestedModel) {
-    return isCodexProviderType(config?.MODEL_PROVIDER) && isCodex53SparkModel(requestedModel);
 }
 
 function createFixedRouteMismatchError(route = {}, configRevision = null) {
@@ -1609,12 +1572,16 @@ async function _resolveEffectiveRouting(config, requestedModel, options = {}) {
         }
     }
 
+    let entryModelReason = null;
+    let requestedEntryModel = actualModelName;
     if (isCodexProviderType(effectiveProvider) && actualModelName) {
+        requestedEntryModel = actualModelName;
         const resolved = resolveCodexEntryModel({
             model: actualModelName,
             supported: isSupportedCodexModel(effectiveProvider, actualModelName),
             preserveRequestedModel: options.preserveRequestedCodexModel === true
         });
+        entryModelReason = resolved.reason || null;
         if (resolved.actualModel !== actualModelName) {
             const log = resolved.reason === 'UNSUPPORTED_MODEL' ? logger.warn.bind(logger) : logger.info.bind(logger);
             log(`[Routing] Codex model '${actualModelName}' routed to '${resolved.actualModel}' (${resolved.reason})`);
@@ -1627,7 +1594,7 @@ async function _resolveEffectiveRouting(config, requestedModel, options = {}) {
         throw new Error(`[API Service] Auto-routing failed: Model name must include a provider prefix (e.g., 'provider:model'). Received: '${requestedModel}'`);
     }
 
-    return { effectiveProvider, actualModelName };
+    return { effectiveProvider, actualModelName, entryModelReason, requestedEntryModel };
 }
 
 /**
@@ -1707,7 +1674,7 @@ export async function getApiService(config, requestedModel = null, options = {})
  */
 export async function getApiServiceWithFallback(config, requestedModel = null, options = {}) {
     // 1. 鍓嶇疆璺敱瑙ｆ瀽
-    const { effectiveProvider, actualModelName } = await _resolveEffectiveRouting(config, requestedModel, options);
+    const { effectiveProvider, actualModelName, entryModelReason, requestedEntryModel } = await _resolveEffectiveRouting(config, requestedModel, options);
     config.MODEL_PROVIDER = effectiveProvider;
 
     const codexFallbackTarget = isCodexProviderType(effectiveProvider)
@@ -1783,13 +1750,6 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                 selectionDiagnostics
             );
         } catch (error) {
-            if (
-                options.modelFallbackAttempted !== true
-                && (shouldTryCodex53QuotaModelFallback(effectiveProvider, actualModelName, error, config)
-                    || shouldFallbackUnavailableCodex53(config, actualModelName))
-            ) {
-                return getCodex53QuotaFallbackService(config, actualModelName, options);
-            }
             if (codexFallbackTarget && options.modelFallbackAttempted !== true && isCodexModelFallbackEligibleError(error)) {
                 return getApiServiceWithFallback(config, actualModelName, {
                     ...options,
@@ -1805,14 +1765,6 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         if (groupSelection.handled) {
             selectedResult = groupSelection.selectedResult;
             availabilityError = groupSelection.availabilityError;
-            if (
-                !selectedResult
-                && options.modelFallbackAttempted !== true
-                && (shouldTryCodex53QuotaModelFallback(effectiveProvider, actualModelName, availabilityError, config)
-                    || shouldFallbackUnavailableCodex53(config, actualModelName))
-            ) {
-                return getCodex53QuotaFallbackService(config, actualModelName, options);
-            }
             if (!selectedResult && codexFallbackTarget && options.modelFallbackAttempted !== true) {
                 return getApiServiceWithFallback(config, actualModelName, {
                     ...options,
@@ -1999,13 +1951,20 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         config._codexRouting.unavailableProviderCount = Number(selectionDiagnostics.unavailableProviderCount || 0);
     }
 
+    const sparkAliasMetadata = entryModelReason === 'SPARK_ALIAS' && requestedEntryModel && actualModel
+        ? {
+            modelFallbackFrom: requestedEntryModel,
+            modelFallbackTo: actualModel,
+            modelFallbackReason: 'SPARK_ALIAS'
+        }
+        : {};
     const fallbackMetadata = isFallback && actualModel !== actualModelName
         ? {
             modelFallbackFrom: actualModelName,
             modelFallbackTo: actualModel,
             modelFallbackReason: selectedModelFallbackReason || options.modelFallbackReason || 'MODEL_UNAVAILABLE'
         }
-        : {};
+        : sparkAliasMetadata;
     finalizeCodexRouteResult(config, {
         selectedProviderUuid: selectedUuid,
         actualProviderType,

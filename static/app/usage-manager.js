@@ -555,8 +555,7 @@ function renderCollapsedStatusIcons(instance, providerType) {
 
     if (providerType === 'openai-codex-oauth') {
         icons.push(
-            renderStatusIcon('通用额度', getQuotaStatusState(instance.codexQuotaHealth?.general)),
-            renderStatusIcon('5.3额度', getQuotaStatusState(instance.codexQuotaHealth?.codex53))
+            renderStatusIcon('通用额度', getQuotaStatusState(instance.codexQuotaHealth?.general))
         );
     }
     if (providerType === 'gemini-antigravity') {
@@ -588,8 +587,7 @@ function renderCodexQuotaHealthBadges(instance, providerType) {
     };
 
     return [
-        renderBadge('通用', quotaHealth.general),
-        renderBadge('5.3', quotaHealth.codex53)
+        renderBadge('通用', quotaHealth.general)
     ].join('');
 }
 

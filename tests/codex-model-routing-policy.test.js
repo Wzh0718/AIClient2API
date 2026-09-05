@@ -6,8 +6,8 @@ import {
 } from '../src/providers/openai/codex-model-routing.js';
 
 describe('Codex entry model routing policy', () => {
-    test.each(['gpt-5.4', 'gpt-5.4-fast', 'gpt-5.4-mini', 'gpt-5.4-mini-fast'])(
-        'keeps GPT-5.4 family %s unchanged',
+    test.each(['gpt-5.4-mini', 'gpt-5.4-mini-fast'])(
+        'keeps GPT-5.4 mini family %s unchanged',
         model => {
             expect(resolveCodexEntryModel({ model, supported: true })).toEqual({
                 actualModel: model,
@@ -16,17 +16,31 @@ describe('Codex entry model routing policy', () => {
         }
     );
 
-    test.each(['gpt-5.3', 'gpt-5.3-codex-spark', 'gpt-5.3-codex-spark-fast'])(
-        'keeps supported GPT-5.3 family model %s before quota evaluation',
+    test.each(['gpt-5.4', 'gpt-5.4-fast'])(
+        'rejects retired GPT-5.4 flagship model %s',
         model => {
-            expect(resolveCodexEntryModel({ model, supported: true })).toEqual({
-                actualModel: model,
-                reason: null
-            });
+            expect(() => resolveCodexEntryModel({ model, supported: false }))
+                .toThrow(`[Codex] 不支持的模型: ${model}`);
         }
     );
 
-    test('reports unsupported Codex models as errors', () => {
+    test.each([
+        ['gpt-5.3-codex-spark', 'gpt-5.6-luna'],
+        ['gpt-5.3-codex-spark-fast', 'gpt-5.6-luna-fast']
+    ])('maps retired Spark model %s to %s before the supported check', (model, actualModel) => {
+        expect(resolveCodexEntryModel({ model, supported: false })).toEqual({
+            actualModel,
+            reason: 'SPARK_ALIAS'
+        });
+    });
+
+    test('rejects bare GPT-5.3 instead of aliasing it to Luna', () => {
+        expect(() => resolveCodexEntryModel({ model: 'gpt-5.3', supported: false }))
+            .toThrow('[Codex] 不支持的模型: gpt-5.3');
+    });
+
+    test('does not default unknown Codex models to Luna', () => {
+        expect(DEFAULT_CODEX_FALLBACK_MODEL).toBeNull();
         expect(() => resolveCodexEntryModel({ model: 'gpt-does-not-exist', supported: false }))
             .toThrow('[Codex] 不支持的模型: gpt-does-not-exist');
     });
@@ -37,6 +51,14 @@ describe('Codex entry model routing policy', () => {
             supported: true,
             preserveRequestedModel: true
         })).toEqual({ actualModel: 'gpt-5.4-mini-fast', reason: null });
+    });
+
+    test('still maps Spark for a batch-key Gemini fallback', () => {
+        expect(resolveCodexEntryModel({
+            model: 'gpt-5.3-codex-spark',
+            supported: false,
+            preserveRequestedModel: true
+        })).toEqual({ actualModel: 'gpt-5.6-luna', reason: 'SPARK_ALIAS' });
     });
 
     test.each([

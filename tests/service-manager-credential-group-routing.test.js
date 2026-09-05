@@ -39,7 +39,7 @@ function provider(uuid, overrides = {}) {
         customName: uuid,
         codexAccountKey: `account-${uuid}`,
         lastKnownCodexPlan: 'pro',
-        supportedModels: ['gpt-5.3-codex-spark', 'gpt-5.4-mini', 'gpt-5.6-luna'],
+        supportedModels: ['gpt-5.4-mini', 'gpt-5.6-luna'],
         ...overrides
     };
 }
@@ -215,8 +215,11 @@ describe('Service Manager Codex credential-group routing', () => {
 
         expect(basicService.providerUuid).toBe('codex-b');
         expect(detailed.uuid).toBe('codex-b');
+        expect(detailed.actualModel).toBe('gpt-5.6-luna');
+        expect(detailed.modelFallbackReason).toBe('SPARK_ALIAS');
         expect(selectSpy).toHaveBeenCalledTimes(2);
         for (const call of selectSpy.mock.calls) {
+            expect(call[1]).toBe('gpt-5.6-luna');
             expect(call[2]).toMatchObject({
                 allowedProviderUuids: ['codex-b'],
                 disableProviderFallback: true
@@ -230,7 +233,7 @@ describe('Service Manager Codex credential-group routing', () => {
         });
     });
 
-    test('fixed Codex routing may switch credentials when the fallback model is unavailable on the fixed credential', async () => {
+    test('fixed Codex routing maps Spark requests to Luna before provider selection', async () => {
         writeGroupConfig({
             groups: [
                 { id: 'group-a', credentialUuids: ['codex-a'] },
@@ -248,29 +251,24 @@ describe('Service Manager Codex credential-group routing', () => {
                 routingMode: 'fixed',
                 fixedCredential: { providerType, uuid: 'codex-a' },
                 manualLock: true
-            },
-            extra: { CODEX_53_QUOTA_FALLBACK_MODEL: 'gpt-5.6-luna' }
+            }
         });
         const manager = await initialize(config);
-        jest.spyOn(manager, 'selectProviderWithFallback').mockImplementation(async (_providerType, model) => {
-            if (model === 'gpt-5.3-codex-spark') {
-                const error = new Error('fixed credential Codex 5.3 quota exhausted');
-                error.status = 429;
-                error.code = 429;
-                error.filterReasons = { codex53_quota_exceeded: 1 };
-                throw error;
-            }
-            return { config: provider('codex-b'), actualProviderType: providerType, isFallback: false };
+        const selectSpy = jest.spyOn(manager, 'selectProviderWithFallback').mockResolvedValue({
+            config: provider('codex-a'),
+            actualProviderType: providerType,
+            isFallback: false
         });
 
         const result = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark');
 
+        expect(selectSpy.mock.calls[0][1]).toBe('gpt-5.6-luna');
         expect(result).toMatchObject({
-            uuid: 'codex-b',
+            uuid: 'codex-a',
             actualModel: 'gpt-5.6-luna',
-            isFallback: true,
             modelFallbackFrom: 'gpt-5.3-codex-spark',
-            modelFallbackTo: 'gpt-5.6-luna'
+            modelFallbackTo: 'gpt-5.6-luna',
+            modelFallbackReason: 'SPARK_ALIAS'
         });
     });
 
@@ -475,7 +473,7 @@ describe('Service Manager Codex credential-group routing', () => {
         });
     });
 
-    test('auto routing falls back to GPT-5.6 Luna when every group is exhausted for Codex 5.3', async () => {
+    test('auto routing maps Spark requests to Luna before group selection', async () => {
         writeGroupConfig({
             groups: [
                 { id: 'group-a', credentialUuids: ['codex-a'] },
@@ -484,52 +482,45 @@ describe('Service Manager Codex credential-group routing', () => {
             keyAssignments: [{ keyId: 'key-1', routingMode: 'auto', primaryGroupId: 'group-a' }]
         });
         const config = createConfig({
-            providers: [provider('codex-a'), provider('codex-b')],
-            extra: { CODEX_53_QUOTA_FALLBACK_MODEL: 'gpt-5.6-luna' }
+            providers: [provider('codex-a'), provider('codex-b')]
         });
         const manager = await initialize(config);
-        jest.spyOn(manager, 'selectProviderWithFallback').mockImplementation(async (_providerType, model) => {
-            if (model === 'gpt-5.3-codex-spark') {
-                const error = new Error('All Codex providers exceeded configured usage quotas');
-                error.status = 429;
-                error.code = 429;
-                error.filterReasons = { codex53_quota_exceeded: 2 };
-                throw error;
-            }
-            return { config: provider('codex-a'), actualProviderType: providerType, isFallback: false };
+        const selectSpy = jest.spyOn(manager, 'selectProviderWithFallback').mockResolvedValue({
+            config: provider('codex-a'),
+            actualProviderType: providerType,
+            isFallback: false
         });
 
         const result = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark');
 
+        expect(selectSpy.mock.calls[0][1]).toBe('gpt-5.6-luna');
         expect(result.actualModel).toBe('gpt-5.6-luna');
-        expect(result.isFallback).toBe(true);
         expect(result.modelFallbackFrom).toBe('gpt-5.3-codex-spark');
         expect(result.modelFallbackTo).toBe('gpt-5.6-luna');
+        expect(result.modelFallbackReason).toBe('SPARK_ALIAS');
     });
 
-    test('falls back to GPT-5.6 Luna for any unavailable Codex 5.3 Spark selection error', async () => {
+    test('maps Spark-fast requests to Luna-fast at entry', async () => {
         writeGroupConfig({
             groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
             keyAssignments: [{ keyId: 'key-1', routingMode: 'auto', primaryGroupId: 'group-a' }]
         });
         const config = createConfig({ providers: [provider('codex-a')] });
         const manager = await initialize(config);
-        jest.spyOn(manager, 'selectProviderWithFallback').mockImplementation(async (_providerType, model) => {
-            if (model === 'gpt-5.3-codex-spark') {
-                const error = new Error('Codex provider temporarily unavailable');
-                error.status = 503;
-                throw error;
-            }
-            return { config: provider('codex-a'), actualProviderType: providerType, isFallback: false };
+        const selectSpy = jest.spyOn(manager, 'selectProviderWithFallback').mockResolvedValue({
+            config: provider('codex-a'),
+            actualProviderType: providerType,
+            isFallback: false
         });
 
-        const result = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark');
+        const result = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark-fast');
 
+        expect(selectSpy.mock.calls[0][1]).toBe('gpt-5.6-luna-fast');
         expect(result).toMatchObject({
-            actualModel: 'gpt-5.6-luna',
-            isFallback: true,
-            modelFallbackFrom: 'gpt-5.3-codex-spark',
-            modelFallbackTo: 'gpt-5.6-luna'
+            actualModel: 'gpt-5.6-luna-fast',
+            modelFallbackFrom: 'gpt-5.3-codex-spark-fast',
+            modelFallbackTo: 'gpt-5.6-luna-fast',
+            modelFallbackReason: 'SPARK_ALIAS'
         });
     });
 

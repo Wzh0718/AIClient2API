@@ -17,7 +17,9 @@ const LEGACY_CODEX_QUOTA_FIELDS = [
     'codexMax5hTokens',
     'codexMaxWeeklyTokens',
     'codexMax5hPercent',
-    'codexMaxWeeklyPercent'
+    'codexMaxWeeklyPercent',
+    'codex53Max5hPercent',
+    'codex53MaxWeeklyPercent'
 ];
 
 const PROVIDER_POSITIVE_NUMBER_CONFIG_FIELDS = [
@@ -27,8 +29,6 @@ const PROVIDER_POSITIVE_NUMBER_CONFIG_FIELDS = [
 const PROVIDER_NON_NEGATIVE_NUMBER_CONFIG_FIELDS = [
     'codexGeneralMax5hPercent',
     'codexGeneralMaxWeeklyPercent',
-    'codex53Max5hPercent',
-    'codex53MaxWeeklyPercent',
     'antigravityGeminiMax5hPercent',
     'antigravityGeminiMaxWeeklyPercent',
     'antigravityThirdPartyMax5hPercent',

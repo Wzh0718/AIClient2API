@@ -274,18 +274,8 @@ function modelMatchesAnyPattern(model, patterns) {
 }
 
 const CODEX_QUOTA_BUCKET = {
-    GENERAL: 'general',
-    CODEX_53: 'codex53'
+    GENERAL: 'general'
 };
-
-const DEFAULT_CODEX_53_MODEL_PATTERNS = [
-    '*5.3*',
-    '*codexspark*',
-    '*codex-spark*',
-    '*codex_spark*'
-];
-
-const DEFAULT_CODEX_53_QUOTA_FALLBACK_MODEL = 'gpt-5.6-luna';
 
 const DEFAULT_CODEX_STICKY_HOT_SHARD_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_CODEX_STICKY_HOT_SHARD_MIN_REQUESTS = 100;
@@ -371,56 +361,9 @@ function getRawRateLimitWindowPercent(rawUsage, windowId) {
     return null;
 }
 
-function resolveCodexQuotaBucket(requestedModel = null, patterns = DEFAULT_CODEX_53_MODEL_PATTERNS) {
-    const model = String(requestedModel || '').trim();
-    if (!model) return CODEX_QUOTA_BUCKET.GENERAL;
-    const normalizedPatterns = toStringArray(patterns).map(pattern => pattern.toLowerCase());
-    return modelMatchesAnyPattern(model.toLowerCase(), normalizedPatterns) ? CODEX_QUOTA_BUCKET.CODEX_53 : CODEX_QUOTA_BUCKET.GENERAL;
-}
-
-function getCodex53UsagePercent(usage, windowId) {
-    const isPrimary = windowId === 'primary_window';
-    const desiredKind = isPrimary ? 'short' : 'weekly';
-    const windowNeedle = isPrimary ? 'primary_window' : 'secondary_window';
-    const labelNeedle = isPrimary ? '5h' : 'weekly';
-    const semanticPercent = getUsageItemPercentByMatcher(usage, ({ id, label, windowKind, scope }) =>
-        windowKind === desiredKind &&
-        (scope === 'model' || id.includes('additional')) &&
-        (id.includes('gpt_5_3') || id.includes('codex_5_3') || label.includes('gpt-5.3'))
-    );
-    if (semanticPercent !== null) return semanticPercent;
-
-    const rawWindows = normalizeCodexRateLimitWindows(usage?.raw || {});
-    const rawSemantic = rawWindows.find(window =>
-        window.scope === 'model' &&
-        window.windowKind === desiredKind &&
-        String(window.limitName || '').toLowerCase().includes('gpt-5.3')
-    );
-    if (rawSemantic) return normalizePercentValue(rawSemantic.usedPercent);
-    const hasSemanticModelWindows = (Array.isArray(usage?.items) ? usage.items : []).some(entry => {
-        const id = String(entry?.id || '').toLowerCase();
-        const label = String(entry?.label || '').toLowerCase();
-        return entry?.windowKind && (id.includes('gpt_5_3') || label.includes('gpt-5.3'));
-    });
-    if (hasSemanticModelWindows) return null;
-
-    return getUsageItemPercentByMatcher(usage, ({ id, label }) =>
-        id.includes('additional') &&
-        id.includes('gpt_5_3_codex_spark') &&
-        id.includes(windowNeedle)
-    ) ?? getUsageItemPercentByMatcher(usage, ({ id, label }) =>
-        (id.includes('gpt_5_3') || label.includes('gpt-5.3')) &&
-        (id.includes(windowNeedle) || label.includes(labelNeedle))
-    );
-}
-
 function getCodexCachedUsagePercent(providerType, uuid, usageCache, windowId, bucket = CODEX_QUOTA_BUCKET.GENERAL) {
     const usage = getCachedCodexUsageForProvider(providerType, uuid, usageCache);
     if (!usage) return null;
-
-    if (bucket === CODEX_QUOTA_BUCKET.CODEX_53) {
-        return getCodex53UsagePercent(usage, windowId);
-    }
 
     const desiredKind = windowId === 'primary_window' ? 'short' : 'weekly';
     const semanticPercent = getUsageItemPercentByMatcher(usage, ({ id, windowKind, scope }) =>
@@ -450,13 +393,6 @@ function getCodexCachedQuotaPressure(providerType, uuid, usageCache, bucket = CO
 }
 
 function getCodexQuotaLimits(config = {}, bucket = CODEX_QUOTA_BUCKET.GENERAL) {
-    if (bucket === CODEX_QUOTA_BUCKET.CODEX_53) {
-        return {
-            max5hPercent: getPercentLimit(config.codex53Max5hPercent, 100),
-            maxWeeklyPercent: getPercentLimit(config.codex53MaxWeeklyPercent, 100)
-        };
-    }
-
     return {
         max5hPercent: getPercentLimit(config.codexGeneralMax5hPercent, 100),
         maxWeeklyPercent: getPercentLimit(config.codexGeneralMaxWeeklyPercent, 100)
@@ -519,9 +455,7 @@ export function getCodexTokenQuotaStatus(providerType, providerStatus, usageCach
     if (max5hPercent) {
         const usagePercent = getCodexCachedUsagePercent(providerType, uuid, usageCache, 'primary_window', bucket);
         if (usagePercent === null) {
-            const status = bucket === CODEX_QUOTA_BUCKET.GENERAL
-                ? applicability?.general?.short?.status
-                : applicability?.codex53?.short?.status;
+            const status = applicability?.general?.short?.status;
             if (status !== 'not_applicable') {
                 warnings.push(`official ${bucket} 5h usage percent unavailable`);
             }
@@ -556,19 +490,6 @@ export function getCodexTokenQuotaStatus(providerType, providerStatus, usageCach
     return { limited: true, exceeded: false, configured: true, reason: warnings.join('; ') || null };
 }
 
-export function isCodex53QuotaExhaustionError(error) {
-    if (!error || (error.status !== 429 && error.code !== 429)) return false;
-    let current = error;
-    while (current) {
-        const filterReasons = current.filterReasons || {};
-        if (Object.keys(filterReasons).some(reason => reason === 'codex53_quota_exceeded' || reason === 'cooldown')) {
-            return true;
-        }
-        current = current.cause;
-    }
-    return false;
-}
-
 function getCodexQuotaFilterTtlMs(globalConfig = {}, unavailable = false) {
     const configured = unavailable
         ? globalConfig.CODEX_UNAVAILABLE_CACHE_TTL_MS ?? globalConfig.codexUnavailableCacheTtlMs
@@ -582,12 +503,6 @@ function getCodexUsageCacheVersion(usageCache) {
     return usageCache?.timestamp || 'none';
 }
 
-export function getCodex53QuotaFallbackModel(globalConfig = {}) {
-    return globalConfig?.codex53QuotaFallbackModel ||
-        globalConfig?.CODEX_53_QUOTA_FALLBACK_MODEL ||
-        DEFAULT_CODEX_53_QUOTA_FALLBACK_MODEL;
-}
-
 export function getCodexModelFallbackTarget(requestedModel, globalConfig = {}) {
     const model = String(requestedModel || '').trim();
     if (!model) return null;
@@ -599,19 +514,6 @@ export function getCodexModelFallbackTarget(requestedModel, globalConfig = {}) {
         : null;
     if (!target || target === false || target === model) return null;
     return String(target);
-}
-
-export function shouldTryCodex53QuotaModelFallback(providerType, requestedModel, error, globalConfig = {}) {
-    if (!isCodexProviderType(providerType)) return false;
-    const bucket = resolveCodexQuotaBucket(
-        requestedModel,
-        toStringArray(globalConfig?.CODEX_53_QUOTA_MODEL_PATTERNS || globalConfig?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS)
-    );
-    return bucket === CODEX_QUOTA_BUCKET.CODEX_53 && isCodex53QuotaExhaustionError(error);
-}
-
-export function isCodex53SparkModel(requestedModel) {
-    return String(requestedModel || '').trim() === 'gpt-5.3-codex-spark';
 }
 
 /**
@@ -971,10 +873,7 @@ export class ProviderPoolManager {
     }
 
     _rankCodexShardProviders(providers, providerType, requestedModel, usageCache, now = Date.now()) {
-        const bucket = resolveCodexQuotaBucket(
-            requestedModel,
-            toStringArray(this.globalConfig?.CODEX_53_QUOTA_MODEL_PATTERNS || this.globalConfig?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS)
-        );
+        const bucket = CODEX_QUOTA_BUCKET.GENERAL;
 
         return [...providers].sort((a, b) => {
             const rank = (provider) => {
@@ -1905,31 +1804,6 @@ export class ProviderPoolManager {
         return `codex-pool:${providerType}:${bucket}:${this.providerConfigRevision}`;
     }
 
-    async _getCodex53ExhaustedFastPath(providerType, requestedModel) {
-        if (providerType !== 'openai-codex-oauth' || requestedModel !== 'gpt-5.3-codex-spark') return null;
-        const providers = this.providerStatus[providerType] || [];
-        if (!providers.length) return null;
-        await this._hydrateCodexPoolSnapshot(providerType, providers, requestedModel);
-        const snapshotKey = `${providerType}:codex53`;
-        const snapshot = this._codexPoolExhaustedSnapshots.get(snapshotKey);
-        const usageCache = readFreshUsageCacheSync();
-        const usageCacheVersion = getCodexUsageCacheVersion(usageCache);
-        const now = Date.now();
-        const stateFingerprint = this._getCodexPoolStateFingerprint(providers, 'codex53');
-        const valid = snapshot
-            && snapshot.exhausted === true
-            && snapshot.expiresAt > now
-            && snapshot.providerConfigRevision === this.providerConfigRevision
-            && snapshot.stateFingerprint === stateFingerprint
-            && (snapshot.usageCacheVersion || 'none') === usageCacheVersion;
-        if (!valid) {
-            this._codexQuotaFilterMetrics.fastPathMisses += 1;
-            return null;
-        }
-        this._codexQuotaFilterMetrics.fastPathHits += 1;
-        return snapshot;
-    }
-
     _getCodexPoolStateFingerprint(providers, bucket) {
         return providers.map(provider => {
             const config = provider.config || {};
@@ -1942,8 +1816,6 @@ export class ProviderPoolManager {
                 config.needsRefresh === true,
                 config.codexGeneralMax5hPercent ?? '',
                 config.codexGeneralMaxWeeklyPercent ?? '',
-                config.codex53Max5hPercent ?? '',
-                config.codex53MaxWeeklyPercent ?? '',
                 quota.isHealthy === false,
                 quota.scheduledRecoveryTime || '',
                 cooldown.isCoolingDown === true,
@@ -1964,10 +1836,7 @@ export class ProviderPoolManager {
     }
 
     async _hydrateCodexPoolSnapshotUnmetered(providerType, providers, requestedModel) {
-        const bucket = resolveCodexQuotaBucket(
-            requestedModel,
-            toStringArray(this.globalConfig?.CODEX_53_QUOTA_MODEL_PATTERNS || this.globalConfig?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS)
-        );
+        const bucket = CODEX_QUOTA_BUCKET.GENERAL;
         if (this._hasFreshLocalCodexPoolSnapshot(providerType, bucket, providers)) return;
         const scope = this._getCodexPoolSnapshotScope(providerType, bucket);
         try {
@@ -3052,10 +2921,7 @@ export class ProviderPoolManager {
             selectionDiagnostics.candidateProviderCount = providers.length;
             selectionDiagnostics.unavailableProviderCount = 0;
         }
-        const bucket = resolveCodexQuotaBucket(
-            requestedModel,
-            toStringArray(this.globalConfig?.CODEX_53_QUOTA_MODEL_PATTERNS || this.globalConfig?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS)
-        );
+        const bucket = CODEX_QUOTA_BUCKET.GENERAL;
         const snapshotKey = `${providerType}:${bucket}`;
         const getStateFingerprint = () => this._getCodexPoolStateFingerprint(this.providerStatus[providerType] || providers, bucket);
         const stateFingerprint = getStateFingerprint();
@@ -4559,7 +4425,6 @@ export class ProviderPoolManager {
         if (Array.isArray(fallbackTypes)) {
             typesToTry.push(...fallbackTypes);
         }
-        let codex53QuotaFallbackReason = null;
         let modelFallbackReason = null;
         const modelFallbackTarget = getCodexModelFallbackTarget(requestedModel, this.globalConfig);
         let lastQuotaError = null;
@@ -4595,11 +4460,6 @@ export class ProviderPoolManager {
                     };
                 }
             } catch (err) {
-                if (shouldTryCodex53QuotaModelFallback(currentType, requestedModel, err, this.globalConfig)
-                    || (currentType === providerType && isCodex53SparkModel(requestedModel))) {
-                    codex53QuotaFallbackReason = err.message;
-                    break;
-                }
                 if (modelFallbackTarget && (err.status === 429 || err.code === 429)) {
                     modelFallbackReason = err.message;
                     break;
@@ -4612,28 +4472,9 @@ export class ProviderPoolManager {
                 }
                 throw err; // 其他错误抛出
             }
-            if (currentType === providerType && isCodex53SparkModel(requestedModel)) {
-                codex53QuotaFallbackReason = `No selectable provider for ${requestedModel}`;
-                break;
-            }
         }
 
-        if (codex53QuotaFallbackReason) {
-            const targetModel = getCodex53QuotaFallbackModel(this.globalConfig);
-            this._log('info', `Trying Codex 5.3 quota fallback for ${requestedModel}: -> ${providerType} (${targetModel}); reason: ${codex53QuotaFallbackReason}`);
-            const selectedConfig = await this.acquireSlot(providerType, targetModel, options);
-            if (selectedConfig) {
-                this._log('info', `Fallback Slot activated (Codex 5.3 quota): ${providerType} (${requestedModel}) -> ${providerType} (${targetModel}) (node: ${this._getDisplayName(selectedConfig)})`);
-                return {
-                    config: selectedConfig,
-                    actualProviderType: providerType,
-                    isFallback: true,
-                    actualModel: targetModel
-                };
-            }
-        }
-
-        if (modelFallbackTarget && !codex53QuotaFallbackReason) {
+        if (modelFallbackTarget) {
             const selectedConfig = await this.acquireSlot(providerType, modelFallbackTarget, options);
             if (selectedConfig) {
                 return {
@@ -4759,23 +4600,6 @@ export class ProviderPoolManager {
             return mixedSelection;
         }
 
-        const exhaustedFastPath = await this._getCodex53ExhaustedFastPath(providerType, requestedModel);
-        if (exhaustedFastPath) {
-            const targetModel = getCodex53QuotaFallbackModel(this.globalConfig);
-            const selectedConfig = await this.selectProvider(providerType, targetModel, options);
-            if (selectedConfig) {
-                this._log('info', `Fast path activated (Codex 5.3 quota): ${providerType} (${requestedModel}) -> ${providerType} (${targetModel}) (snapshot exhausted)`);
-                return {
-                    config: selectedConfig,
-                    actualProviderType: providerType,
-                    isFallback: true,
-                    actualModel: targetModel,
-                    modelFallbackReason: 'CODEX53_POOL_EXHAUSTED'
-                };
-            }
-            this._codexQuotaFilterMetrics.fastPathFallbackFailures += 1;
-        }
-
         // ==========================
         // 优先级 1: Provider Fallback Chain (同协议/兼容协议的回退)
         // ==========================
@@ -4788,7 +4612,6 @@ export class ProviderPoolManager {
         if (Array.isArray(fallbackTypes)) {
             typesToTry.push(...fallbackTypes);
         }
-        let codex53QuotaFallbackReason = null;
         let modelFallbackReason = null;
         const modelFallbackTarget = getCodexModelFallbackTarget(requestedModel, this.globalConfig);
 
@@ -4829,11 +4652,6 @@ export class ProviderPoolManager {
             try {
                 selectedConfig = await this.selectProvider(currentType, requestedModel, options);
             } catch (error) {
-                if (shouldTryCodex53QuotaModelFallback(currentType, requestedModel, error, this.globalConfig)
-                    || (currentType === providerType && isCodex53SparkModel(requestedModel))) {
-                    codex53QuotaFallbackReason = error.message;
-                    break;
-                }
                 if (modelFallbackTarget && (error.status === 429 || error.code === 429)) {
                     modelFallbackReason = error.message;
                     break;
@@ -4851,29 +4669,9 @@ export class ProviderPoolManager {
                     isFallback: currentType !== providerType
                 };
             }
-            if (currentType === providerType && isCodex53SparkModel(requestedModel)) {
-                codex53QuotaFallbackReason = `No selectable provider for ${requestedModel}`;
-                break;
-            }
         }
 
-        if (codex53QuotaFallbackReason) {
-            const targetModel = getCodex53QuotaFallbackModel(this.globalConfig);
-            this._log('info', `Trying Codex 5.3 quota fallback for ${requestedModel}: -> ${providerType} (${targetModel}); reason: ${codex53QuotaFallbackReason}`);
-            const selectedConfig = await this.selectProvider(providerType, targetModel, options);
-
-            if (selectedConfig) {
-                this._log('info', `Fallback activated (Codex 5.3 quota): ${providerType} (${requestedModel}) -> ${providerType} (${targetModel}) (node: ${this._getDisplayName(selectedConfig)})`);
-                return {
-                    config: selectedConfig,
-                    actualProviderType: providerType,
-                    isFallback: true,
-                    actualModel: targetModel
-                };
-            }
-        }
-
-        if (modelFallbackTarget && !codex53QuotaFallbackReason) {
+        if (modelFallbackTarget) {
             const selectedConfig = await this.selectProvider(providerType, modelFallbackTarget, options);
             if (selectedConfig) {
                 return {
@@ -5573,15 +5371,12 @@ export class ProviderPoolManager {
 
         const nextQuotaHealth = {
             ...quotaHealth,
-            general: quotaHealth.general ? { ...quotaHealth.general } : quotaHealth.general,
-            codex53: quotaHealth.codex53 ? { ...quotaHealth.codex53 } : quotaHealth.codex53
+            general: quotaHealth.general ? { ...quotaHealth.general } : quotaHealth.general
         };
         const currentQuotaHealth = provider.config.codexQuotaHealth || {};
         const updatedAt = new Date().toISOString();
-        for (const bucket of ['general', 'codex53']) {
-            if (nextQuotaHealth[bucket] && JSON.stringify(currentQuotaHealth[bucket] || null) !== JSON.stringify(nextQuotaHealth[bucket])) {
-                nextQuotaHealth[bucket].updatedAt = updatedAt;
-            }
+        if (nextQuotaHealth.general && JSON.stringify(currentQuotaHealth.general || null) !== JSON.stringify(nextQuotaHealth.general)) {
+            nextQuotaHealth.general.updatedAt = updatedAt;
         }
         if (JSON.stringify(currentQuotaHealth) === JSON.stringify(nextQuotaHealth)) {
             return provider.config.codexQuotaHealth;

@@ -221,8 +221,6 @@ function getFieldLabel(key) {
         'providerWeight': (t('modal.provider.providerWeight') || '节点权重') + ' ' + t('config.optional'),
         'codexGeneralMax5hPercent': t('modal.provider.codexGeneralMax5hPercent') + ' ' + t('config.optional'),
         'codexGeneralMaxWeeklyPercent': t('modal.provider.codexGeneralMaxWeeklyPercent') + ' ' + t('config.optional'),
-        'codex53Max5hPercent': t('modal.provider.codex53Max5hPercent') + ' ' + t('config.optional'),
-        'codex53MaxWeeklyPercent': t('modal.provider.codex53MaxWeeklyPercent') + ' ' + t('config.optional'),
         'codexFingerprintMode': t('modal.provider.codexFingerprintMode'),
         'PROXY_URL': t('modal.provider.proxyUrl') + ' ' + t('config.optional'),
         'PROXY_REQUIRED': t('modal.provider.proxyRequired') + ' ' + t('config.optional'),
@@ -519,18 +517,6 @@ function getProviderTypeFields(providerType) {
                 label: `${t('modal.provider.codexGeneralMaxWeeklyPercent')} <span class="optional-tag">${t('config.optional')}</span>`,
                 type: 'number',
                 placeholder: '通用额度周已用百分比阈值，例如 90；0 = 不限制'
-            },
-            {
-                id: 'codex53Max5hPercent',
-                label: `${t('modal.provider.codex53Max5hPercent')} <span class="optional-tag">${t('config.optional')}</span>`,
-                type: 'number',
-                placeholder: 'Codex 5.3 额度 5h 已用百分比阈值，例如 80；0 = 不限制'
-            },
-            {
-                id: 'codex53MaxWeeklyPercent',
-                label: `${t('modal.provider.codex53MaxWeeklyPercent')} <span class="optional-tag">${t('config.optional')}</span>`,
-                type: 'number',
-                placeholder: 'Codex 5.3 额度周已用百分比阈值，例如 90；0 = 不限制'
             },
             {
                 id: 'PROXY_ID',

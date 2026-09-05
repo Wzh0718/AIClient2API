@@ -374,11 +374,6 @@ function deriveCodexQuotaHealthFromUsage(currentHealth, usage, now = Date.now())
     const generalWeeklyUsedPercent = getUsageItemMaxPercent(usage, item =>
         item.scope === 'general' && (item.windowKind === 'weekly' || item.id === 'secondary_window')
     );
-    const codex53UsedPercent = getUsageItemMaxPercent(usage, item => {
-        const id = String(item.id || '').toLowerCase();
-        const label = String(item.label || '').toLowerCase();
-        return id.includes('gpt_5_3') || id.includes('codex_5_3') || label.includes('5.3');
-    });
 
     const generalRecoveryTime = getLatestExhaustedResetTime(
         usage,
@@ -430,16 +425,8 @@ function deriveCodexQuotaHealthFromUsage(currentHealth, usage, now = Date.now())
             applicability: 'unknown'
         };
     }
-    quotaHealth.codex53 = mergeQuotaHealthState(quotaHealth.codex53, codex53UsedPercent, '5.3 额度');
-    if (applicability?.codex53) {
-        quotaHealth.codex53 = {
-            ...(quotaHealth.codex53 || {}),
-            applicability: applicability.codex53.short.status === 'healthy' || applicability.codex53.weekly.status === 'healthy'
-                ? 'healthy'
-                : 'unknown'
-        };
-    }
 
+    delete quotaHealth.codex53;
     return quotaHealth;
 }
 
@@ -503,7 +490,7 @@ function buildUsageDiagnostics(providers = {}) {
             const plan = instance?.usage?.summary?.plan;
             incrementDiagnosticCounter(diagnostics.plans, plan || 'UNKNOWN');
             const applicability = instance?.usage?.summary?.quotaApplicability;
-            for (const bucket of ['general', 'codex53']) {
+            for (const bucket of ['general']) {
                 for (const windowKind of ['short', 'weekly']) {
                     const status = applicability?.[bucket]?.[windowKind]?.status;
                     if (status) incrementDiagnosticCounter(diagnostics.windows, `${bucket}:${windowKind}:${status}`);
