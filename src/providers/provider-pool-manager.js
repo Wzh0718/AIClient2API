@@ -629,7 +629,7 @@ export class ProviderPoolManager {
         'claude-kiro-oauth': 'claude-haiku-4-5',
         'openai-qwen-oauth': 'qwen3-coder-flash',
         'openai-iflow': 'qwen3-coder-plus',
-        'openai-codex-oauth': 'gpt-5-codex-mini',
+        'openai-codex-oauth': 'gpt-5.6-luna',
         'openaiResponses-custom': 'gpt-4o-mini',
         'forward-api': 'gpt-4o-mini',
         'grok-cli-oauth': 'grok-4.6',
