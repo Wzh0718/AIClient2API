@@ -3866,53 +3866,55 @@ export function createStreamErrorResponse(error, fromProvider) {
             };
             return `data: ${JSON.stringify(openaiError)}\n\n`;
             
-        case MODEL_PROTOCOL_PREFIX.OPENAI_RESPONSES:
-            // OpenAI Responses API 流式错误格式（SSE event + data）
-            if (error.isCodexOverload || error.isCodexModelCapacity) {
-                const upstreamError = error.response?.data?.error || {};
-                const responseSnapshot = error.responseSnapshot && typeof error.responseSnapshot === 'object'
-                    ? error.responseSnapshot
-                    : {};
-                const responseId = error.responseId || responseSnapshot.id || `resp_failed_${Date.now()}`;
-                const responseError = {
-                    code: upstreamError.code || 'server_is_overloaded',
-                    message: errorMessage
-                };
-                const failedEvent = {
-                    type: 'response.failed',
-                    sequence_number: 0,
-                    response: {
-                        created_at: Math.floor(Date.now() / 1000),
-                        output_text: '',
-                        incomplete_details: null,
-                        instructions: null,
-                        metadata: {},
-                        model: error.responseModel || 'unknown',
-                        object: 'response',
-                        parallel_tool_calls: true,
-                        temperature: null,
-                        tool_choice: 'auto',
-                        tools: [],
-                        top_p: null,
-                        ...responseSnapshot,
-                        id: responseId,
-                        object: 'response',
-                        output: [],
-                        status: 'failed',
-                        error: responseError
-                    }
-                };
-                return `event: response.failed\ndata: ${JSON.stringify(failedEvent)}\n\n`;
-            }
-            const responsesError = {
-                type: 'error',
+        case MODEL_PROTOCOL_PREFIX.OPENAI_RESPONSES: {
+            // Codex / Responses 客户端把 response.completed 或 response.failed 当终结事件。
+            // 只发 event: error 再关连接，下游会当成 stream closed before response.completed 并重试。
+            const upstreamError = error.response?.data?.error && typeof error.response.data.error === 'object'
+                ? error.response.data.error
+                : {};
+            const responseSnapshot = error.responseSnapshot && typeof error.responseSnapshot === 'object'
+                ? error.responseSnapshot
+                : {};
+            const responseId = error.responseId || responseSnapshot.id || `resp_failed_${Date.now()}`;
+            const upstreamMessage = typeof upstreamError.message === 'string' && upstreamError.message.trim()
+                ? upstreamError.message.trim()
+                : '';
+            const failedMessage = error.isCodexOverload || error.isCodexModelCapacity || error.origin !== 'upstream_codex'
+                ? errorMessage
+                : (upstreamMessage || errorMessage);
+            const failedCode = String(upstreamError.code || '').trim()
+                || (error.isCodexOverload ? 'server_is_overloaded' : '')
+                || getErrorType(statusCode);
+            const failedEvent = {
+                type: 'response.failed',
                 sequence_number: 0,
-                code: getErrorType(statusCode),
-                message: errorMessage,
-                param: null,
-                ...quotaMetadata
+                response: {
+                    created_at: Math.floor(Date.now() / 1000),
+                    output_text: '',
+                    incomplete_details: null,
+                    instructions: null,
+                    metadata: {},
+                    model: error.responseModel || 'unknown',
+                    object: 'response',
+                    parallel_tool_calls: true,
+                    temperature: null,
+                    tool_choice: 'auto',
+                    tools: [],
+                    top_p: null,
+                    ...responseSnapshot,
+                    id: responseId,
+                    object: 'response',
+                    output: [],
+                    status: 'failed',
+                    error: {
+                        code: failedCode,
+                        message: failedMessage,
+                        ...quotaMetadata
+                    }
+                }
             };
-            return `event: error\ndata: ${JSON.stringify(responsesError)}\n\n`;
+            return `event: response.failed\ndata: ${JSON.stringify(failedEvent)}\n\n`;
+        }
             
         case MODEL_PROTOCOL_PREFIX.CLAUDE:
             // Claude 流式错误格式（SSE event + data）

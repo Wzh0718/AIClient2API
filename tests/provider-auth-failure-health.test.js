@@ -245,16 +245,16 @@ describe('provider auth failure health marking', () => {
         );
 
         expect(res.statusCode).toBe(200);
-        expect(res.body).toContain('event: error\n');
+        expect(res.body).toContain('event: response.failed');
+        expect(res.body).not.toContain('event: error\n');
         const dataLine = res.body.split('\n').find(line => line.startsWith('data: '));
         const event = JSON.parse(dataLine.slice(6));
-        expect(event).toEqual({
-            type: 'error',
-            sequence_number: 0,
+        expect(event.type).toBe('response.failed');
+        expect(event.response.status).toBe('failed');
+        expect(event.response.error).toEqual(expect.objectContaining({
             code: 'invalid_request_error',
-            message: expect.stringContaining("Function 'image_gen.imagegen' conflicts with a hosted tool"),
-            param: null
-        });
+            message: expect.stringContaining("Function 'image_gen.imagegen' conflicts with a hosted tool")
+        }));
         expect(res.body).not.toContain('response.completed');
         expect(res.body).not.toContain('[DONE]');
         expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();

@@ -105,9 +105,71 @@ describe('Codex overload cross-request failover', () => {
         expect(payload).toContain('[上游 Codex] 所选模型当前容量不足，已自动重试可用凭证后仍不可用，请稍后重试');
     });
 
+    test('formats upstream invalid_prompt as a Responses response.failed event', () => {
+        const payload = createStreamErrorResponse({
+            origin: 'upstream_codex',
+            message: '400 Bad Request (stream): Invalid prompt: your prompt was flagged as potentially violating our usage policy.',
+            response: {
+                status: 400,
+                data: {
+                    error: {
+                        type: 'invalid_request_error',
+                        code: 'invalid_prompt',
+                        message: 'Invalid prompt: your prompt was flagged as potentially violating our usage policy. Please try again with a different prompt: https://platform.openai.com/docs/guides/reasoning#advice-on-prompting',
+                        param: null
+                    }
+                }
+            },
+            responseSnapshot: { id: 'resp_flagged', model: 'gpt-6-astra' }
+        }, 'openaiResponses');
+
+        expect(payload).toContain('event: response.failed');
+        expect(payload).not.toContain('event: error\n');
+        const failedEvent = JSON.parse(payload.split('\n').find(line => line.startsWith('data: ')).slice(6));
+        expect(failedEvent).toEqual(expect.objectContaining({
+            type: 'response.failed',
+            response: expect.objectContaining({
+                id: 'resp_flagged',
+                model: 'gpt-6-astra',
+                status: 'failed',
+                output: [],
+                error: {
+                    code: 'invalid_prompt',
+                    message: 'Invalid prompt: your prompt was flagged as potentially violating our usage policy. Please try again with a different prompt: https://platform.openai.com/docs/guides/reasoning#advice-on-prompting'
+                }
+            })
+        }));
+    });
+
+    test('formats upstream context_length_exceeded as a Responses response.failed event', () => {
+        const payload = createStreamErrorResponse({
+            origin: 'upstream_codex',
+            message: '400 Bad Request (stream): Your input exceeds the context window of this model.',
+            response: {
+                status: 400,
+                data: {
+                    error: {
+                        type: 'invalid_request_error',
+                        code: 'context_length_exceeded',
+                        message: 'Your input exceeds the context window of this model. Please adjust your input and try again.',
+                        param: 'input'
+                    }
+                }
+            }
+        }, 'openaiResponses');
+
+        expect(payload).toContain('event: response.failed');
+        const failedEvent = JSON.parse(payload.split('\n').find(line => line.startsWith('data: ')).slice(6));
+        expect(failedEvent.response.error).toEqual({
+            code: 'context_length_exceeded',
+            message: 'Your input exceeds the context window of this model. Please adjust your input and try again.'
+        });
+    });
+
     test('labels unclassified streaming errors as 2API internal errors', () => {
         const payload = createStreamErrorResponse(new Error('converter exploded'), 'openaiResponses');
 
+        expect(payload).toContain('event: response.failed');
         expect(payload).toContain('[2API 内部] 服务处理请求失败，请稍后重试');
         expect(payload).not.toContain('converter exploded');
     });
