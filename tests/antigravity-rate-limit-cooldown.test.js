@@ -17,9 +17,11 @@ class FakeResponse {
         this.body = '';
         this.writableEnded = false;
         this.statusCode = null;
+        this.headers = {};
     }
-    writeHead(statusCode) {
+    writeHead(statusCode, headers = {}) {
         this.statusCode = statusCode;
+        this.headers = headers;
     }
     end(chunk = '') {
         this.body += String(chunk);
@@ -82,6 +84,37 @@ function createCapacityCodeError() {
                 message: 'No capacity available for model gemini-3.1-flash-lite on the server'
             }
         }
+    };
+    return error;
+}
+
+function createProductionCapacityError() {
+    const error = new Error('No capacity available for model gemini-3.1-flash-lite on the server');
+    error.status = 'UNAVAILABLE';
+    error.code = 503;
+    error.response = {
+        status: 503,
+        data: {
+            error: {
+                code: 503,
+                message: 'No capacity available for model gemini-3.1-flash-lite on the server',
+                status: 'UNAVAILABLE',
+                details: [{
+                    '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+                    reason: 'MODEL_CAPACITY_EXHAUSTED',
+                    metadata: { error_number: '2010', model: 'gemini-3.1-flash-lite' }
+                }]
+            }
+        }
+    };
+    return error;
+}
+
+function createGeneric503Error() {
+    const error = new Error('Upstream API Error (Status 503): backend exploded');
+    error.response = {
+        status: 503,
+        data: { error: { code: 503, message: 'backend exploded' } }
     };
     return error;
 }
@@ -178,12 +211,85 @@ describe('Antigravity model quota cooldown', () => {
             { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 1 }, maxRetries: 1 }
         );
 
-        expect(res.statusCode).toBe(503);
+        expect(res.statusCode).toBe(429);
+        expect(res.headers['Retry-After']).toBeDefined();
         expect(JSON.parse(res.body).error).toMatchObject({
-            code: 503,
-            status: 'INTERNAL'
+            code: 429,
+            status: 'RESOURCE_EXHAUSTED'
         });
         expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+    });
+
+    test('maps production UNAVAILABLE capacity errors to HTTP 429 instead of 500', async () => {
+        jest.spyOn(Math, 'random').mockReturnValue(0);
+        mockGetApiServiceWithFallback.mockRejectedValueOnce(new Error('No healthy provider found in pool'));
+        const firstService = { generateContent: jest.fn().mockRejectedValue(createProductionCapacityError()) };
+        const providerPoolManager = {
+            markAntigravityModelCapacityUnavailable: jest.fn(),
+            markAntigravityModelQuotaUnhealthy: jest.fn(),
+            markProviderUnhealthyWithRecoveryTime: jest.fn(),
+            markProviderUnhealthy: jest.fn(),
+            markProviderUnhealthyImmediately: jest.fn(),
+            markProviderHealthy: jest.fn(),
+            releaseSlot: jest.fn()
+        };
+        const res = new FakeResponse();
+
+        await handleUnaryRequest(
+            res,
+            firstService,
+            'gemini-3.1-flash-lite',
+            { contents: [] },
+            'gemini',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-ultra-1',
+            'Ultra 1',
+            { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 1 }, maxRetries: 1 }
+        );
+
+        expect(res.statusCode).toBe(429);
+        expect(res.statusCode).not.toBe(500);
+        expect(JSON.parse(res.body).error).toMatchObject({
+            code: 429,
+            status: 'RESOURCE_EXHAUSTED'
+        });
+        expect(providerPoolManager.markAntigravityModelCapacityUnavailable).toHaveBeenCalled();
+    });
+
+    test('leaves generic Antigravity 503 as 503 and does not treat it as capacity', async () => {
+        mockGetApiServiceWithFallback.mockReset();
+        const firstService = { generateContent: jest.fn().mockRejectedValue(createGeneric503Error()) };
+        const providerPoolManager = {
+            markAntigravityModelCapacityUnavailable: jest.fn(),
+            markAntigravityModelQuotaUnhealthy: jest.fn(),
+            markProviderUnhealthyWithRecoveryTime: jest.fn(),
+            markProviderUnhealthy: jest.fn(),
+            markProviderUnhealthyImmediately: jest.fn(),
+            releaseSlot: jest.fn()
+        };
+        const res = new FakeResponse();
+
+        await handleUnaryRequest(
+            res,
+            firstService,
+            'gemini-2.5-flash',
+            { contents: [] },
+            'gemini',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-ultra-1',
+            'Ultra 1',
+            { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 5 }, maxRetries: 5 }
+        );
+
+        expect(mockGetApiServiceWithFallback).not.toHaveBeenCalled();
+        expect(providerPoolManager.markAntigravityModelCapacityUnavailable).not.toHaveBeenCalled();
+        expect(res.statusCode).toBe(503);
     });
 
     test('parses compound hour-minute-second quota reset delays', () => {
@@ -220,7 +326,7 @@ describe('Antigravity model quota cooldown', () => {
         );
     });
 
-    test('treats explicit model capacity exhaustion as a model cooldown while preserving 503 semantics', () => {
+    test('treats explicit model capacity exhaustion as a model cooldown while preserving 429 semantics', () => {
         jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-08-10T08:00:00Z'));
         const providerPoolManager = {
             markAntigravityModelQuotaUnhealthy: jest.fn(),
@@ -238,7 +344,7 @@ describe('Antigravity model quota cooldown', () => {
         });
 
         expect(applied).toBe(true);
-        expect(error.status).toBe(503);
+        expect(error.status).toBe(429);
         expect(error.isAntigravityModelCapacity).toBe(true);
         expect(providerPoolManager.markAntigravityModelCapacityUnavailable).toHaveBeenCalledWith(
             'gemini-antigravity',
@@ -248,7 +354,7 @@ describe('Antigravity model quota cooldown', () => {
         );
     });
 
-    test('preserves 503 capacity semantics while marking the credential retryable', () => {
+    test('preserves 429 capacity semantics while marking the credential retryable', () => {
         const providerPoolManager = {
             markAntigravityModelQuotaUnhealthy: jest.fn(),
             markAntigravityModelCapacityUnavailable: jest.fn()
@@ -265,8 +371,8 @@ describe('Antigravity model quota cooldown', () => {
         });
 
         expect(applied).toBe(true);
-        expect(error.status).toBe(503);
-        expect(error.response.status).toBe(503);
+        expect(error.status).toBe(429);
+        expect(error.response.status).toBe(429);
         expect(error.code).toBe('MODEL_CAPACITY_UNAVAILABLE');
         expect(error.shouldSwitchCredential).toBe(true);
         expect(error.isAntigravityModelCapacity).toBe(true);
@@ -555,9 +661,16 @@ describe('Antigravity model quota cooldown', () => {
             providerPoolManager,
             'provider-initial',
             'Provider Initial',
-            { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 5 }, maxRetries: 5 }
+            {
+                CONFIG: {
+                    CREDENTIAL_SWITCH_MAX_RETRIES: 5,
+                    MAX_UPSTREAM_ATTEMPTS_PER_REQUEST: 3
+                },
+                maxRetries: 5
+            }
         ));
 
-        expect(upstreamCalls).toHaveLength(3);
+        expect(upstreamCalls).toHaveLength(6);
+        expect(providerPoolManager.recordAntigravityRoutingEvent).toHaveBeenCalledWith('retrySuppressed');
     });
 });

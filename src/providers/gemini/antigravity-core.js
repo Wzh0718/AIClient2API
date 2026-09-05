@@ -12,7 +12,7 @@ import * as readline from 'readline';
 import { v4 as uuidv4 } from 'uuid';
 import open from 'open';
 import { configureTLSSidecar } from '../../utils/proxy-utils.js';
-import { formatExpiryTime, isRetryableNetworkError, formatExpiryLog, getRetryAfterMs, normalizeProviderErrorMessage } from '../../utils/common.js';
+import { formatExpiryTime, isRetryableNetworkError, formatExpiryLog, getRetryAfterMs, normalizeProviderErrorMessage, isAntigravityTransientCapacityError } from '../../utils/common.js';
 import { getProviderModels } from '../provider-models.js';
 import { handleGeminiAntigravityOAuth } from '../../auth/oauth-handlers.js';
 import { getRequiredProxyConfigForProvider, isTLSSidecarEnabledForProvider } from '../../utils/proxy-utils.js';
@@ -1833,6 +1833,18 @@ export class AntigravityApiService {
                 }
             }
 
+            const providerType = this.config.MODEL_PROVIDER || MODEL_PROVIDER.ANTIGRAVITY;
+            if (isAntigravityTransientCapacityError(error, providerType)) {
+                if (retryCount < 1) {
+                    await normalizeProviderErrorMessage(error, { status: status || 503, context: 'callApi' });
+                    const delay = baseDelay * Math.pow(2, retryCount);
+                    logger.info(`[Antigravity API] Model capacity exhausted. Retrying once on the same credential in ${delay}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    return this.callApi(method, body, isRetry, retryCount + 1, baseURLIndex);
+                }
+                throw error;
+            }
+
             if (status >= 500 && status < 600 && retryCount < maxRetries) {
                 await normalizeProviderErrorMessage(error, { status, context: 'callApi' });
                 const delay = baseDelay * Math.pow(2, retryCount);
@@ -2006,6 +2018,19 @@ export class AntigravityApiService {
                     yield* this.streamApi(method, body, isRetry, retryCount + 1, 0);
                     return;
                 }
+            }
+
+            const providerType = this.config.MODEL_PROVIDER || MODEL_PROVIDER.ANTIGRAVITY;
+            if (isAntigravityTransientCapacityError(error, providerType)) {
+                if (retryCount < 1) {
+                    await normalizeProviderErrorMessage(error, { status: status || 503, context: 'stream' });
+                    const delay = baseDelay * Math.pow(2, retryCount);
+                    logger.info(`[Antigravity API] Model capacity exhausted during stream. Retrying once on the same credential in ${delay}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    yield* this.streamApi(method, body, isRetry, retryCount + 1, baseURLIndex);
+                    return;
+                }
+                throw error;
             }
 
             if (status >= 500 && status < 600 && retryCount < maxRetries) {

@@ -100,4 +100,74 @@ describe('Antigravity image payloads', () => {
 
         expect(payload.request.generationConfig.imageConfig.imageSize).toBe('1K');
     });
+
+    test('retries a model-capacity 503 only once on the same credential', async () => {
+        const service = new AntigravityApiService({
+            MODEL_PROVIDER: 'gemini-antigravity',
+            ANTIGRAVITY_BASE_URL: 'https://example.invalid',
+            PROJECT_ID: 'test-project',
+            REQUEST_MAX_RETRIES: 3,
+            REQUEST_BASE_DELAY: 1
+        });
+        const capacityError = new Error('No capacity available for model gemini-3.1-flash-lite on the server');
+        capacityError.response = {
+            status: 503,
+            data: { error: { code: 503, message: capacityError.message, status: 'UNAVAILABLE' } }
+        };
+        service.authClient.request = jest.fn().mockRejectedValue(capacityError);
+
+        await expect(service.callApi('generateContent', { model: 'gemini-3.1-flash-lite' }))
+            .rejects.toMatchObject({ response: { status: 503 } });
+        expect(service.authClient.request).toHaveBeenCalledTimes(2);
+    });
+
+    test('retries a generic 503 up to REQUEST_MAX_RETRIES on the same credential', async () => {
+        const service = new AntigravityApiService({
+            MODEL_PROVIDER: 'gemini-antigravity',
+            ANTIGRAVITY_BASE_URL: 'https://example.invalid',
+            PROJECT_ID: 'test-project',
+            REQUEST_MAX_RETRIES: 3,
+            REQUEST_BASE_DELAY: 1
+        });
+        const genericError = new Error('backend exploded');
+        genericError.response = {
+            status: 503,
+            data: { error: { code: 503, message: 'backend exploded' } }
+        };
+        service.authClient.request = jest.fn().mockRejectedValue(genericError);
+
+        await expect(service.callApi('generateContent', { model: 'gemini-2.5-flash' }))
+            .rejects.toMatchObject({ response: { status: 503 } });
+        expect(service.authClient.request).toHaveBeenCalledTimes(4);
+    });
+
+    test('retries a model-capacity 503 only once during streamApi', async () => {
+        const service = new AntigravityApiService({
+            MODEL_PROVIDER: 'gemini-antigravity',
+            ANTIGRAVITY_BASE_URL: 'https://example.invalid',
+            PROJECT_ID: 'test-project',
+            REQUEST_MAX_RETRIES: 3,
+            REQUEST_BASE_DELAY: 1
+        });
+        const errorBody = JSON.stringify({
+            error: {
+                code: 503,
+                message: 'No capacity available for model gemini-2.5-flash on the server',
+                status: 'UNAVAILABLE'
+            }
+        });
+        service.authClient.request = jest.fn(async () => ({
+            status: 503,
+            data: (async function* () {
+                yield Buffer.from(errorBody);
+            })()
+        }));
+
+        await expect((async () => {
+            for await (const chunk of service.streamApi('streamGenerateContent', { model: 'gemini-2.5-flash' })) {
+                void chunk;
+            }
+        })()).rejects.toMatchObject({ response: { status: 503 } });
+        expect(service.authClient.request).toHaveBeenCalledTimes(2);
+    });
 });

@@ -75,8 +75,15 @@ function logGeminiCleanupDiagnostic({ mode, model, providerType, providerUuid, c
 // upstream calls: cascading model and credential retries were the main
 // amplifier behind the CPU saturation and the 404 storm.
 const DEFAULT_MAX_UPSTREAM_ATTEMPTS_PER_REQUEST = 3;
+const DEFAULT_ANTIGRAVITY_CAPACITY_MAX_UPSTREAM_ATTEMPTS = 6;
 
-function getMaxUpstreamAttempts(config) {
+function getMaxUpstreamAttempts(config, error = null) {
+    if (error?.isAntigravityModelCapacity === true) {
+        const configured = Number(config?.ANTIGRAVITY_CAPACITY_MAX_UPSTREAM_ATTEMPTS);
+        return Number.isInteger(configured) && configured >= 1
+            ? configured
+            : DEFAULT_ANTIGRAVITY_CAPACITY_MAX_UPSTREAM_ATTEMPTS;
+    }
     const configured = Number(config?.MAX_UPSTREAM_ATTEMPTS_PER_REQUEST);
     return Number.isInteger(configured) && configured >= 1
         ? configured
@@ -89,9 +96,9 @@ function recordUpstreamAttempt() {
     return store.upstreamAttempts;
 }
 
-function hasUpstreamAttemptBudget(config) {
+function hasUpstreamAttemptBudget(config, error = null) {
     const store = requestContext.getStore();
-    return (Number(store.upstreamAttempts) || 0) < getMaxUpstreamAttempts(config);
+    return (Number(store.upstreamAttempts) || 0) < getMaxUpstreamAttempts(config, error);
 }
 
 function updateGeminiRequestMetadata({ retryCount, fallbackCount, providerUuid } = {}) {
@@ -261,9 +268,24 @@ export function ensureValidStatusCode(code) {
     return 500;
 }
 
+function getNumericHttpStatus(error) {
+    const candidates = [
+        error?.response?.status,
+        error?.statusCode,
+        error?.status,
+        error?.code
+    ];
+    for (const value of candidates) {
+        const num = parseInt(value, 10);
+        if (!isNaN(num) && num >= 100 && num < 600) {
+            return num;
+        }
+    }
+    return null;
+}
 
 function getErrorStatusCode(error) {
-    return error?.response?.status || error?.status || error?.statusCode || error?.code || null;
+    return getNumericHttpStatus(error);
 }
 
 function isCodexTransientCredentialError(error) {
@@ -292,8 +314,8 @@ function getCodexGroupRateLimitWaitMs(config, error) {
     return maxWaitMs;
 }
 
-function isAntigravityTransientCapacityError(error, providerType) {
-    if (providerType !== MODEL_PROVIDER.ANTIGRAVITY || getErrorStatusCode(error) !== 503) {
+export function isAntigravityTransientCapacityError(error, providerType) {
+    if (providerType !== MODEL_PROVIDER.ANTIGRAVITY || !error) {
         return false;
     }
 
@@ -316,15 +338,15 @@ function normalizeAntigravityCapacityExhaustion(error, providerType, requestedMo
     }
 
     error.isAntigravityModelCapacity = true;
-    error.status = 503;
-    error.statusCode = 503;
+    error.status = 429;
+    error.statusCode = 429;
     error.code = 'MODEL_CAPACITY_UNAVAILABLE';
     error.retryable = true;
     error.shouldSwitchCredential = true;
     error.capacityScope = 'model';
     error.capacityKey = requestedModel || error.capacityKey;
     error.response = error.response || {};
-    error.response.status = 503;
+    error.response.status = 429;
     if (!error.nextRecoveryTime) {
         const cooldownMs = Math.min(60_000, Math.max(5_000, Number(error.capacityCooldownMs || 15_000)));
         error.nextRecoveryTime = new Date(Date.now() + cooldownMs).toISOString();
@@ -2088,10 +2110,10 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         
         // 凭证已被标记为不健康后，尝试切换到新凭证重试
         // 不再依赖状态码判断，只要凭证被标记不健康且可以重试，就尝试切换
-        const upstreamBudgetAvailable = hasUpstreamAttemptBudget(CONFIG);
+        const upstreamBudgetAvailable = hasUpstreamAttemptBudget(CONFIG, error);
         if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && !upstreamBudgetAvailable) {
             providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
-            logger.warn(`[Retry] Upstream attempt cap (${getMaxUpstreamAttempts(CONFIG)}) reached for ${toProvider}/${model}; not switching credential again.`);
+            logger.warn(`[Retry] Upstream attempt cap (${getMaxUpstreamAttempts(CONFIG, error)}) reached for ${toProvider}/${model}; not switching credential again.`);
         }
         if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && upstreamBudgetAvailable && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
             const isCodexTransient = isCodexTransientCredentialError(error);
@@ -2234,7 +2256,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
 
         if (!anyDataSent && !isTerminalAntigravityUnavailable) {
             try {
-                const fallback = hasUpstreamAttemptBudget(CONFIG) ? await tryTemporaryRouteFallback(retryContext) : null;
+                const fallback = hasUpstreamAttemptBudget(CONFIG, error) ? await tryTemporaryRouteFallback(retryContext) : null;
                 if (fallback?.service) {
                     providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
                     updateGeminiRequestMetadata({ fallbackCount: (retryContext?.geminiFallbackCount || 0) + 1 });
@@ -2505,10 +2527,10 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         
         // 凭证已被标记为不健康后，尝试切换到新凭证重试
         // 不再依赖状态码判断，只要凭证被标记不健康且可以重试，就尝试切换
-        const upstreamBudgetAvailable = hasUpstreamAttemptBudget(CONFIG);
+        const upstreamBudgetAvailable = hasUpstreamAttemptBudget(CONFIG, error);
         if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && !upstreamBudgetAvailable) {
             providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
-            logger.warn(`[Retry] Upstream attempt cap (${getMaxUpstreamAttempts(CONFIG)}) reached for ${toProvider}/${model}; not switching credential again.`);
+            logger.warn(`[Retry] Upstream attempt cap (${getMaxUpstreamAttempts(CONFIG, error)}) reached for ${toProvider}/${model}; not switching credential again.`);
         }
         if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && upstreamBudgetAvailable && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
             const isCodexTransient = isCodexTransientCredentialError(error);
@@ -2651,11 +2673,11 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             if (isTerminalAntigravityUnavailable) {
                 normalizeAntigravityCapacityExhaustion(error, toProvider, model);
                 const terminalResponse = createErrorResponse(error, fromProvider);
-                const terminalStatus = ensureValidStatusCode(error.status || error.code || 429);
+                const terminalStatus = getNumericHttpStatus(error) ?? 429;
                 await handleUnifiedResponse(res, JSON.stringify(terminalResponse), false, terminalStatus, getErrorResponseHeaders(error, terminalStatus));
                 return;
             }
-            const fallback = hasUpstreamAttemptBudget(CONFIG) ? await tryTemporaryRouteFallback(retryContext) : null;
+            const fallback = hasUpstreamAttemptBudget(CONFIG, error) ? await tryTemporaryRouteFallback(retryContext) : null;
             if (fallback?.service) {
                 providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
                 updateGeminiRequestMetadata({ fallbackCount: (retryContext?.geminiFallbackCount || 0) + 1 });
@@ -2691,8 +2713,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         // 使用新方法创建符合 fromProvider 格式的错误响应
         normalizeAntigravityCapacityExhaustion(error, toProvider, model);
         const errorResponse = createErrorResponse(error, fromProvider);
-        const rawStatusCode = error.status || error.code || (error.response && error.response.status) || 500;
-        const statusCode = ensureValidStatusCode(rawStatusCode);
+        const statusCode = getNumericHttpStatus(error) ?? 500;
         await handleUnifiedResponse(
             res,
             JSON.stringify(errorResponse),
@@ -3355,8 +3376,7 @@ function _applyCustomModelParameters(requestBody, customConfig, provider) {
 }
 
 export function handleError(res, error, provider = null, fromProvider = null, req = null) {
-    const rawStatusCode = error.response?.status || error.statusCode || error.status || error.code || 500;
-    const statusCode = ensureValidStatusCode(rawStatusCode);
+    const statusCode = getNumericHttpStatus(error) ?? 500;
     logUpstreamResponse(error, 'Server Request Failed');
     
     // 如果没有提供 fromProvider 但提供了 req，尝试从路径推断
@@ -3737,8 +3757,7 @@ function getQuotaErrorMetadata(error) {
 
 export function createErrorResponse(error, fromProvider) {
     const protocolPrefix = getProtocolPrefix(fromProvider);
-    const rawStatusCode = error.response?.status || error.status || error.statusCode || error.code || 500;
-    const statusCode = ensureValidStatusCode(rawStatusCode);
+    const statusCode = getNumericHttpStatus(error) ?? 500;
     const errorMessage = getClientFacingErrorMessage(error, error.message || "An error occurred during processing.");
     const quotaMetadata = getQuotaErrorMetadata(error);
     
@@ -3828,8 +3847,7 @@ export function createErrorResponse(error, fromProvider) {
  */
 export function createStreamErrorResponse(error, fromProvider) {
     const protocolPrefix = getProtocolPrefix(fromProvider);
-    const rawStatusCode = error.response?.status || error.status || error.statusCode || error.code || 500;
-    const statusCode = ensureValidStatusCode(rawStatusCode);
+    const statusCode = getNumericHttpStatus(error) ?? 500;
     const errorMessage = getClientFacingErrorMessage(error, error.message || "An error occurred during streaming.");
     const quotaMetadata = getQuotaErrorMetadata(error);
     
