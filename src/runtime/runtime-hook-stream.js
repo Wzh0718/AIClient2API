@@ -103,6 +103,7 @@ export class RuntimeHookStream {
         group = 'control',
         spoolDir = path.join(process.cwd(), 'configs', 'runtime-hook-spool', workerId),
         spoolMaxBytes = 256 * 1024 * 1024,
+        publishedSpoolTtlMs = 60_000,
         retentionSeconds = 45 * 24 * 60 * 60,
         redisCommandTimeoutMs = 10000,
         pendingClaimIdleMs = 30_000
@@ -118,6 +119,7 @@ export class RuntimeHookStream {
         this.processedKey = `${this.streamKey}:processed`;
         this.spoolDir = spoolDir;
         this.spoolMaxBytes = Math.max(1, Number(spoolMaxBytes) || 1);
+        this.publishedSpoolTtlMs = Math.max(1, Number(publishedSpoolTtlMs) || 60_000);
         this.spoolFull = false;
         this.retentionSeconds = retentionSeconds;
         this.redisCommandTimeoutMs = redisCommandTimeoutMs;
@@ -152,9 +154,27 @@ export class RuntimeHookStream {
             } catch {
                 // Keep the file indexed so a later flush/ack can drop or repair it.
             }
-            this.spoolEntries.set(name, { size: stat.size, mtimeMs: stat.mtimeMs, streamId });
+            if (streamId) {
+                try { fs.rmSync(file, { force: true }); } catch {
+                    // Best-effort reclaim of a previous process's published WAL.
+                }
+                continue;
+            }
+            this.spoolEntries.set(name, { size: stat.size, mtimeMs: stat.mtimeMs, streamId: null });
             this.spoolBytes += stat.size;
         }
+    }
+
+    _forgetSpoolEntry(name) {
+        const existing = this.spoolEntries?.get(name);
+        if (!existing) return;
+        this.spoolEntries.delete(name);
+        this.spoolBytes = Math.max(0, this.spoolBytes - existing.size);
+    }
+
+    async _removeSpoolEntry(name) {
+        await fsp.rm(path.join(this.spoolDir, name), { force: true });
+        this._forgetSpoolEntry(name);
     }
 
     _enqueueSpoolMutation(operation) {
@@ -259,10 +279,7 @@ export class RuntimeHookStream {
             record = decodeSpoolRecord(await fsp.readFile(file, 'utf8'));
         } catch (error) {
             if (error?.code === 'ENOENT') {
-                if (existing) {
-                    this.spoolEntries.delete(name);
-                    this.spoolBytes = Math.max(0, this.spoolBytes - existing.size);
-                }
+                this._forgetSpoolEntry(name);
                 return;
             }
             throw error;
@@ -285,18 +302,20 @@ export class RuntimeHookStream {
         if (!eventId) return;
         await this._enqueueSpoolMutation(async () => {
             this._initializeSpoolIndex();
-            const name = safeFileName(eventId);
-            const existing = this.spoolEntries.get(name);
-            await fsp.rm(path.join(this.spoolDir, name), { force: true });
-            if (existing) {
-                this.spoolEntries.delete(name);
-                this.spoolBytes = Math.max(0, this.spoolBytes - existing.size);
-            }
+            await this._removeSpoolEntry(safeFileName(eventId));
         });
     }
 
     async flushSpool() {
         this._initializeSpoolIndex();
+        await this._enqueueSpoolMutation(async () => {
+            const now = Date.now();
+            for (const [name, meta] of [...this.spoolEntries.entries()]) {
+                if (meta?.streamId && now - Number(meta.mtimeMs || 0) >= this.publishedSpoolTtlMs) {
+                    await this._removeSpoolEntry(name);
+                }
+            }
+        });
         const unpublished = [...this.spoolEntries.entries()]
             .filter(([, meta]) => !meta?.streamId)
             .map(([name]) => name);

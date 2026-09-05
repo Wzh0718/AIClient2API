@@ -1968,6 +1968,7 @@ export class ProviderPoolManager {
             requestedModel,
             toStringArray(this.globalConfig?.CODEX_53_QUOTA_MODEL_PATTERNS || this.globalConfig?.codex53QuotaModelPatterns || DEFAULT_CODEX_53_MODEL_PATTERNS)
         );
+        if (this._hasFreshLocalCodexPoolSnapshot(providerType, bucket, providers)) return;
         const scope = this._getCodexPoolSnapshotScope(providerType, bucket);
         try {
             const snapshot = await this.coordination.getRuntimeSnapshot(scope);
@@ -1992,6 +1993,23 @@ export class ProviderPoolManager {
         } catch {
             // Shared coordination is best effort; local filtering remains authoritative.
         }
+    }
+
+    _hasFreshLocalCodexPoolSnapshot(providerType, bucket, providers) {
+        const now = Date.now();
+        const usageCacheVersion = getCodexUsageCacheVersion(readFreshUsageCacheSync());
+        const fingerprint = this._getCodexPoolStateFingerprint(providers, bucket);
+        const shared = this._codexQuotaFilterSnapshots.get(`${providerType}:${bucket}:*`);
+        const exhausted = this._codexPoolExhaustedSnapshots.get(`${providerType}:${bucket}`);
+        const cached = shared?.expiresAt > now
+            ? shared
+            : exhausted?.expiresAt > now
+                ? exhausted
+                : null;
+        if (!cached) return false;
+        if (cached.providerConfigRevision !== this.providerConfigRevision) return false;
+        if (cached.stateFingerprint && cached.stateFingerprint !== fingerprint) return false;
+        return (cached.usageCacheVersion || 'none') === usageCacheVersion;
     }
 
     _applySharedCodexPoolSnapshot(providerType, bucket, providers, snapshot) {

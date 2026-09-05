@@ -266,6 +266,64 @@ describe('provider pool Codex token quota', () => {
         expect(manager._codexQuotaFilterMetrics.crossWorkerReuse).toBe(1);
     });
 
+    test('skips Redis snapshot fetch when the local Codex pool snapshot is still fresh', async () => {
+        const usageTimestamp = new Date().toISOString();
+        writeCodexUsageCache([
+            {
+                uuid: 'aaa-codex-over',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 10, unit: 'percent' },
+                        { id: 'secondary_window', percent: 20, unit: 'percent' }
+                    ]
+                }
+            },
+            {
+                uuid: 'zzz-codex-ok',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 15, unit: 'percent' },
+                        { id: 'secondary_window', percent: 25, unit: 'percent' }
+                    ]
+                }
+            }
+        ], usageTimestamp);
+
+        const manager = createQuotaPoolManager();
+        const providers = manager.providerStatus['openai-codex-oauth'];
+        const snapshot = {
+            providerConfigRevision: manager.providerConfigRevision,
+            stateFingerprint: manager._getCodexPoolStateFingerprint(providers, 'general'),
+            allowedProviderUuids: ['aaa-codex-over', 'zzz-codex-ok'],
+            filterReasons: {},
+            unavailableCount: 0,
+            exhausted: false,
+            ttlMs: 30_000,
+            usageCacheVersion: usageTimestamp
+        };
+        manager._applySharedCodexPoolSnapshot('openai-codex-oauth', 'general', providers, snapshot);
+        const coordination = {
+            getRuntimeSnapshot: jest.fn(async () => snapshot),
+            acquireRuntimeSnapshotLock: jest.fn(async () => null),
+            acquire: jest.fn(async candidates => ({
+                leaseId: 'lease-1',
+                providerType: candidates[0].providerType,
+                uuid: candidates[0].uuid
+            })),
+            release: jest.fn(async () => true)
+        };
+        manager.coordination = coordination;
+
+        const selected = await manager.acquireSlot('openai-codex-oauth', 'gpt-5.5');
+        expect(selected?.uuid).toBeTruthy();
+        expect(coordination.getRuntimeSnapshot).not.toHaveBeenCalled();
+        expect(coordination.acquireRuntimeSnapshotLock).not.toHaveBeenCalled();
+    });
+
     test('fresh usage cache recovery re-enables a provider stuck in a future quota cooldown', async () => {
         writeCodexUsageCache([
             {

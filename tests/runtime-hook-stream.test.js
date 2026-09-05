@@ -1,7 +1,12 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { RuntimeHookStream, createRuntimeHookStreamFromEnv } from '../src/runtime/runtime-hook-stream.js';
+
+function spoolFileName(eventId) {
+    return `${createHash('sha256').update(String(eventId)).digest('hex')}.json`;
+}
 
 describe('RuntimeHookStream', () => {
     test('uses a dedicated Redis connection for blocking reads', async () => {
@@ -147,6 +152,60 @@ describe('RuntimeHookStream', () => {
 
         await stream.acknowledge(event.eventId);
         expect(stream.snapshot()).toMatchObject({ spooled: 0 });
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('drops published leftover spool files from a previous process on first index', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-hook-stale-wal-'));
+        const leftoverId = 'old-epoch-evt';
+        const leftoverPath = path.join(dir, spoolFileName(leftoverId));
+        fs.writeFileSync(leftoverPath, `${JSON.stringify({
+            wal: 1,
+            streamId: '9-0',
+            publishedAt: new Date(Date.now() - 30 * 3600 * 1000).toISOString(),
+            event: { eventId: leftoverId, type: 'runtime_hook', args: [] }
+        })}\n`);
+        const unpublishedId = 'still-pending-evt';
+        const unpublishedPath = path.join(dir, spoolFileName(unpublishedId));
+        fs.writeFileSync(unpublishedPath, `${JSON.stringify({
+            wal: 1,
+            streamId: null,
+            publishedAt: null,
+            event: { eventId: unpublishedId, type: 'runtime_hook', args: [] }
+        })}\n`);
+        const redis = {
+            command: jest.fn(async parts => parts[0] === 'INFO'
+                ? 'used_memory:1024\r\nused_memory_peak:1024\r\nmaxmemory:805306368\r\n'
+                : '1-0')
+        };
+        const stream = new RuntimeHookStream({ redis, epoch: 'new-epoch', workerId: 'execution-1', spoolDir: dir });
+
+        expect(stream.snapshot()).toMatchObject({ spooled: 1 });
+        expect(fs.existsSync(leftoverPath)).toBe(false);
+        expect(fs.existsSync(unpublishedPath)).toBe(true);
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('reclaims published spool files after the ack grace period', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-hook-reclaim-wal-'));
+        const redis = {
+            command: jest.fn(async parts => parts[0] === 'INFO'
+                ? 'used_memory:1024\r\nused_memory_peak:1024\r\nmaxmemory:805306368\r\n'
+                : '1-0')
+        };
+        const stream = new RuntimeHookStream({
+            redis,
+            epoch: 'test',
+            workerId: 'execution-1',
+            spoolDir: dir,
+            publishedSpoolTtlMs: 1
+        });
+        await stream.publish({ eventId: 'evt-reclaim', type: 'runtime_hook', args: [] });
+        expect(stream.snapshot()).toMatchObject({ spooled: 1 });
+        await new Promise(resolve => setTimeout(resolve, 15));
+        await stream.flushSpool();
+        expect(stream.snapshot()).toMatchObject({ spooled: 0 });
+        expect(fs.existsSync(path.join(dir, spoolFileName('evt-reclaim')))).toBe(false);
         fs.rmSync(dir, { recursive: true, force: true });
     });
 
