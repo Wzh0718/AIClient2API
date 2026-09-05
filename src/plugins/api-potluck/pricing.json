@@ -7,6 +7,7 @@
         "gpt-5.5": { "input": 5.00, "cachedInput": 0.50, "output": 30.00, "provider": "openai", "source": "official" },
         "gpt-5.4": { "input": 2.50, "cachedInput": 0.25, "output": 15.00, "provider": "openai", "source": "official" },
         "gpt-5.4-mini": { "input": 0.75, "cachedInput": 0.075, "output": 4.50, "provider": "openai", "source": "official" },
+        "gpt-6-astra": { "input": 10.00, "cachedInput": 1.00, "output": 50.00, "provider": "openai", "source": "official" },
         "gpt-5.4-nano": { "input": 0.20, "cachedInput": 0.02, "output": 1.25, "provider": "openai", "source": "official" },
         "gpt-5.3-codex": { "input": 1.75, "cachedInput": 0.175, "output": 14.00, "provider": "openai", "source": "official" },
         "gpt-5.3-codex-spark": { "input": 0.75, "cachedInput": 0.075, "output": 4.50, "provider": "openai", "source": "temporary:gpt-5.4-mini" },
@@ -32,6 +33,7 @@
         "gpt5.6luna": "gpt-5.6-luna",
         "codex-auto-review": "gpt-5.5",
         "gpt5.5": "gpt-5.5",
+        "gpt6astra": "gpt-6-astra",
         "gpt-5.3codexspark": "gpt-5.3-codex-spark",
         "gtp-5.1": "gpt-5.3-codex-spark",
         "gpt-5.1": "gpt-5.3-codex-spark",
@@ -68,6 +70,7 @@
         "gpt-5.3-codex-spark-fast": { "baseModel": "gpt-5.3-codex-spark", "multiplier": 1.0, "source": "temporary:historical-fast-base-price" },
         "gpt-5.3-codex-fast": { "baseModel": "gpt-5.3-codex", "multiplier": 1.0, "source": "temporary:historical-fast-base-price" },
         "gpt-5.2-fast": { "baseModel": "gpt-5.2", "multiplier": 1.0, "source": "temporary:historical-fast-base-price" },
-        "gpt-image-2-fast": { "baseModel": "gpt-image-2", "multiplier": 1.0, "source": "temporary:historical-fast-base-price" }
+        "gpt-image-2-fast": { "baseModel": "gpt-image-2", "multiplier": 1.0, "source": "temporary:historical-fast-base-price" },
+        "gpt-6-astra-fast": { "baseModel": "gpt-6-astra", "multiplier": 2.0, "source": "official:fast-mode" }
     }
 }

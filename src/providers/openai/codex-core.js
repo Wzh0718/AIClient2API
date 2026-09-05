@@ -29,11 +29,11 @@ import { codexPromptCacheObservability } from './codex-prompt-cache-observabilit
 import requestContext from '../../utils/context.js';
 import { performance } from 'node:perf_hooks';
 import { getCodexRetryDelayMs, shouldRetryCodex429 } from './codex-retry-policy.js';
+import { getCodexModelIds, sanitizeCodexModelParameters, normalizeCodexReasoningEffort } from './codex-model-capabilities.js';
 
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
-const fastModels = baseModels.map(m => `${m}-fast`);
-const CODEX_MODELS = [...new Set([...baseModels, ...fastModels])];
-const CODEX_VERSION = '0.144.1';
+const CODEX_MODELS = getCodexModelIds(baseModels);
+const CODEX_VERSION = '0.153.3';
 export const IMAGE_MODELS = new Set(['gpt-image-2']);
 const IMAGE_GENERATION_FUNCTION_NAMES = new Set(['image_gen.imagegen', 'image_gen__imagegen']);
 const IMAGE_TOOL_STRING_FIELDS = ['size', 'quality', 'background', 'output_format', 'input_fidelity', 'moderation'];
@@ -804,7 +804,7 @@ export class CodexApiService {
         const isImageModel = IMAGE_MODELS.has(upstreamModel);
         const effectiveUpstreamModel = isImageModel ? 'gpt-5.4' : upstreamModel;
 
-        const cleanedBody = {...requestBody};
+        const cleanedBody = sanitizeCodexModelParameters(upstreamModel, {...requestBody});
         if (fingerprintIds) {
             applyCodexFingerprintClientMetadata(cleanedBody, fingerprintIds);
         }
@@ -923,7 +923,7 @@ export class CodexApiService {
             service_tier: cleanedBody.service_tier || defaultServiceTier,
             reasoning: {
                 ...cleanedBody.reasoning,
-                effort: isFastModel ? defaultReasoningEffort : (cleanedBody.reasoning?.effort === 'minimal' ? 'none' : (cleanedBody.reasoning?.effort || defaultReasoningEffort)),
+                effort: normalizeCodexReasoningEffort(upstreamModel, cleanedBody.reasoning?.effort, isFastModel) || defaultReasoningEffort,
                 summary: cleanedBody.reasoning?.summary || 'auto',
             },
             stream,

@@ -139,6 +139,7 @@ export const PROVIDER_MODELS = {
         'gpt-5.4',
         'gpt-5.4-mini',
         'gpt-5.5',
+        'gpt-6-astra',
         'gpt-image-2',
     ],
     'grok-cli-oauth': [
