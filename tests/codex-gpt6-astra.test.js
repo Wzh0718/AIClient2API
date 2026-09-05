@@ -15,7 +15,8 @@ describe('GPT-6 Astra Codex support', () => {
 
         expect(getCodexModelIds(models)).toEqual(expect.arrayContaining([
             'gpt-6-astra',
-            'gpt-6-astra-fast'
+            'gpt-6-astra-fast',
+            'gpt-6-astra-ultrafast'
         ]));
     });
 
@@ -26,6 +27,7 @@ describe('GPT-6 Astra Codex support', () => {
     test('maps GPT-6 Astra minimal reasoning to low instead of unsupported none', () => {
         expect(normalizeCodexReasoningEffort('gpt-6-astra', 'minimal')).toBe('low');
         expect(normalizeCodexReasoningEffort('gpt-6-astra-fast', 'minimal', true)).toBe('xhigh');
+        expect(normalizeCodexReasoningEffort('gpt-6-astra-ultrafast', 'minimal')).toBe('xhigh');
     });
 
     test('removes unsupported sampling parameters only for GPT-6 Astra', () => {

@@ -22,11 +22,24 @@ describe('Codex usage source regressions', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'src/utils/common.js'), 'utf8').replace(/\r\n/g, '\n');
 
         expect(source).toContain('function getUsageTrackingModel(model, requestBody, toProvider)');
-        expect(source).toContain("requestBody?.service_tier === 'priority'");
-        expect(source).toContain("return `${normalizedModel}-fast`;");
+        expect(source).toContain("['priority', 'fast'].includes(requestBody?.service_tier)");
+        expect(source).toContain('return `${baseModel}-fast`;');
         expect(source).toContain('const usageTrackingModel = getUsageTrackingModel(model, requestBody, toProvider);');
         expect(source).toContain('const finalUsageModel = getUsageTrackingModel(model, processedRequestBody, toProvider);');
         expect(source).toContain('model: usageTrackingModel');
         expect(source).toContain('model: finalUsageModel');
+    });
+
+    test('Codex ultrafast service tier is tracked with a distinct model label', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'src/utils/common.js'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain("requestBody?.service_tier === 'ultrafast'");
+        expect(source).toContain('return `${baseModel}-ultrafast`;');
+    });
+
+    test('Codex service tiers keep fast and ultrafast distinct in the request path', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'src/providers/openai/codex-core.js'), 'utf8').replace(/\r\n/g, '\n');
+
+        expect(source).toContain('["default", "priority", "fast", "ultrafast"].includes(result.service_tier)');
     });
 });

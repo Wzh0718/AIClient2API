@@ -108,7 +108,8 @@ async function backfillGeminiProviderAccountNames(providers, providerType, credP
 function isSupportedCodexModel(providerType, model) {
     const models = getProviderModels(providerType);
     if (models.includes(model)) return true;
-    return model?.endsWith('-fast') && models.includes(model.slice(0, -5));
+    return /-(?:fast|ultrafast)$/i.test(String(model || ''))
+        && models.includes(String(model).replace(/-(?:fast|ultrafast)$/i, ''));
 }
 
 function hashAffinityScope(value) {
@@ -339,8 +340,9 @@ function modelAliasMatches(requestedModel, configuredModel) {
     const configured = String(configuredModel || '').trim().toLowerCase();
     if (!requested || !configured) return false;
     if (requested === configured) return true;
-    if (requested.endsWith('-fast') && requested.slice(0, -5) === configured) return true;
-    return configured.endsWith('-fast') && configured.slice(0, -5) === requested;
+    if (/(?:-fast|-ultrafast)$/.test(requested) && requested.replace(/-(?:fast|ultrafast)$/, '') === configured) return true;
+    return /(?:-fast|-ultrafast)$/.test(configured)
+        && configured.replace(/-(?:fast|ultrafast)$/, '') === requested;
 }
 
 function isFixedCredentialModelSupported(providerType, uuid, requestedModel) {

@@ -34,6 +34,7 @@ const PRICING = JSON.parse(fs.readFileSync(resolvePricingFile(), 'utf8'));
 export const PRICING_VERSION = PRICING.pricingVersion;
 
 const PRICE_PER_MILLION = PRICING.pricePerMillion;
+const LONG_CONTEXT_PRICING = PRICING.longContext || {};
 
 const MODEL_PRICE_ALIASES = PRICING.modelPriceAliases;
 
@@ -247,6 +248,27 @@ function buildAveragePricingProfile(models = {}) {
   };
 }
 
+function getCacheWriteTokens(usage = {}) {
+  return toNumber(
+    usage.cacheWriteTokens ??
+    usage.cache_write_tokens ??
+    usage.cache_creation_input_tokens ??
+    usage.cache_creation_tokens ??
+    usage.input_tokens_details?.cache_write_tokens ??
+    usage.input_tokens_details?.cache_creation_tokens
+  );
+}
+
+function getLongContextRates(promptTokens) {
+  const threshold = toNumber(LONG_CONTEXT_PRICING.threshold);
+  const isLongContext = threshold > 0 && promptTokens > threshold;
+  return {
+    inputMultiplier: isLongContext ? (toNumber(LONG_CONTEXT_PRICING.inputMultiplier) || 1) : 1,
+    cachedInputMultiplier: isLongContext ? (toNumber(LONG_CONTEXT_PRICING.cachedInputMultiplier) || 1) : 1,
+    outputMultiplier: isLongContext ? (toNumber(LONG_CONTEXT_PRICING.outputMultiplier) || 1) : 1,
+  };
+}
+
 export function buildUniqueEmailProviderMap(store = {}) {
   const providersByEmail = new Map();
   for (const keyData of Object.values(store.keys || {})) {
@@ -281,15 +303,16 @@ function estimateUsageCost(usage, model, { averageProfile = null, averageScope =
       const cachedTokens = Math.min(normalized.promptTokens, normalized.cachedTokens);
       const billableInputTokens = Math.max(0, normalized.promptTokens - cachedTokens);
       const classifiedTokens = billableInputTokens + cachedTokens + normalized.completionTokens;
+      const fallbackTokens = Math.max(0, normalized.totalTokens - getCacheWriteTokens(usage));
       const fallback = averageProfile.effective;
       const estimatedUsd = classifiedTokens > 0
         ? (
           billableInputTokens * (averageProfile.input || fallback) +
           cachedTokens * (averageProfile.cachedInput || fallback) +
           normalized.completionTokens * (averageProfile.output || fallback) +
-          Math.max(0, normalized.totalTokens - classifiedTokens) * fallback
+          Math.max(0, fallbackTokens - classifiedTokens) * fallback
         ) / 1_000_000
-        : normalized.totalTokens * fallback / 1_000_000;
+        : fallbackTokens * fallback / 1_000_000;
       return {
         usd: estimatedUsd,
         actualUsd: 0,
@@ -318,10 +341,11 @@ function estimateUsageCost(usage, model, { averageProfile = null, averageScope =
   const normalized = normalizeUsage(usage);
   const cachedTokens = Math.min(normalized.promptTokens, normalized.cachedTokens);
   const billableInputTokens = Math.max(0, normalized.promptTokens - cachedTokens);
+  const longContextRates = getLongContextRates(normalized.promptTokens);
   const actualUsd = ((
-    billableInputTokens * pricing.input +
-    cachedTokens * pricing.cachedInput +
-    normalized.completionTokens * pricing.output
+    billableInputTokens * pricing.input * longContextRates.inputMultiplier +
+    cachedTokens * pricing.cachedInput * longContextRates.cachedInputMultiplier +
+    normalized.completionTokens * pricing.output * longContextRates.outputMultiplier
   ) / 1_000_000) * resolvedModel.multiplier;
 
   return {

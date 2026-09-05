@@ -1,5 +1,11 @@
 {
-    "pricingVersion": "official-2026-08-01-r1",
+    "pricingVersion": "official-2026-09-05-codex-rules-r1",
+    "longContext": {
+        "threshold": 275000,
+        "inputMultiplier": 1.0,
+        "cachedInputMultiplier": 1.0,
+        "outputMultiplier": 1.0
+    },
     "pricePerMillion": {
         "gpt-5.6-sol": { "input": 5.00, "cachedInput": 0.50, "output": 30.00, "provider": "openai", "source": "official" },
         "gpt-5.6-terra": { "input": 2.00, "cachedInput": 0.20, "output": 12.00, "provider": "openai", "source": "official:2026-08-01" },
@@ -71,6 +77,8 @@
         "gpt-5.3-codex-fast": { "baseModel": "gpt-5.3-codex", "multiplier": 1.0, "source": "temporary:historical-fast-base-price" },
         "gpt-5.2-fast": { "baseModel": "gpt-5.2", "multiplier": 1.0, "source": "temporary:historical-fast-base-price" },
         "gpt-image-2-fast": { "baseModel": "gpt-image-2", "multiplier": 1.0, "source": "temporary:historical-fast-base-price" },
-        "gpt-6-astra-fast": { "baseModel": "gpt-6-astra", "multiplier": 2.0, "source": "official:fast-mode" }
+        "gpt-6-astra-fast": { "baseModel": "gpt-6-astra", "multiplier": 2.0, "source": "official:fast-mode" },
+        "gpt-5.6-sol-ultrafast": { "baseModel": "gpt-5.6-sol", "multiplier": 2.5, "source": "codex:ultrafast-same-as-fast" },
+        "gpt-6-astra-ultrafast": { "baseModel": "gpt-6-astra", "multiplier": 2.0, "source": "codex:ultrafast-same-as-fast" }
     }
 }

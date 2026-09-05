@@ -18,6 +18,37 @@ import {
     generateResponseCompleted
 } from '../../providers/openai/openai-responses-core.mjs';
 
+/**
+ * Resolve Codex speed model suffixes into the base model and service tier.
+ * An explicitly supplied non-default service tier takes precedence over the
+ * suffix. The suffix is still removed so it is never sent upstream.
+ */
+function resolveCodexSpeedModel(model, serviceTier) {
+    const suppliedTier = typeof serviceTier === 'string' && serviceTier.trim()
+        ? serviceTier.trim()
+        : 'default';
+
+    if (typeof model !== 'string') {
+        return { model, serviceTier: suppliedTier };
+    }
+
+    if (model.endsWith('-ultrafast')) {
+        return {
+            model: model.slice(0, -'-ultrafast'.length),
+            serviceTier: suppliedTier === 'default' ? 'ultrafast' : suppliedTier
+        };
+    }
+
+    if (model.endsWith('-fast')) {
+        return {
+            model: model.slice(0, -'-fast'.length),
+            serviceTier: suppliedTier === 'default' ? 'priority' : suppliedTier
+        };
+    }
+
+    return { model, serviceTier: suppliedTier };
+}
+
 export class CodexConverter extends BaseConverter {
     constructor() {
         super('codex');
@@ -228,8 +259,13 @@ export class CodexConverter extends BaseConverter {
         codexRequest.store = false;
         codexRequest.parallel_tool_calls = true;
         codexRequest.include = ['reasoning.encrypted_content'];
-        codexRequest.service_tier = responsesRequest.service_tier || 'default';
-        if (codexRequest.service_tier !== 'priority') {
+        const resolvedSpeed = resolveCodexSpeedModel(
+            responsesRequest.model,
+            responsesRequest.service_tier
+        );
+        codexRequest.model = resolvedSpeed.model;
+        codexRequest.service_tier = resolvedSpeed.serviceTier;
+        if (!["default", "priority", "fast", "ultrafast"].includes(codexRequest.service_tier)) {
             delete codexRequest.service_tier;
         }
     
@@ -292,8 +328,9 @@ export class CodexConverter extends BaseConverter {
         // 构建工具名称映射
         this.buildToolNameMap(data.tools || [], requestId);
 
+        const resolvedSpeed = resolveCodexSpeedModel(data.model, data.service_tier);
         const codexRequest = {
-            model: data.model,
+            model: resolvedSpeed.model,
             instructions: this.buildInstructions(data),
             input: this.convertMessages((data.messages || []).filter(m => m.role !== 'system' && m.role !== 'developer'), requestId),
             stream: true,
@@ -318,8 +355,8 @@ export class CodexConverter extends BaseConverter {
             codexRequest._imageSize = data._imageSize;
         }
 
-        codexRequest.service_tier = data.service_tier || 'default';
-        if (codexRequest.service_tier !== 'priority') {
+        codexRequest.service_tier = resolvedSpeed.serviceTier;
+        if (!["default", "priority", "fast", "ultrafast"].includes(codexRequest.service_tier)) {
             delete codexRequest.service_tier;
         }
 

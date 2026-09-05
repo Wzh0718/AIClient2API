@@ -11,6 +11,7 @@ const PRICING = JSON.parse(fs.readFileSync(PRICING_FILE, 'utf8'));
 export const PRICING_VERSION = PRICING.pricingVersion;
 
 const PRICE_PER_MILLION = PRICING.pricePerMillion;
+const LONG_CONTEXT_PRICING = PRICING.longContext || {};
 
 const MODEL_PRICE_ALIASES = PRICING.modelPriceAliases;
 const MODEL_PRICE_MULTIPLIERS = PRICING.modelPriceMultipliers || {};
@@ -65,11 +66,26 @@ function isTextPricingModel(model) {
 function normalizeUsageParts(usage = {}) {
     const promptTokens = toNumber(usage.promptTokens);
     const cachedTokens = Math.min(promptTokens, toNumber(usage.cachedTokens));
+    const cacheWriteTokens = toNumber(
+        usage.cacheWriteTokens ?? usage.cache_write_tokens ??
+        usage.cache_creation_input_tokens ?? usage.cache_creation_tokens ??
+        usage.input_tokens_details?.cache_write_tokens ?? usage.input_tokens_details?.cache_creation_tokens
+    );
     const billableInputTokens = Math.max(0, promptTokens - cachedTokens);
     const outputTokens = toNumber(usage.completionTokens);
     const classifiedTokens = billableInputTokens + cachedTokens + outputTokens;
     const totalTokens = toNumber(usage.totalTokens) || (promptTokens + outputTokens);
-    return { promptTokens, cachedTokens, billableInputTokens, outputTokens, classifiedTokens, totalTokens };
+    return { promptTokens, cachedTokens, cacheWriteTokens, billableInputTokens, outputTokens, classifiedTokens, totalTokens };
+}
+
+function getLongContextRates(parts) {
+    const threshold = toNumber(LONG_CONTEXT_PRICING.threshold);
+    const isLongContext = threshold > 0 && parts.promptTokens > threshold;
+    return {
+        inputMultiplier: isLongContext ? (toNumber(LONG_CONTEXT_PRICING.inputMultiplier) || 1) : 1,
+        cachedInputMultiplier: isLongContext ? (toNumber(LONG_CONTEXT_PRICING.cachedInputMultiplier) || 1) : 1,
+        outputMultiplier: isLongContext ? (toNumber(LONG_CONTEXT_PRICING.outputMultiplier) || 1) : 1
+    };
 }
 
 function resolvePricedModel(model) {
@@ -130,9 +146,10 @@ export function buildAveragePricingProfile(models = {}) {
         const parts = normalizeUsageParts(usage);
         if (parts.totalTokens <= 0) continue;
         const multiplier = resolvedModel.multiplier;
-        const inputUsd = parts.billableInputTokens * pricing.input * multiplier / 1_000_000;
-        const cachedInputUsd = parts.cachedTokens * pricing.cachedInput * multiplier / 1_000_000;
-        const outputUsd = parts.outputTokens * pricing.output * multiplier / 1_000_000;
+        const longContextRates = getLongContextRates(parts);
+        const inputUsd = parts.billableInputTokens * pricing.input * multiplier * longContextRates.inputMultiplier / 1_000_000;
+        const cachedInputUsd = parts.cachedTokens * pricing.cachedInput * multiplier * longContextRates.cachedInputMultiplier / 1_000_000;
+        const outputUsd = parts.outputTokens * pricing.output * multiplier * longContextRates.outputMultiplier / 1_000_000;
         totals.billableInputTokens += parts.billableInputTokens;
         totals.cachedTokens += parts.cachedTokens;
         totals.outputTokens += parts.outputTokens;
@@ -162,6 +179,8 @@ function estimateFromAverageProfile(usage, profile) {
     if (!profile || parts.totalTokens <= 0) return null;
     const fallback = toNumber(profile.effective);
     if (fallback <= 0) return null;
+    const cacheWriteTokens = Math.max(0, parts.cacheWriteTokens);
+    const fallbackTokens = Math.max(0, parts.totalTokens - cacheWriteTokens);
     let usd;
     if (parts.classifiedTokens > 0) {
         usd = (
@@ -169,10 +188,10 @@ function estimateFromAverageProfile(usage, profile) {
             parts.cachedTokens * (toNumber(profile.cachedInput) || fallback) +
             parts.outputTokens * (toNumber(profile.output) || fallback)
         ) / 1_000_000;
-        const unclassifiedTokens = Math.max(0, parts.totalTokens - parts.classifiedTokens);
+        const unclassifiedTokens = Math.max(0, fallbackTokens - parts.classifiedTokens);
         usd += unclassifiedTokens * fallback / 1_000_000;
     } else {
-        usd = parts.totalTokens * fallback / 1_000_000;
+        usd = fallbackTokens * fallback / 1_000_000;
     }
     return { usd, totalTokens: parts.totalTokens };
 }
@@ -220,10 +239,11 @@ export function estimateUsageCost(usage = {}, model = DEFAULT_CONVERSION_MODEL, 
         };
     }
 
+    const longContextRates = getLongContextRates(parts);
     const standardUsd = (
-        (parts.billableInputTokens * pricing.input) +
-        (parts.cachedTokens * pricing.cachedInput) +
-        (parts.outputTokens * pricing.output)
+        (parts.billableInputTokens * pricing.input * longContextRates.inputMultiplier) +
+        (parts.cachedTokens * pricing.cachedInput * longContextRates.cachedInputMultiplier) +
+        (parts.outputTokens * pricing.output * longContextRates.outputMultiplier)
     ) / 1_000_000;
     const usd = standardUsd * resolvedModel.multiplier;
 

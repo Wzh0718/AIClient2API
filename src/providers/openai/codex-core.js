@@ -793,12 +793,16 @@ export class CodexApiService {
         // 明确会话维度：优先 OpenAI metadata，其次 Codex CLI client_metadata
         const sessionId = resolveCodexSessionId(requestBody);
 
-        // 判断是否为 fast 模型并确定默认值
+        // 判断速度档位并确定默认值
         const normalizedModel = String(model || '').trim();
+        const isUltraFastModel = /-ultrafast$/i.test(normalizedModel);
         const isFastModel = /-fast$/i.test(normalizedModel);
-        const upstreamModel = isFastModel ? normalizedModel.replace(/-fast$/i, '') : normalizedModel;
-        const defaultServiceTier = isFastModel ? 'priority' : 'default';
-        const defaultReasoningEffort = isFastModel ? 'xhigh' : 'medium';
+        const isSpeedModel = isUltraFastModel || isFastModel;
+        const upstreamModel = isSpeedModel
+            ? normalizedModel.replace(/-(?:fast|ultrafast)$/i, '')
+            : normalizedModel;
+        const defaultServiceTier = isUltraFastModel ? 'ultrafast' : isFastModel ? 'priority' : 'default';
+        const defaultReasoningEffort = isSpeedModel ? 'xhigh' : 'medium';
 
         // 图像生成模型：gpt-image-2 通过 image_generation 工具 + gpt-5.6-luna 实现
         const isImageModel = IMAGE_MODELS.has(upstreamModel);
@@ -816,7 +820,7 @@ export class CodexApiService {
         delete cleanedBody.stream_options;
         cleanedBody.input = sanitizeCodexReasoningInput(cleanedBody.input);
 
-        // 【关键修复】确保传给上游的模型名称不带 -fast 后缀
+        // 【关键修复】确保传给上游的模型名称不带速度后缀
         // 即使 originalRequestBody 中已经带了 model，这里也必须覆盖
         cleanedBody.model = effectiveUpstreamModel;
 
@@ -866,8 +870,8 @@ export class CodexApiService {
             }
         }
 
-        if (isFastModel) {
-            logger.info(`[Codex] Detected -fast model: ${normalizedModel} -> ${upstreamModel}, service_tier: ${cleanedBody.service_tier || defaultServiceTier}`);
+        if (isSpeedModel) {
+            logger.info(`[Codex] Detected speed model: ${normalizedModel} -> ${upstreamModel}, service_tier: ${cleanedBody.service_tier || defaultServiceTier}`);
         }
 
         const providedPromptCacheKey = getProvidedPromptCacheKey(requestBody);
@@ -918,10 +922,12 @@ export class CodexApiService {
             store: cleanedBody.store ?? false,
             parallel_tool_calls: cleanedBody.parallel_tool_calls ?? true,
             include: cleanedBody.include || ['reasoning.encrypted_content'],
-            service_tier: cleanedBody.service_tier || defaultServiceTier,
+            service_tier: (isSpeedModel && (!cleanedBody.service_tier || cleanedBody.service_tier === 'default'))
+                ? defaultServiceTier
+                : (cleanedBody.service_tier || defaultServiceTier),
             reasoning: {
                 ...cleanedBody.reasoning,
-                effort: normalizeCodexReasoningEffort(upstreamModel, cleanedBody.reasoning?.effort, isFastModel) || defaultReasoningEffort,
+                effort: normalizeCodexReasoningEffort(upstreamModel, cleanedBody.reasoning?.effort, isSpeedModel) || defaultReasoningEffort,
                 summary: cleanedBody.reasoning?.summary || 'auto',
             },
             stream,
@@ -937,7 +943,7 @@ export class CodexApiService {
 
         delete result.messages;
 
-        if (!["priority", "fast", "ultrafast"].includes(result.service_tier)) {
+        if (!["default", "priority", "fast", "ultrafast"].includes(result.service_tier)) {
             delete result.service_tier;
         }
 

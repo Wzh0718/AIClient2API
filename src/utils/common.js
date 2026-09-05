@@ -1066,8 +1066,8 @@ function normalizeImageModelName(model) {
     if (normalized.includes(':')) {
         normalized = normalized.split(':').slice(1).join(':');
     }
-    if (normalized.endsWith('-fast')) {
-        normalized = normalized.slice(0, -5);
+    if (/(?:-fast|-ultrafast)$/.test(normalized)) {
+        normalized = normalized.replace(/-(?:fast|ultrafast)$/, '');
     }
     return normalized;
 }
@@ -1721,20 +1721,22 @@ function getUsageTrackingModel(model, requestBody, toProvider) {
     const normalizedModel = String(model || requestBody?.model || '').trim();
     if (!normalizedModel) return model;
 
+    if (!isCodexProvider(toProvider)) return normalizedModel;
+
+    const baseModel = normalizedModel.replace(/-(?:fast|ultrafast)$/i, '');
+
     if (
-        isCodexProvider(toProvider) &&
-        requestBody?.service_tier === 'priority' &&
+        ['priority', 'fast'].includes(requestBody?.service_tier) &&
         !/-fast$/i.test(normalizedModel)
     ) {
-        return `${normalizedModel}-fast`;
+        return `${baseModel}-fast`;
     }
 
     if (
-        isCodexProvider(toProvider) &&
         requestBody?.service_tier === 'ultrafast' &&
         !/-ultrafast$/i.test(normalizedModel)
     ) {
-        return `${normalizedModel}-ultrafast`;
+        return `${baseModel}-ultrafast`;
     }
 
     return normalizedModel;

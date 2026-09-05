@@ -230,7 +230,9 @@ function normalizeImageRoundRobinModel(model) {
     if (normalized.includes(':')) {
         normalized = normalized.split(':').slice(1).join(':');
     }
-    return normalized.endsWith('-fast') ? normalized.slice(0, -5) : normalized;
+    return /(?:-fast|-ultrafast)$/.test(normalized)
+        ? normalized.replace(/-(?:fast|ultrafast)$/, '')
+        : normalized;
 }
 
 function selectWeightedStickyProvider(providers, affinityScope) {

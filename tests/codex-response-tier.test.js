@@ -22,4 +22,27 @@ describe('Codex response service tier', () => {
 
         expect(converted.service_tier).toBe('priority');
     });
+
+    test.each(['fast', 'ultrafast'])('preserves %s when converting an inbound Codex request', tier => {
+        const converter = new CodexConverter();
+        const converted = converter.toOpenAIRequestToCodexRequest({
+            model: 'gpt-5.6-sol',
+            messages: [{ role: 'user', content: 'hello' }],
+            service_tier: tier
+        }, 'req-tier');
+
+        expect(converted.service_tier).toBe(tier);
+    });
+
+    test('removes the ultrafast model suffix while preserving its service tier', () => {
+        const converter = new CodexConverter();
+        const converted = converter.toOpenAIRequestToCodexRequest({
+            model: 'gpt-5.6-sol-ultrafast',
+            messages: [{ role: 'user', content: 'hello' }],
+            service_tier: 'ultrafast'
+        }, 'req-ultrafast');
+
+        expect(converted.model).toBe('gpt-5.6-sol');
+        expect(converted.service_tier).toBe('ultrafast');
+    });
 });

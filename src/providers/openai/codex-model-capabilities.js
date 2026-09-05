@@ -4,10 +4,12 @@ const GPT6_ASTRA_REASONING_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', '
 
 export function isGpt6AstraModel(model) {
     const normalized = String(model || '').trim().toLowerCase();
-    return normalized === GPT6_ASTRA_MODEL || normalized === `${GPT6_ASTRA_MODEL}-fast`;
+    return normalized === GPT6_ASTRA_MODEL ||
+        normalized === `${GPT6_ASTRA_MODEL}-fast` ||
+        normalized === `${GPT6_ASTRA_MODEL}-ultrafast`;
 }
 
-export function normalizeCodexReasoningEffort(model, effort, isFast = /-fast$/i.test(String(model || ''))) {
+export function normalizeCodexReasoningEffort(model, effort, isFast = /-(?:fast|ultrafast)$/i.test(String(model || ''))) {
     const requested = String(effort || '').trim().toLowerCase();
     if (isFast) return 'xhigh';
     if (isGpt6AstraModel(model)) {
@@ -33,5 +35,12 @@ export function sanitizeCodexModelParameters(model, body = {}) {
 
 export function getCodexModelIds(baseModels = []) {
     const models = Array.isArray(baseModels) ? baseModels : [];
-    return [...new Set([...models, ...models.map(model => `${model}-fast`)])];
+    const ultrafastModels = models.filter(model =>
+        model === 'gpt-5.6-sol' || model === GPT6_ASTRA_MODEL
+    );
+    return [...new Set([
+        ...models,
+        ...models.map(model => `${model}-fast`),
+        ...ultrafastModels.map(model => `${model}-ultrafast`)
+    ])];
 }

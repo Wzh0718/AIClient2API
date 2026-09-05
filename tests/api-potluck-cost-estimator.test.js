@@ -38,7 +38,7 @@ describe('api potluck cost estimator', () => {
         expect(cost.actualUsd).toBeCloseTo(1.065, 6);
         expect(cost.convertedUsd).toBeCloseTo(0.496, 6);
         expect(cost.conversionModel).toBe('gemini-2.5-flash');
-        expect(cost.pricingVersion).toBe('official-2026-08-01-r1');
+        expect(cost.pricingVersion).toBe('official-2026-09-05-codex-rules-r1');
         expect(cost.missingPriceTokens).toBe(0);
     });
 
@@ -178,6 +178,39 @@ describe('api potluck cost estimator', () => {
         });
         expect(gpt54Fast.usd).toBeCloseTo(gpt54.usd * 2, 8);
     });
+
+    test.each([
+        ['gpt-5.6-sol', 'gpt-5.6-sol-fast', 'gpt-5.6-sol-ultrafast', 2.5],
+        ['gpt-6-astra', 'gpt-6-astra-fast', 'gpt-6-astra-ultrafast', 2]
+    ])('prices ultrafast %s the same as its fast variant', (baseModel, fastModel, ultrafastModel, multiplier) => {
+        const usage = { promptTokens: 1000, cachedTokens: 100, completionTokens: 100, totalTokens: 1100 };
+        const base = estimateUsageCost(usage, baseModel);
+        const fast = estimateUsageCost(usage, fastModel);
+        const ultrafast = estimateUsageCost(usage, ultrafastModel);
+
+        expect(fast.priceMultiplier).toBe(multiplier);
+        expect(ultrafast.priceMultiplier).toBe(multiplier);
+        expect(ultrafast.usd).toBeCloseTo(fast.usd, 8);
+    });
+
+    test('does not apply a long-context surcharge and ignores cache writes', () => {
+        const baseUsage = { promptTokens: 275000, cachedTokens: 10000, completionTokens: 1000, totalTokens: 276000 };
+        const longUsage = {
+            ...baseUsage,
+            promptTokens: 500000,
+            totalTokens: 501000,
+            cache_creation_input_tokens: 250000,
+            cache_write_input_tokens: 250000
+        };
+
+        const base = estimateUsageCost(baseUsage, 'gpt-5.6-sol');
+        const long = estimateUsageCost(longUsage, 'gpt-5.6-sol');
+
+        expect(base.usd).toBeCloseTo(((265000 * 5) + (10000 * 0.5) + (1000 * 30)) / 1000000, 8);
+        expect(long.usd).toBeCloseTo(((490000 * 5) + (10000 * 0.5) + (1000 * 30)) / 1000000, 8);
+        expect(long.usd).not.toBeCloseTo(((490000 * 5) + (10000 * 0.5) + (1000 * 30)) / 1000000 * 2, 8);
+    });
+
 
     test('prices historical Codex fast model names without leaving missing tokens', () => {
         const usage = {
