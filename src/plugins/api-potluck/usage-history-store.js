@@ -61,6 +61,18 @@ function getDatabase() {
             event_model_writes INTEGER NOT NULL DEFAULT 0,
             full_history_day_writes INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS potluck_request_rate_buckets (
+            key_ref TEXT NOT NULL,
+            bucket_start INTEGER NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            token_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (key_ref, bucket_start)
+        );
+        CREATE INDEX IF NOT EXISTS potluck_request_rate_bucket_idx
+            ON potluck_request_rate_buckets (key_ref, bucket_start);
         INSERT OR IGNORE INTO potluck_usage_write_metrics (singleton) VALUES (1);
     `);
     return database;
@@ -205,6 +217,56 @@ export function persistUsageHistoryEvent(apiKey, change = {}, eventId) {
     if (usageEventBatchActive) statements.applyOne(ref, change, eventId);
     else statements.apply(ref, change, eventId);
     return { applied: true, duplicate: false };
+}
+
+export function recordRequestRateEvent(apiKey, { timestamp, successful = true, totalTokens = 0 } = {}, eventId = null) {
+    if (!apiKey) return { recorded: false, reason: 'missing-key' };
+    const db = getDatabase();
+    const ref = keyRef(apiKey);
+    const parsed = timestamp ? Date.parse(timestamp) : Date.now();
+    const bucketStart = Math.floor((Number.isFinite(parsed) ? parsed : Date.now()) / 1000);
+    if (eventId) {
+        const marker = `rate:${eventId}`;
+        const existing = db.prepare('SELECT 1 FROM potluck_applied_events WHERE event_id = ?').get(marker);
+        if (existing) return { recorded: false, duplicate: true };
+        db.prepare('INSERT INTO potluck_applied_events (event_id, key_ref) VALUES (?, ?)').run(marker, ref);
+    }
+    db.prepare(`
+        INSERT INTO potluck_request_rate_buckets
+            (key_ref, bucket_start, request_count, success_count, error_count, token_count, updated_at)
+        VALUES (?, ?, 1, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key_ref, bucket_start) DO UPDATE SET
+            request_count = request_count + 1,
+            success_count = success_count + excluded.success_count,
+            error_count = error_count + excluded.error_count,
+            token_count = token_count + excluded.token_count,
+            updated_at = CURRENT_TIMESTAMP
+    `).run(ref, bucketStart, successful ? 1 : 0, successful ? 0 : 1, Math.max(0, Number(totalTokens) || 0));
+    return { recorded: true, duplicate: false };
+}
+
+export function loadRequestRateSnapshot(apiKey, { windowSeconds = 10, now = Date.now() } = {}) {
+    if (!apiKey) return null;
+    const db = getDatabase();
+    const ref = keyRef(apiKey);
+    const window = Math.max(1, Math.min(300, Number(windowSeconds) || 10));
+    const end = Math.floor(now / 1000);
+    const start = end - window + 1;
+    const rows = db.prepare(`
+        SELECT bucket_start, request_count, token_count
+        FROM potluck_request_rate_buckets
+        WHERE key_ref = ? AND bucket_start BETWEEN ? AND ?
+        ORDER BY bucket_start
+    `).all(ref, start, end);
+    const counts = new Map(rows.map(row => [Number(row.bucket_start), Number(row.request_count) || 0]));
+    const currentCount = rows.reduce((sum, row) => sum + (Number(row.request_count) || 0), 0);
+    let peakPerSecond = 0;
+    for (let bucket = start; bucket <= end; bucket += 1) peakPerSecond = Math.max(peakPerSecond, counts.get(bucket) || 0);
+    const currentQps = Number((currentCount / window).toFixed(2));
+    const currentRpm = Number((currentCount * 60 / window).toFixed(2));
+    const peakQps = Math.max(currentQps, Number(peakPerSecond.toFixed(2)));
+    const peakRpm = Math.max(currentRpm, Number((peakPerSecond * 60).toFixed(2)));
+    return { currentQps, currentRpm, peakQps, peakRpm, windowSeconds: window, sampledAt: new Date(now).toISOString(), source: 'sqlite-rate-buckets' };
 }
 
 export function beginUsageHistoryEventBatch() {

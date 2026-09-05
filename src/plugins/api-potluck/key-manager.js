@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { RateManager } from '../../utils/rate-tracker.js';
+import { loadRequestRateSnapshot } from './usage-history-store.js';
 import { getBeijingDateString } from '../../utils/common.js';
 import { hashSecret, sanitizeProviderName } from '../request-audit/audit-event.js';
 import {
@@ -2074,15 +2075,17 @@ export async function listKeys(options = {}) {
     const keys = [];
     for (const [keyId, keyData] of Object.entries(keyStore.keys)) {
         const updated = enrichKeyUsage(checkAndResetDailyCount({ ...keyData }), options);
-        const rates = rateManager.getStats(`key:${keyId}`);
+        const rates = (typeof loadRequestRateSnapshot === 'function' ? loadRequestRateSnapshot(keyId) : null)
+            || rateManager.getStats(`key:${keyId}`);
         keys.push({
             ...updated,
-            qps: rates.qps,
-            tps: rates.tps,
-            rpm: rates.rpm,
-            maxQps: Math.max(updated.maxQps || 0, rates.maxQps),
-            maxTps: Math.max(updated.maxTps || 0, rates.maxTps),
-            maxRpm: Math.max(updated.maxRpm || 0, rates.maxRpm),
+            qps: rates.currentQps ?? rates.qps,
+            tps: rates.tps || 0,
+            rpm: rates.currentRpm ?? rates.rpm,
+            maxQps: Math.max(updated.maxQps || 0, rates.peakQps ?? rates.maxQps ?? 0),
+            maxTps: Math.max(updated.maxTps || 0, rates.maxTps || 0),
+            maxRpm: Math.max(updated.maxRpm || 0, rates.peakRpm ?? rates.maxRpm ?? 0),
+            rateSnapshot: rates,
             maskedKey: `${keyId.substring(0, 12)}...${keyId.substring(keyId.length - 4)}`
         });
     }
@@ -2097,15 +2100,17 @@ export async function getKey(keyId, options = {}) {
     const keyData = keyStore.keys[keyId];
     if (!keyData) return null;
     const updated = enrichKeyUsage(checkAndResetDailyCount({ ...keyData }), options);
-    const rates = rateManager.getStats(`key:${keyId}`);
+    const rates = (typeof loadRequestRateSnapshot === 'function' ? loadRequestRateSnapshot(keyId) : null)
+        || rateManager.getStats(`key:${keyId}`);
     return {
         ...updated,
-        qps: rates.qps,
-        tps: rates.tps,
-        rpm: rates.rpm,
-        maxQps: Math.max(updated.maxQps || 0, rates.maxQps),
-        maxTps: Math.max(updated.maxTps || 0, rates.maxTps),
-        maxRpm: Math.max(updated.maxRpm || 0, rates.maxRpm)
+        qps: rates.currentQps ?? rates.qps,
+        tps: rates.tps || 0,
+        rpm: rates.currentRpm ?? rates.rpm,
+        maxQps: Math.max(updated.maxQps || 0, rates.peakQps ?? rates.maxQps ?? 0),
+        maxTps: Math.max(updated.maxTps || 0, rates.maxTps || 0),
+        maxRpm: Math.max(updated.maxRpm || 0, rates.peakRpm ?? rates.maxRpm ?? 0),
+        rateSnapshot: rates
     };
 }
 

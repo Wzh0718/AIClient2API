@@ -3594,7 +3594,7 @@
                             <div class="value muted">${formatTokenCompact(key.totalTokens || 0)} Tokens · 缓存 ${formatPercentRatio(key.totalCacheHitRatio)}${key.cost ? ` · ${formatUsd(getDisplayCostUsd(key.cost))}` : ''}</div>
                         </div>
                         <div class="key-stat">
-                            <div class="label">请求频率</div>
+                            <div class="label">请求频率（最近 10 秒平均）</div>
                             <div class="value">${rangeRate.qps.toFixed(2)} QPS / ${rangeRate.rpm.toFixed(0)} RPM</div>
                             <div class="value muted">所选范围平均 · 峰值: ${(rangeSummary.summary?.maxQps || 0).toFixed(2)} QPS / ${(rangeSummary.summary?.maxRpm || 0).toFixed(0)} RPM</div>
                         </div>

@@ -37,7 +37,8 @@ import {
     beginUsageHistoryEventBatch,
     closeUsageHistoryStore,
     commitUsageHistoryEventBatch,
-    rollbackUsageHistoryEventBatch
+    rollbackUsageHistoryEventBatch,
+    recordRequestRateEvent
 } from './usage-history-store.js';
 
 import {
@@ -424,6 +425,18 @@ const apiPotluckPlugin = {
                 && Number(response.httpStatus || response.statusCode || 0) < 400
                 && response.clientAborted !== true
                 && response.errorClass == null;
+            try {
+                const apiKey = hookContext.potluckApiKey || resolveKeyIdByHash(hookContext.potluckKeyHash);
+                if (apiKey && hookContext._runtimeEventId) {
+                    recordRequestRateEvent(apiKey, {
+                        timestamp: hookContext.timestamp || new Date().toISOString(),
+                        successful,
+                        totalTokens: hookContext.usage?.totalTokens || hookContext.totalTokens || 0
+                    }, hookContext._runtimeEventId || requestId || null);
+                }
+            } catch (error) {
+                logger.warn(`[API Potluck] Failed to record request rate: ${error.message}`);
+            }
             try {
                 const coordination = await getPotluckCoordination();
                 if (reservationId && coordination?.[successful ? 'settlePotluckDailyQuota' : 'releasePotluckDailyQuota']) {
