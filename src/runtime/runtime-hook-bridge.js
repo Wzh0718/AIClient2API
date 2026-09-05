@@ -1,6 +1,7 @@
 import { extractUsage, mergeUsage, toWireUsage } from '../utils/usage-normalizer.js';
 import { createHash } from 'crypto';
 import { buildRequestFingerprint } from '../plugins/request-audit/fingerprint.js';
+import { compactAntigravitySourceAvailability } from '../utils/gemini-diagnostics.js';
 
 function hashSecret(value, length = 32) {
     if (!value) return null;
@@ -27,6 +28,22 @@ function containsImage(value, seen = new Set()) {
     return Object.values(value).some(item => Array.isArray(item)
         ? item.some(child => containsImage(child, seen))
         : containsImage(item, seen));
+}
+
+function compactModelRouting(routing) {
+    if (!routing || typeof routing !== 'object') return undefined;
+    const sourceAvailability = compactAntigravitySourceAvailability(routing.sourceAvailability);
+    return {
+        requestedModel: routing.requestedModel || null,
+        actualModel: routing.actualModel || null,
+        modelFallbackFrom: routing.modelFallbackFrom || null,
+        modelFallbackTo: routing.modelFallbackTo || null,
+        modelFallbackReason: routing.modelFallbackReason || null,
+        queueWaitMs: Math.max(0, Number(routing.queueWaitMs) || 0),
+        fallbackAttemptCount: Math.max(0, Number(routing.fallbackAttemptCount) || 0),
+        queueOutcome: routing.queueOutcome || null,
+        ...(sourceAvailability ? { sourceAvailability } : {})
+    };
 }
 
 function compactCodexRouting(routing) {
@@ -103,6 +120,7 @@ function compactMetadata(context = {}) {
         potluckQuotaReservationId: context.potluckQuotaReservationId || null,
         potluckQuotaMode: context.potluckQuotaMode || null,
         _codexRouting: compactCodexRouting(context._codexRouting),
+        _modelRouting: compactModelRouting(context._modelRouting),
         _temporaryKeyModelRouteResult: compactTemporaryModelRoute(context._temporaryKeyModelRouteResult),
         originalRequestBody: context.originalRequestBody?.model
             ? { model: context.originalRequestBody.model }

@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { normalizeUsageCandidate } from '../../utils/usage-normalizer.js';
+import { compactAntigravitySourceAvailability } from '../../utils/gemini-diagnostics.js';
 
 function toNumber(value) {
     const number = Number(value);
@@ -159,6 +160,7 @@ export function buildRequestAuditEvent(context = {}) {
     const derivedStatus = deriveStatus(context, response);
     const selectedProviderUuid = context._codexRouting?.selectedProviderUuid || null;
     const modelRouting = context._modelRouting || context._codexRouting || {};
+    const sourceAvailability = compactAntigravitySourceAvailability(modelRouting.sourceAvailability);
     const actualProviderUuid = context.providerUuid || null;
     const consistencyStatus = selectedProviderUuid && actualProviderUuid
         ? selectedProviderUuid === actualProviderUuid ? 'consistent' : 'mismatch'
@@ -227,7 +229,8 @@ export function buildRequestAuditEvent(context = {}) {
             ...(context._modelRouting ? {
                 queueWaitMs: toNumber(modelRouting.queueWaitMs),
                 fallbackAttemptCount: toNumber(modelRouting.fallbackAttemptCount),
-                queueOutcome: modelRouting.queueOutcome || null
+                queueOutcome: modelRouting.queueOutcome || null,
+                ...(sourceAvailability ? { sourceAvailability } : {})
             } : {}),
             spillover: context._codexRouting?.spillover === true,
             spilloverReason: context._codexRouting?.spilloverReason || null,

@@ -55,6 +55,35 @@ describe('Gemini diagnostics', () => {
         expect(event).not.toHaveProperty('selectedProviderUuid');
     });
 
+    test('includes a sanitized source-model availability snapshot on selection events', () => {
+        const event = buildGeminiSelectionDiagnostic({
+            requestedModel: 'gemini-3.1-flash-lite',
+            selectionDiagnostics: {
+                sourceAvailability: {
+                    model: 'gemini-3.1-flash-lite',
+                    schedulableCount: 6,
+                    coolingCount: 4,
+                    eligibleCount: 2,
+                    planFreeSkipped: 2,
+                    exhausted: false,
+                    fallbackReason: 'PREFER_ORIGINAL_WAIT_EXPIRED',
+                    secret: 'must-not-log'
+                }
+            }
+        });
+
+        expect(event.sourceAvailability).toEqual({
+            model: 'gemini-3.1-flash-lite',
+            schedulableCount: 6,
+            coolingCount: 4,
+            eligibleCount: 2,
+            planFreeSkipped: 2,
+            exhausted: false,
+            fallbackReason: 'PREFER_ORIGINAL_WAIT_EXPIRED'
+        });
+        expect(event.sourceAvailability).not.toHaveProperty('secret');
+    });
+
     test('classifies initialization failures without exposing upstream details', () => {
         expect(classifyProviderInitializationError({ response: { status: 429 } })).toBe('quota_exhausted');
         expect(classifyProviderInitializationError({ response: { status: 401 } })).toBe('auth_error');

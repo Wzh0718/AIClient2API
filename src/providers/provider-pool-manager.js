@@ -3868,6 +3868,15 @@ export class ProviderPoolManager {
             };
             if (snapshot.nearestRecoveryTime) selectionDiagnostics.nextModelRecoveryTime = snapshot.nearestRecoveryTime;
         }
+        if (options.captureSourceAvailability === true) {
+            this._pinAntigravitySourceAvailability({
+                snapshot,
+                model: canonicalModel,
+                planFreeSkipped: options.sourcePlanFreeSkipped
+                    ?? selectionDiagnostics?.filterReasons?.plan_free
+                    ?? options.selectionDiagnostics?.filterReasons?.plan_free
+            });
+        }
         if (snapshot.exhausted === true) {
             this._antigravityAvailabilityMetrics.allModelsUnavailable += 1;
             this._antigravityRoutingMetrics.skippedByNegativeCache += 1;
@@ -4090,6 +4099,48 @@ export class ProviderPoolManager {
         return Number.isFinite(value) ? value : null;
     }
 
+    _pinAntigravitySourceAvailability({ snapshot = null, model = null, planFreeSkipped = 0, fallbackReason = null } = {}) {
+        const store = requestContext.getStore();
+        if (!store || typeof store !== 'object') return null;
+        if (!store.antigravityRouting || typeof store.antigravityRouting !== 'object') {
+            store.antigravityRouting = {};
+        }
+        const routing = store.antigravityRouting;
+        if (routing.sourceAvailability?.model) {
+            if (fallbackReason && !routing.sourceAvailability.fallbackReason) {
+                routing.sourceAvailability.fallbackReason = fallbackReason;
+            }
+            return routing.sourceAvailability;
+        }
+        const pinnedModel = String(model || snapshot?.model || '').trim();
+        if (!pinnedModel) return null;
+        routing.sourceAvailability = {
+            model: pinnedModel,
+            schedulableCount: Math.max(0, Number(snapshot?.providersScanned ?? snapshot?.schedulableCount) || 0),
+            coolingCount: Math.max(0, Number(snapshot?.unavailableCredentialCount ?? snapshot?.coolingCount ?? snapshot?.coolingCredentialHashes?.length) || 0),
+            eligibleCount: Math.max(0, Number(snapshot?.eligibleCount ?? snapshot?.eligibleCredentialHashes?.length) || 0),
+            planFreeSkipped: Math.max(0, Number(planFreeSkipped) || 0),
+            exhausted: snapshot?.exhausted === true,
+            fallbackReason: fallbackReason || null
+        };
+        return routing.sourceAvailability;
+    }
+
+    _setAntigravitySourceFallbackReason(reason) {
+        const snapshot = requestContext.getStore()?.antigravityRouting?.sourceAvailability;
+        if (!snapshot || snapshot.fallbackReason || !reason) return snapshot || null;
+        snapshot.fallbackReason = reason;
+        return snapshot;
+    }
+
+    _resolveAntigravitySourceFallbackReason({ originalWaitMs = 0, error = null } = {}) {
+        const snapshot = requestContext.getStore()?.antigravityRouting?.sourceAvailability;
+        if (snapshot?.exhausted === true) return 'ALL_CREDENTIALS_COOLING';
+        if (Number(originalWaitMs) > 0 && snapshot && snapshot.exhausted !== true) return 'PREFER_ORIGINAL_WAIT_EXPIRED';
+        if (error?.code === 'MODEL_NOT_FOUND' || Number(error?.status) === 404) return 'MODEL_NOT_FOUND';
+        return 'SOURCE_MODEL_UNAVAILABLE';
+    }
+
     async _tryAntigravityElasticModel(providerType, model, options) {
         accumulateRoutingWait('elasticAttemptCount', 1);
         try {
@@ -4147,6 +4198,15 @@ export class ProviderPoolManager {
         return Number.isFinite(recovery) && recovery > now;
     }
 
+    _shouldFallForwardFromAntigravitySource(error, sourceModelUsable) {
+        if (!sourceModelUsable) return true;
+        if (error?.code === 'MODEL_NOT_FOUND' || Number(error?.status) === 404) return true;
+        const status = Number(error?.status);
+        const code = error?.code;
+        const isUnavailable = status === 429 || code === 429 || code === 'ALL_MODELS_UNAVAILABLE';
+        return isUnavailable && error?.quotaScope === 'model';
+    }
+
     _shouldWaitOnlyForModelRecovery(errors) {
         return Array.isArray(errors)
             && errors.length > 0
@@ -4182,18 +4242,48 @@ export class ProviderPoolManager {
             providerType,
             [requestedModel, ...getAntigravityElasticFallbackModels(requestedModel, configuredFallbacks, availableModels)]
         );
-        if (models.length === 0) throw this._createAntigravityModelNotFoundError(requestedModel);
+        if (models.length === 0) {
+            this._pinAntigravitySourceAvailability({
+                model: requestedModel,
+                snapshot: { exhausted: false, providersScanned: 0, unavailableCredentialCount: 0, eligibleCredentialHashes: [] },
+                fallbackReason: 'MODEL_NOT_FOUND'
+            });
+            throw this._createAntigravityModelNotFoundError(requestedModel);
+        }
         // The requested model itself may be the one upstream does not host, in
         // which case every surviving entry is a fallback and must be attempted.
         const sourceModelUsable = models[0] === requestedModel;
+        if (!sourceModelUsable) {
+            this._pinAntigravitySourceAvailability({
+                model: requestedModel,
+                snapshot: { exhausted: false, providersScanned: 0, unavailableCredentialCount: 0, eligibleCredentialHashes: [] },
+                fallbackReason: 'MODEL_NOT_FOUND'
+            });
+        }
         const startedAt = Date.now();
         const deadline = startedAt + policy.maxQueueWaitMs;
         let queueEntry = null;
         let queueStartedAt = null;
         let latestErrors = [];
+        let originalWaitMs = 0;
+        let sourceAttempt = { config: null, error: null };
         let passOptions = {
             ...options,
+            captureSourceAvailability: false,
             antigravityBaseCandidates: this._getAntigravityBaseCandidates(providerType, options)
+        };
+
+        const finishElasticResult = (result, { isSourceFallback = false } = {}) => {
+            if (!result) return result;
+            if (isSourceFallback) {
+                this._setAntigravitySourceFallbackReason(
+                    this._resolveAntigravitySourceFallbackReason({ originalWaitMs, error: sourceAttempt.error })
+                );
+            }
+            if (requestRouting.sourceAvailability) {
+                result.sourceAvailability = requestRouting.sourceAvailability;
+            }
+            return result;
         };
 
         const markStructuralSkip = (model, error) => {
@@ -4253,21 +4343,24 @@ export class ProviderPoolManager {
         };
 
         try {
-            let sourceAttempt = { config: null, error: null };
             if (sourceModelUsable) {
                 if (!requestRouting.attemptedModels.includes(requestedModel)) requestRouting.attemptedModels.push(requestedModel);
                 if (!requestRouting.passAttemptedModels.includes(requestedModel)) requestRouting.passAttemptedModels.push(requestedModel);
-                sourceAttempt = await this._tryAntigravityElasticModel(providerType, requestedModel, passOptions);
+                sourceAttempt = await this._tryAntigravityElasticModel(providerType, requestedModel, {
+                    ...passOptions,
+                    captureSourceAvailability: true,
+                    sourcePlanFreeSkipped: Number(options.selectionDiagnostics?.filterReasons?.plan_free || 0)
+                });
                 this._antigravityRoutingMetrics.sourceAttempts += 1;
                 if (sourceAttempt.config) {
-                    return {
+                    return finishElasticResult({
                         config: sourceAttempt.config,
                         actualProviderType: providerType,
                         actualModel: requestedModel,
                         isFallback: false,
                         fallbackAttemptCount: 0,
                         queueWaitMs: 0
-                    };
+                    });
                 }
                 markStructuralSkip(requestedModel, sourceAttempt.error);
                 if (sourceAttempt.error) requestRouting.modelErrors[requestedModel] = sourceAttempt.error;
@@ -4277,12 +4370,18 @@ export class ProviderPoolManager {
             const sourceWaitMs = sourceRecovery ? sourceRecovery - Date.now() : Infinity;
             requestRouting.sourceModelCooldownMs = sourceWaitMs === Infinity ? null : Math.max(0, sourceWaitMs);
             requestRouting.negativeCacheVersion = this._antigravityAvailabilityRevision;
-            if (sourceWaitMs > 0 && sourceWaitMs <= policy.preferOriginalWaitMs) {
+            const sourceFullyUnavailable = this._shouldFallForwardFromAntigravitySource(sourceAttempt.error, sourceModelUsable);
+            originalWaitMs = !sourceModelUsable
+                ? 0
+                : sourceFullyUnavailable
+                    ? (sourceWaitMs > 0 && sourceWaitMs <= policy.preferOriginalWaitMs ? sourceWaitMs : 0)
+                    : Math.min(policy.preferOriginalWaitMs, Math.max(0, deadline - Date.now()));
+            if (originalWaitMs > 0) {
                 queueEntry = await this._acquireGeminiElasticQueueEntry(requestedModel, options, policy);
                 queueStartedAt = Date.now();
                 this._antigravityRoutingMetrics.queueEnqueued += 1;
                 await this._waitForGeminiElasticWakeTracked({
-                    timeoutMs: Math.min(sourceWaitMs, Math.max(1, deadline - Date.now())),
+                    timeoutMs: Math.min(originalWaitMs, Math.max(1, deadline - Date.now())),
                     abortSignal: options.abortSignal,
                     providerType
                 });
@@ -4298,11 +4397,12 @@ export class ProviderPoolManager {
                 }
                 passOptions = {
                     ...options,
+                    captureSourceAvailability: false,
                     antigravityBaseCandidates: this._getAntigravityBaseCandidates(providerType, options)
                 };
                 const recovered = await this._tryAntigravityElasticModel(providerType, requestedModel, passOptions);
                 if (recovered.config) {
-                    return {
+                    return finishElasticResult({
                         config: recovered.config,
                         actualProviderType: providerType,
                         actualModel: requestedModel,
@@ -4310,13 +4410,13 @@ export class ProviderPoolManager {
                         queueOutcome: 'recovered_original',
                         fallbackAttemptCount: 0,
                         queueWaitMs: Date.now() - startedAt
-                    };
+                    });
                 }
                 if (recovered.error) requestRouting.modelErrors[requestedModel] = recovered.error;
             }
 
             const immediateFallback = await attemptModels({ includeSource: false });
-            if (immediateFallback) return immediateFallback;
+            if (immediateFallback) return finishElasticResult(immediateFallback, { isSourceFallback: true });
             const allModelErrors = sourceModelUsable
                 ? [sourceAttempt.error, ...latestErrors]
                 : [...latestErrors];
@@ -4349,12 +4449,13 @@ export class ProviderPoolManager {
                 });
                 passOptions = {
                     ...options,
+                    captureSourceAvailability: false,
                     antigravityBaseCandidates: this._getAntigravityBaseCandidates(providerType, options)
                 };
                 const selected = await attemptModels({ includeSource: true, resetPass: true });
                 if (selected) {
                     selected.queueOutcome = selected.isFallback ? 'fallback_after_wait' : 'recovered_original';
-                    return selected;
+                    return finishElasticResult(selected, { isSourceFallback: selected.isFallback === true });
                 }
                 if (this._shouldFastFailAntigravityModels(latestErrors, models)) {
                     throw this._createAntigravityAllModelsUnavailableError(requestedModel, latestErrors);

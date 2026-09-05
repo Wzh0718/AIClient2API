@@ -177,8 +177,8 @@ describe('Antigravity elastic queue and model fallback', () => {
 
     test('waits for a short source-model cooldown and keeps the requested model', async () => {
         const manager = createManager([
-            provider('gemini-a', { [sourceModel]: coolingUntil(60) })
-        ], { maxQueueWaitMs: 150, preferOriginalWaitMs: 100 });
+            provider('gemini-a', { [sourceModel]: coolingUntil(120) })
+        ], { maxQueueWaitMs: 250, preferOriginalWaitMs: 200 });
 
         const startedAt = Date.now();
         const result = await manager.acquireSlotWithFallback(providerType, sourceModel, {
@@ -210,6 +210,29 @@ describe('Antigravity elastic queue and model fallback', () => {
         });
     });
 
+    test('waits preferOriginalWaitMs for a busy source credential then falls forward', async () => {
+        const busy = provider('gemini-b');
+        busy.concurrencyLimit = 1;
+        busy.queueLimit = 0;
+        const manager = createManager([
+            provider('gemini-a', { [sourceModel]: coolingUntil(60_000) }),
+            busy
+        ], { maxQueueWaitMs: 200, preferOriginalWaitMs: 40 });
+        manager.providerStatus[providerType].find(item => item.config.uuid === 'gemini-b').state.activeCount = 1;
+
+        const startedAt = Date.now();
+        const result = await manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: 'key-a'
+        });
+
+        expect(Date.now() - startedAt).toBeGreaterThanOrEqual(25);
+        expect(result).toMatchObject({
+            actualModel: firstFallback,
+            isFallback: true,
+            modelFallbackReason: 'SOURCE_MODEL_UNAVAILABLE'
+        });
+    });
+
     test('records attempted models and source cooldown in the request context', async () => {
         const manager = createManager([
             provider('gemini-a', { [sourceModel]: coolingUntil(500) })
@@ -224,7 +247,65 @@ describe('Antigravity elastic queue and model fallback', () => {
         expect(store.antigravityRouting).toMatchObject({
             attemptedModels: [sourceModel, firstFallback],
             negativeCacheVersion: expect.any(Number),
-            sourceModelCooldownMs: expect.any(Number)
+            sourceModelCooldownMs: expect.any(Number),
+            sourceAvailability: {
+                model: sourceModel,
+                schedulableCount: 1,
+                coolingCount: 1,
+                eligibleCount: 0,
+                exhausted: true,
+                fallbackReason: 'ALL_CREDENTIALS_COOLING'
+            }
+        });
+    });
+
+    test('does not overwrite the source availability snapshot after falling forward', async () => {
+        const manager = createManager([
+            provider('gemini-a', {
+                [sourceModel]: coolingUntil(500),
+                [firstFallback]: coolingUntil(500)
+            })
+        ]);
+        const store = { requestId: 'source-availability-stable' };
+
+        const result = await requestContext.run(store, () => manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: 'key-a'
+        }));
+
+        expect(result.actualModel).toBe(secondFallback);
+        expect(store.antigravityRouting.sourceAvailability).toMatchObject({
+            model: sourceModel,
+            schedulableCount: 1,
+            coolingCount: 1,
+            eligibleCount: 0,
+            exhausted: true,
+            fallbackReason: 'ALL_CREDENTIALS_COOLING'
+        });
+    });
+
+    test('records remaining source credentials as not exhausted when they are only busy', async () => {
+        const busy = provider('gemini-b');
+        busy.concurrencyLimit = 1;
+        busy.queueLimit = 0;
+        const manager = createManager([
+            provider('gemini-a', { [sourceModel]: coolingUntil(60_000) }),
+            busy
+        ], { maxQueueWaitMs: 200, preferOriginalWaitMs: 40 });
+        manager.providerStatus[providerType].find(item => item.config.uuid === 'gemini-b').state.activeCount = 1;
+        const store = { requestId: 'busy-source-availability' };
+
+        const result = await requestContext.run(store, () => manager.acquireSlotWithFallback(providerType, sourceModel, {
+            queueKey: 'key-a'
+        }));
+
+        expect(result.actualModel).toBe(firstFallback);
+        expect(store.antigravityRouting.sourceAvailability).toMatchObject({
+            model: sourceModel,
+            schedulableCount: 2,
+            coolingCount: 1,
+            eligibleCount: 1,
+            exhausted: false,
+            fallbackReason: 'PREFER_ORIGINAL_WAIT_EXPIRED'
         });
     });
 

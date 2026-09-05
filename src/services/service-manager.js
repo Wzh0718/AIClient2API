@@ -69,6 +69,10 @@ function isGeminiProviderType(providerType) {
 function logGeminiSelectionDiagnostic(providerType, requestedModel, selectionDiagnostics, selectedProvider, startedAt, config = null) {
     if (!isGeminiProviderType(providerType)) return;
     try {
+        if (selectionDiagnostics && typeof selectionDiagnostics === 'object' && !selectionDiagnostics.sourceAvailability) {
+            selectionDiagnostics.sourceAvailability =
+                requestContext.getStore()?.antigravityRouting?.sourceAvailability || null;
+        }
         const event = buildGeminiSelectionDiagnostic({
             workerId: process.env.RUNTIME_WORKER_ID || 'standalone',
             providerType,
@@ -1936,6 +1940,10 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
             actualModel = fallbackModel || actualModelName;
             selectedModelFallbackReason = fallbackReason || null;
             logGeminiSelectionDiagnostic(config.MODEL_PROVIDER, actualModelName, selectionDiagnostics, selectedProviderConfig, providerFilterStartedAt, config);
+            const sourceAvailability = selectionDiagnostics.sourceAvailability
+                || selectedResult.sourceAvailability
+                || requestContext.getStore()?.antigravityRouting?.sourceAvailability
+                || null;
             config._modelRouting = {
                 requestedModel: actualModelName,
                 actualModel,
@@ -1944,7 +1952,8 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
                 modelFallbackReason: fallbackReason || null,
                 queueWaitMs: Number(queueWaitMs || 0),
                 fallbackAttemptCount: Number(fallbackAttemptCount || 0),
-                queueOutcome: queueOutcome || null
+                queueOutcome: queueOutcome || null,
+                ...(sourceAvailability ? { sourceAvailability } : {})
             };
 
             // mixed pool/fallback 鍙兘璺?providerType 鍛戒腑鐪熷疄鑺傜偣锛岄渶瑕佸垏鍒扮湡瀹?adapter銆?

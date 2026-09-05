@@ -23,6 +23,31 @@ function sanitizeFilterReasons(reasons = {}) {
         .map(([key, value]) => [key, Math.max(0, Number(value))]));
 }
 
+const SOURCE_AVAILABILITY_REASONS = new Set([
+    'ALL_CREDENTIALS_COOLING',
+    'PREFER_ORIGINAL_WAIT_EXPIRED',
+    'SOURCE_MODEL_UNAVAILABLE',
+    'MODEL_NOT_FOUND'
+]);
+
+export function compactAntigravitySourceAvailability(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') return null;
+    const fallbackReason = SOURCE_AVAILABILITY_REASONS.has(snapshot.fallbackReason)
+        ? snapshot.fallbackReason
+        : null;
+    const model = String(snapshot.model || '').trim();
+    if (!model) return null;
+    return {
+        model,
+        schedulableCount: Math.max(0, Number(snapshot.schedulableCount) || 0),
+        coolingCount: Math.max(0, Number(snapshot.coolingCount) || 0),
+        eligibleCount: Math.max(0, Number(snapshot.eligibleCount) || 0),
+        planFreeSkipped: Math.max(0, Number(snapshot.planFreeSkipped) || 0),
+        exhausted: snapshot.exhausted === true,
+        fallbackReason
+    };
+}
+
 export function buildGeminiSelectionDiagnostic({
     workerId = 'standalone',
     providerType = 'gemini-antigravity',
@@ -34,6 +59,7 @@ export function buildGeminiSelectionDiagnostic({
     const providerConfig = selectedProvider?.config || selectedProvider || {};
     const uuid = providerConfig.uuid || selectedProvider?.uuid || null;
     const proxyPool = providerConfig.proxyPool || providerConfig.proxyPoolName || providerConfig.proxy_pool || null;
+    const sourceAvailability = compactAntigravitySourceAvailability(selectionDiagnostics.sourceAvailability);
     return {
         event: 'provider_selection',
         workerId,
@@ -51,6 +77,7 @@ export function buildGeminiSelectionDiagnostic({
         selectionDurationMs: Math.max(0, Number(durationMs) || 0),
         filterReasons: sanitizeFilterReasons(selectionDiagnostics.filterReasons),
         fallbackCount: Number(selectionDiagnostics.fallbackCount || 0),
+        ...(sourceAvailability ? { sourceAvailability } : {}),
         attempts: Array.isArray(selectionDiagnostics.attempts)
             ? selectionDiagnostics.attempts.map(attempt => ({
                 eligibleCandidateCount: Number(attempt?.eligibleCandidateCount || 0),

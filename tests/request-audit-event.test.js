@@ -243,7 +243,17 @@ describe('request audit event', () => {
         modelFallbackReason: 'SOURCE_MODEL_UNAVAILABLE',
         queueWaitMs: 1234,
         fallbackAttemptCount: 2,
-        queueOutcome: 'fallback_after_wait'
+        queueOutcome: 'fallback_after_wait',
+        sourceAvailability: {
+          model: 'gemini-2.5-flash-lite',
+          schedulableCount: 6,
+          coolingCount: 6,
+          eligibleCount: 0,
+          planFreeSkipped: 2,
+          exhausted: true,
+          fallbackReason: 'ALL_CREDENTIALS_COOLING',
+          secret: 'must-not-log'
+        }
       }
     });
 
@@ -253,8 +263,18 @@ describe('request audit event', () => {
       modelFallbackReason: 'SOURCE_MODEL_UNAVAILABLE',
       queueWaitMs: 1234,
       fallbackAttemptCount: 2,
-      queueOutcome: 'fallback_after_wait'
+      queueOutcome: 'fallback_after_wait',
+      sourceAvailability: {
+        model: 'gemini-2.5-flash-lite',
+        schedulableCount: 6,
+        coolingCount: 6,
+        eligibleCount: 0,
+        planFreeSkipped: 2,
+        exhausted: true,
+        fallbackReason: 'ALL_CREDENTIALS_COOLING'
+      }
     });
+    expect(event.routing.sourceAvailability).not.toHaveProperty('secret');
   });
 
   test('records real account email when routing context provides it', () => {
