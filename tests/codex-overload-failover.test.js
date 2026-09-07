@@ -75,7 +75,7 @@ describe('Codex overload cross-request failover', () => {
         }, 'openaiResponses');
 
         expect(payload).toContain('event: response.failed');
-        expect(payload).toContain('server_is_overloaded');
+        expect(payload).not.toContain('server_is_overloaded');
         expect(payload).toContain('[上游 Codex] 服务当前繁忙，已自动重试可用凭证后仍不可用，请稍后重试');
         const failedEvent = JSON.parse(payload.split('\n').find(line => line.startsWith('data: ')).slice(6));
         expect(failedEvent.response).toEqual(expect.objectContaining({
@@ -86,8 +86,25 @@ describe('Codex overload cross-request failover', () => {
             object: 'response',
             status: 'failed',
             output: [],
-            tools: []
+            tools: [],
+            error: expect.objectContaining({
+                code: 'server_error'
+            })
         }));
+    });
+
+    test('rewrites upstream slow_down capacity-shed codes to server_error', () => {
+        const payload = createStreamErrorResponse({
+            isCodexOverload: true,
+            response: {
+                status: 503,
+                data: { error: { code: 'slow_down', message: 'Please slow down.' } }
+            }
+        }, 'openaiResponses');
+
+        const failedEvent = JSON.parse(payload.split('\n').find(line => line.startsWith('data: ')).slice(6));
+        expect(failedEvent.response.error.code).toBe('server_error');
+        expect(payload).not.toContain('slow_down');
     });
 
     test('formats upstream model capacity as a Responses response.failed event', () => {
@@ -101,8 +118,10 @@ describe('Codex overload cross-request failover', () => {
         }, 'openaiResponses');
 
         expect(payload).toContain('event: response.failed');
-        expect(payload).toContain('server_is_overloaded');
+        expect(payload).not.toContain('server_is_overloaded');
         expect(payload).toContain('[上游 Codex] 所选模型当前容量不足，已自动重试可用凭证后仍不可用，请稍后重试');
+        const failedEvent = JSON.parse(payload.split('\n').find(line => line.startsWith('data: ')).slice(6));
+        expect(failedEvent.response.error.code).toBe('server_error');
     });
 
     test('formats upstream invalid_prompt as a Responses response.failed event', () => {

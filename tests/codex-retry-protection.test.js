@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, jest, test } from '@jest/globals';
-import { getCodexRetryDelayMs, hasCodexRetryBudget, shouldRetryCodex429 } from '../src/providers/openai/codex-retry-policy.js';
+import {
+    getCodexOverloadRetryDelayMs,
+    getCodexOverloadRetryMaxAttempts,
+    getCodexRetryDelayMs,
+    hasCodexRetryBudget,
+    shouldRetryCodex429
+} from '../src/providers/openai/codex-retry-policy.js';
 import { getCachedModelList, clearModelListCache } from '../src/services/model-list-cache.js';
 
 afterEach(() => jest.restoreAllMocks());
@@ -25,6 +31,16 @@ describe('Codex retry protection', () => {
     test('stops the retry chain when the unified total duration budget is exhausted', () => {
         expect(hasCodexRetryBudget({ startedAt: 1000, now: 31001, maxDurationMs: 30000 })).toBe(false);
         expect(hasCodexRetryBudget({ startedAt: 1000, now: 29999, maxDurationMs: 30000 })).toBe(true);
+    });
+
+    test('caps same-credential overload waits at 5 seconds even when delay is configured higher', () => {
+        expect(getCodexOverloadRetryDelayMs({ CODEX_OVERLOAD_RETRY_DELAY_MS: 99999 })).toBe(5000);
+        expect(getCodexOverloadRetryDelayMs({
+            CODEX_OVERLOAD_RETRY_DELAY_MS: 99999,
+            CODEX_OVERLOAD_RETRY_MAX_DELAY_MS: 60000
+        })).toBe(5000);
+        expect(getCodexOverloadRetryDelayMs({ CODEX_OVERLOAD_RETRY_DELAY_MS: 800 })).toBe(800);
+        expect(getCodexOverloadRetryMaxAttempts({})).toBe(3);
     });
 
     test('coalesces concurrent model list fetches and reuses the short-lived result', async () => {

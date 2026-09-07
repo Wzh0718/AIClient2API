@@ -28,7 +28,7 @@ import { recordCodexFingerprintAudit } from './codex-fingerprint-audit.js';
 import { codexPromptCacheObservability } from './codex-prompt-cache-observability.js';
 import requestContext from '../../utils/context.js';
 import { performance } from 'node:perf_hooks';
-import { getCodexRetryDelayMs, shouldRetryCodex429 } from './codex-retry-policy.js';
+import { getCodexOverloadRetryDelayMs, getCodexOverloadRetryMaxAttempts, getCodexRetryDelayMs, shouldRetryCodex429 } from './codex-retry-policy.js';
 import { getCodexModelIds, sanitizeCodexModelParameters, normalizeCodexReasoningEffort } from './codex-model-capabilities.js';
 
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
@@ -500,10 +500,11 @@ export class CodexApiService {
                 if (error.isCodexOverload && !error.responseModel) {
                     error.responseModel = selectedModel;
                 }
-                if (error.isCodexOverload && overloadRetryCount < 1) {
+                const overloadRetryMaxAttempts = getCodexOverloadRetryMaxAttempts(this.config);
+                if (error.isCodexOverload && overloadRetryCount < overloadRetryMaxAttempts) {
                     overloadRetryCount += 1;
-                    const delayMs = Number(this.config.CODEX_OVERLOAD_RETRY_DELAY_MS ?? 800);
-                    logger.warn(`[Codex] Upstream overloaded; retrying same credential once after ${delayMs}ms`);
+                    const delayMs = getCodexOverloadRetryDelayMs(this.config);
+                    logger.warn(`[Codex] Upstream overloaded; retrying same credential ${overloadRetryCount}/${overloadRetryMaxAttempts} after ${delayMs}ms`);
                     if (delayMs > 0) {
                         await new Promise(resolve => setTimeout(resolve, delayMs));
                     }
@@ -662,10 +663,11 @@ export class CodexApiService {
                 if (error.isCodexOverload && !error.responseModel) {
                     error.responseModel = selectedModel;
                 }
-                if (error.isCodexOverload && !hasVisibleOutput && overloadRetryCount < 1) {
+                const overloadRetryMaxAttempts = getCodexOverloadRetryMaxAttempts(this.config);
+                if (error.isCodexOverload && !hasVisibleOutput && overloadRetryCount < overloadRetryMaxAttempts) {
                     overloadRetryCount += 1;
-                    const delayMs = Number(this.config.CODEX_OVERLOAD_RETRY_DELAY_MS ?? 800);
-                    logger.warn(`[Codex] Upstream overloaded; retrying same credential once after ${delayMs}ms`);
+                    const delayMs = getCodexOverloadRetryDelayMs(this.config);
+                    logger.warn(`[Codex] Upstream overloaded; retrying same credential ${overloadRetryCount}/${overloadRetryMaxAttempts} after ${delayMs}ms`);
                     if (delayMs > 0) {
                         await new Promise(resolve => setTimeout(resolve, delayMs));
                     }

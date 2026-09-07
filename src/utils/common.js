@@ -76,18 +76,55 @@ function logGeminiCleanupDiagnostic({ mode, model, providerType, providerUuid, c
 // amplifier behind the CPU saturation and the 404 storm.
 const DEFAULT_MAX_UPSTREAM_ATTEMPTS_PER_REQUEST = 3;
 const DEFAULT_ANTIGRAVITY_CAPACITY_MAX_UPSTREAM_ATTEMPTS = 6;
+const DEFAULT_HIGH_RETRY_MAX_UPSTREAM_ATTEMPTS = 20;
+const DEFAULT_CREDENTIAL_SWITCH_MAX_RETRIES = 5;
 
-function getMaxUpstreamAttempts(config, error = null) {
+function normalizeRetryBudgetModel(model) {
+    const normalized = String(model || '').trim().toLowerCase();
+    if (!normalized) return '';
+    const separator = normalized.lastIndexOf(':');
+    return separator >= 0 ? normalized.slice(separator + 1) : normalized;
+}
+
+function isCodexHighRetryModel(model) {
+    const normalized = normalizeRetryBudgetModel(model);
+    return matchesModelFamily(normalized, 'gpt-5.6-sol') || matchesModelFamily(normalized, 'gpt-6-astra');
+}
+
+function resolveRetryBudgetModel(retryContext, model) {
+    return retryContext?.clientRequestedModel || model;
+}
+
+export function getMaxUpstreamAttempts(config, error = null, model = null) {
     if (error?.isAntigravityModelCapacity === true) {
         const configured = Number(config?.ANTIGRAVITY_CAPACITY_MAX_UPSTREAM_ATTEMPTS);
         return Number.isInteger(configured) && configured >= 1
             ? configured
             : DEFAULT_ANTIGRAVITY_CAPACITY_MAX_UPSTREAM_ATTEMPTS;
     }
+    if (isCodexHighRetryModel(model)) {
+        const configured = Number(config?.CODEX_HIGH_RETRY_MAX_UPSTREAM_ATTEMPTS);
+        return Number.isInteger(configured) && configured >= 1
+            ? configured
+            : DEFAULT_HIGH_RETRY_MAX_UPSTREAM_ATTEMPTS;
+    }
     const configured = Number(config?.MAX_UPSTREAM_ATTEMPTS_PER_REQUEST);
     return Number.isInteger(configured) && configured >= 1
         ? configured
         : DEFAULT_MAX_UPSTREAM_ATTEMPTS_PER_REQUEST;
+}
+
+export function getCredentialSwitchMaxRetries(config, model = null) {
+    if (isCodexHighRetryModel(model)) {
+        const configured = Number(config?.CODEX_HIGH_RETRY_CREDENTIAL_SWITCH_MAX_RETRIES);
+        return Number.isInteger(configured) && configured >= 0
+            ? configured
+            : DEFAULT_HIGH_RETRY_MAX_UPSTREAM_ATTEMPTS;
+    }
+    const configured = Number(config?.CREDENTIAL_SWITCH_MAX_RETRIES);
+    return Number.isInteger(configured) && configured >= 0
+        ? configured
+        : DEFAULT_CREDENTIAL_SWITCH_MAX_RETRIES;
 }
 
 function recordUpstreamAttempt() {
@@ -96,9 +133,9 @@ function recordUpstreamAttempt() {
     return store.upstreamAttempts;
 }
 
-function hasUpstreamAttemptBudget(config, error = null) {
+function hasUpstreamAttemptBudget(config, error = null, model = null) {
     const store = requestContext.getStore();
-    return (Number(store.upstreamAttempts) || 0) < getMaxUpstreamAttempts(config, error);
+    return (Number(store.upstreamAttempts) || 0) < getMaxUpstreamAttempts(config, error, model);
 }
 
 function updateGeminiRequestMetadata({ retryCount, fallbackCount, providerUuid } = {}) {
@@ -2108,10 +2145,11 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         
         // 凭证已被标记为不健康后，尝试切换到新凭证重试
         // 不再依赖状态码判断，只要凭证被标记不健康且可以重试，就尝试切换
-        const upstreamBudgetAvailable = hasUpstreamAttemptBudget(CONFIG, error);
+        const retryBudgetModel = resolveRetryBudgetModel(retryContext, model);
+        const upstreamBudgetAvailable = hasUpstreamAttemptBudget(CONFIG, error, retryBudgetModel);
         if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && !upstreamBudgetAvailable) {
             providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
-            logger.warn(`[Retry] Upstream attempt cap (${getMaxUpstreamAttempts(CONFIG, error)}) reached for ${toProvider}/${model}; not switching credential again.`);
+            logger.warn(`[Retry] Upstream attempt cap (${getMaxUpstreamAttempts(CONFIG, error, retryBudgetModel)}) reached for ${toProvider}/${model}; not switching credential again.`);
         }
         if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && upstreamBudgetAvailable && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
             const isCodexTransient = isCodexTransientCredentialError(error);
@@ -2254,7 +2292,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
 
         if (!anyDataSent && !isTerminalAntigravityUnavailable) {
             try {
-                const fallback = hasUpstreamAttemptBudget(CONFIG, error) ? await tryTemporaryRouteFallback(retryContext) : null;
+                const fallback = hasUpstreamAttemptBudget(CONFIG, error, resolveRetryBudgetModel(retryContext, model)) ? await tryTemporaryRouteFallback(retryContext) : null;
                 if (fallback?.service) {
                     providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
                     updateGeminiRequestMetadata({ fallbackCount: (retryContext?.geminiFallbackCount || 0) + 1 });
@@ -2525,10 +2563,11 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         
         // 凭证已被标记为不健康后，尝试切换到新凭证重试
         // 不再依赖状态码判断，只要凭证被标记不健康且可以重试，就尝试切换
-        const upstreamBudgetAvailable = hasUpstreamAttemptBudget(CONFIG, error);
+        const retryBudgetModel = resolveRetryBudgetModel(retryContext, model);
+        const upstreamBudgetAvailable = hasUpstreamAttemptBudget(CONFIG, error, retryBudgetModel);
         if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && !upstreamBudgetAvailable) {
             providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
-            logger.warn(`[Retry] Upstream attempt cap (${getMaxUpstreamAttempts(CONFIG, error)}) reached for ${toProvider}/${model}; not switching credential again.`);
+            logger.warn(`[Retry] Upstream attempt cap (${getMaxUpstreamAttempts(CONFIG, error, retryBudgetModel)}) reached for ${toProvider}/${model}; not switching credential again.`);
         }
         if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && upstreamBudgetAvailable && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
             const isCodexTransient = isCodexTransientCredentialError(error);
@@ -2675,7 +2714,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 await handleUnifiedResponse(res, JSON.stringify(terminalResponse), false, terminalStatus, getErrorResponseHeaders(error, terminalStatus));
                 return;
             }
-            const fallback = hasUpstreamAttemptBudget(CONFIG, error) ? await tryTemporaryRouteFallback(retryContext) : null;
+            const fallback = hasUpstreamAttemptBudget(CONFIG, error, resolveRetryBudgetModel(retryContext, model)) ? await tryTemporaryRouteFallback(retryContext) : null;
             if (fallback?.service) {
                 providerPoolManager?.recordGeminiSchedulingEvent?.('fallbacks');
                 updateGeminiRequestMetadata({ fallbackCount: (retryContext?.geminiFallbackCount || 0) + 1 });
@@ -3197,7 +3236,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     // - 底层重试：同一凭证遇到 429/5xx 时的重试
     // - 凭证切换重试：凭证被标记不健康后切换到其他凭证
     // 当没有不同的健康凭证可用时，重试会自动停止
-    const credentialSwitchMaxRetries = CONFIG.CREDENTIAL_SWITCH_MAX_RETRIES || 5;
+    const credentialSwitchMaxRetries = getCredentialSwitchMaxRetries(CONFIG, clientRequestedModel || model);
     const retryContext = {
         CONFIG,
         _startedAt: performance.now(),
@@ -3754,6 +3793,21 @@ function getQuotaErrorMetadata(error) {
     return metadata;
 }
 
+const CLIENT_RETRYABLE_CAPACITY_SHED_CODES = new Set(['server_is_overloaded', 'slow_down']);
+
+function sanitizeCodexCapacityShedErrorCodeForClient(error, upstreamCode, fallbackType) {
+    const code = String(upstreamCode || '').trim();
+    const normalized = code.toLowerCase();
+    if (
+        error?.isCodexOverload === true
+        || error?.isCodexModelCapacity === true
+        || CLIENT_RETRYABLE_CAPACITY_SHED_CODES.has(normalized)
+    ) {
+        return 'server_error';
+    }
+    return code || fallbackType;
+}
+
 export function createErrorResponse(error, fromProvider) {
     const protocolPrefix = getProtocolPrefix(fromProvider);
     const statusCode = getNumericHttpStatus(error) ?? 500;
@@ -3899,9 +3953,11 @@ export function createStreamErrorResponse(error, fromProvider) {
             const failedMessage = error.isCodexOverload || error.isCodexModelCapacity || error.origin !== 'upstream_codex'
                 ? errorMessage
                 : (upstreamMessage || errorMessage);
-            const failedCode = String(upstreamError.code || '').trim()
-                || (error.isCodexOverload ? 'server_is_overloaded' : '')
-                || getErrorType(statusCode);
+            const failedCode = sanitizeCodexCapacityShedErrorCodeForClient(
+                error,
+                upstreamError.code,
+                getErrorType(statusCode)
+            );
             const failedEvent = {
                 type: 'response.failed',
                 sequence_number: 0,

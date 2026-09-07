@@ -163,7 +163,8 @@ describe('provider auth failure health marking', () => {
         );
 
         expect(res.body).toContain('event: response.failed');
-        expect(res.body).toContain('server_is_overloaded');
+        expect(res.body).not.toContain('server_is_overloaded');
+        expect(res.body).toContain('"code":"server_error"');
         expect(res.body).toContain('[上游 Codex] 服务当前繁忙，已自动重试可用凭证后仍不可用，请稍后重试');
         expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
         expect(providerPoolManager.markProviderUnhealthyImmediately).not.toHaveBeenCalled();

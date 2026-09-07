@@ -200,7 +200,7 @@ describe('Codex terminal Responses errors', () => {
         await expect(consumeStream(service.parseSSEStream(stream))).resolves.toEqual([completed]);
     });
 
-    test('retries once on the same credential before surfacing overload', async () => {
+    test('retries three times on the same credential before surfacing overload', async () => {
         const service = createService();
         service.isInitialized = true;
         service.accessToken = 'token';
@@ -222,6 +222,18 @@ describe('Codex terminal Responses errors', () => {
             })
             .mockResolvedValueOnce({
                 data: Readable.from([
+                    `data:${JSON.stringify({ type: 'response.created', response: { id: 'resp_1b' } })}\n`,
+                    `data:${JSON.stringify(overload)}\n`
+                ])
+            })
+            .mockResolvedValueOnce({
+                data: Readable.from([
+                    `data:${JSON.stringify({ type: 'response.created', response: { id: 'resp_1c' } })}\n`,
+                    `data:${JSON.stringify(overload)}\n`
+                ])
+            })
+            .mockResolvedValueOnce({
+                data: Readable.from([
                     `data:${JSON.stringify({ type: 'response.created', response: { id: 'resp_2' } })}\n`,
                     `data:${JSON.stringify({ type: 'response.output_text.delta', delta: 'ok' })}\n`,
                     `data:${JSON.stringify(completed)}\n`
@@ -233,10 +245,10 @@ describe('Codex terminal Responses errors', () => {
                 expect.objectContaining({ type: 'response.output_text.delta', delta: 'ok' }),
                 completed
             ]));
-        expect(axios.request).toHaveBeenCalledTimes(2);
+        expect(axios.request).toHaveBeenCalledTimes(4);
     });
 
-    test('surfaces overload after exactly one same-credential retry and preserves response metadata', async () => {
+    test('surfaces overload after three same-credential retries and preserves response metadata', async () => {
         const service = createService();
         service.isInitialized = true;
         service.accessToken = 'token';
@@ -256,7 +268,19 @@ describe('Codex terminal Responses errors', () => {
             })
             .mockResolvedValueOnce({
                 data: Readable.from([
-                    `data:${JSON.stringify({ type: 'response.created', response: { id: 'resp_second', created_at: 200, model: 'gpt-5.4-mini' } })}\n`,
+                    `data:${JSON.stringify({ type: 'response.created', response: { id: 'resp_second', created_at: 150, model: 'gpt-5.4-mini' } })}\n`,
+                    `data:${JSON.stringify(overload)}\n`
+                ])
+            })
+            .mockResolvedValueOnce({
+                data: Readable.from([
+                    `data:${JSON.stringify({ type: 'response.created', response: { id: 'resp_third', created_at: 175, model: 'gpt-5.4-mini' } })}\n`,
+                    `data:${JSON.stringify(overload)}\n`
+                ])
+            })
+            .mockResolvedValueOnce({
+                data: Readable.from([
+                    `data:${JSON.stringify({ type: 'response.created', response: { id: 'resp_fourth', created_at: 200, model: 'gpt-5.4-mini' } })}\n`,
                     `data:${JSON.stringify(overload)}\n`
                 ])
             });
@@ -264,17 +288,17 @@ describe('Codex terminal Responses errors', () => {
         await expect(consumeStream(service.generateContentStream('gpt-5.5', { input: 'hello' })))
             .rejects.toMatchObject({
                 isCodexOverload: true,
-                responseId: 'resp_second',
+                responseId: 'resp_fourth',
                 responseSnapshot: expect.objectContaining({
-                    id: 'resp_second',
+                    id: 'resp_fourth',
                     created_at: 200,
                     model: 'gpt-5.4-mini'
                 })
             });
-        expect(axios.request).toHaveBeenCalledTimes(2);
+        expect(axios.request).toHaveBeenCalledTimes(4);
     });
 
-    test('retries a non-stream request once on the same credential after overload', async () => {
+    test('retries a non-stream request three times on the same credential after overload', async () => {
         const service = createService();
         service.isInitialized = true;
         service.accessToken = 'token';
@@ -289,10 +313,12 @@ describe('Codex terminal Responses errors', () => {
 
         axios.request
             .mockResolvedValueOnce({ data: `data:${JSON.stringify(overload)}` })
+            .mockResolvedValueOnce({ data: `data:${JSON.stringify(overload)}` })
+            .mockResolvedValueOnce({ data: `data:${JSON.stringify(overload)}` })
             .mockResolvedValueOnce({ data: `data:${JSON.stringify(completed)}` });
 
         await expect(service.generateContent('gpt-5.5', { input: 'hello' })).resolves.toEqual(completed);
-        expect(axios.request).toHaveBeenCalledTimes(2);
+        expect(axios.request).toHaveBeenCalledTimes(4);
     });
 
     test('does not retry the same credential after visible output was emitted', async () => {
