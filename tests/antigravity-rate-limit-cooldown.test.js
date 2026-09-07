@@ -168,6 +168,46 @@ function createGeneric503Error() {
     return error;
 }
 
+function defineIgnoredWrite(object, key, getValue) {
+    Object.defineProperty(object, key, {
+        configurable: true,
+        enumerable: true,
+        get: getValue,
+        set() {}
+    });
+}
+
+function createReadOnlyAxiosCapacityError(model = 'gemini-2.5-flash') {
+    const error = new Error(`No capacity available for model ${model} on the server`);
+    const response = {
+        data: {
+            error: {
+                code: 503,
+                message: error.message,
+                status: 'UNAVAILABLE'
+            }
+        }
+    };
+    defineIgnoredWrite(response, 'status', () => 503);
+    defineIgnoredWrite(error, 'status', () => 'UNAVAILABLE');
+    defineIgnoredWrite(error, 'code', () => 503);
+    error.response = response;
+    return error;
+}
+
+function expiredCodexRetryContext(overrides = {}) {
+    return {
+        CONFIG: {
+            CREDENTIAL_SWITCH_MAX_RETRIES: 1,
+            CODEX_RETRY_MAX_DURATION_MS: 120000,
+            ...(overrides.CONFIG || {})
+        },
+        maxRetries: 1,
+        retryStartedAt: Date.now() - 180000,
+        ...overrides
+    };
+}
+
 function createGrpcCapacityError() {
     const error = new Error('Request failed');
     error.status = 'UNAVAILABLE';
@@ -1002,5 +1042,206 @@ describe('Antigravity capacity exhaustion across client protocols', () => {
             type: 'rate_limit_error',
             code: 'rate_limit_error'
         });
+    });
+});
+
+describe('Antigravity capacity 503 maps to 429 and switches remaining credentials', () => {
+    afterEach(() => {
+        mockGetApiServiceWithFallback.mockReset();
+    });
+
+    test('returns HTTP 429 when axios keeps a read-only 503 after capacity normalize', async () => {
+        mockGetApiServiceWithFallback.mockResolvedValueOnce({ service: null, uuid: null });
+        const firstService = { generateContent: jest.fn().mockRejectedValue(createReadOnlyAxiosCapacityError()) };
+        const providerPoolManager = createCapacityPoolManager();
+        const res = new FakeResponse();
+
+        await requestContext.run({ requestId: 'readonly-503-unary' }, () => handleUnaryRequest(
+            res,
+            firstService,
+            'gemini-2.5-flash',
+            { contents: [] },
+            'openai',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-ultra-1',
+            'Ultra 1',
+            expiredCodexRetryContext()
+        ));
+
+        expect(res.statusCode).toBe(429);
+        expect(res.statusCode).not.toBe(500);
+        expect(res.statusCode).not.toBe(503);
+        expect(res.headers['Retry-After']).toBeDefined();
+        expect(JSON.parse(res.body).error).toMatchObject({
+            type: 'rate_limit_error',
+            code: 'rate_limit_error'
+        });
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+    });
+
+    test('switches to another credential after same-credential capacity failure even when Codex retry budget expired', async () => {
+        const firstService = { generateContent: jest.fn().mockRejectedValue(createReadOnlyAxiosCapacityError('gemini-2.5-flash-lite')) };
+        const secondService = {
+            generateContent: jest.fn().mockResolvedValue({
+                candidates: [{
+                    content: {
+                        role: 'model',
+                        parts: [{ text: 'capacity-switched' }]
+                    }
+                }]
+            })
+        };
+        mockGetApiServiceWithFallback.mockResolvedValueOnce({
+            service: secondService,
+            uuid: 'provider-ultra-2',
+            actualModel: 'gemini-2.5-flash-lite',
+            actualProviderType: 'gemini-antigravity',
+            serviceConfig: {}
+        });
+        const providerPoolManager = createCapacityPoolManager();
+        const res = new FakeResponse();
+
+        await requestContext.run({ requestId: 'capacity-switch-after-codex-budget' }, () => handleUnaryRequest(
+            res,
+            firstService,
+            'gemini-2.5-flash-lite',
+            { contents: [] },
+            'gemini',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-ultra-1',
+            'Ultra 1',
+            expiredCodexRetryContext()
+        ));
+
+        expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(
+            expect.anything(),
+            'gemini-2.5-flash-lite',
+            expect.objectContaining({
+                excludeProviderUuids: ['provider-ultra-1'],
+                acquireSlot: true
+            })
+        );
+        expect(secondService.generateContent).toHaveBeenCalledTimes(1);
+        expect(res.statusCode).not.toBe(500);
+        expect(res.body).toContain('capacity-switched');
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+        expect(providerPoolManager.markAntigravityModelCapacityUnavailable).toHaveBeenCalled();
+    });
+
+    test('returns HTTP 429 when remaining credentials also report no capacity', async () => {
+        mockGetApiServiceWithFallback.mockRejectedValueOnce(new Error('No healthy provider found in pool'));
+        const firstService = { generateContent: jest.fn().mockRejectedValue(createReadOnlyAxiosCapacityError()) };
+        const providerPoolManager = createCapacityPoolManager();
+        const res = new FakeResponse();
+
+        await requestContext.run({ requestId: 'capacity-all-exhausted' }, () => handleUnaryRequest(
+            res,
+            firstService,
+            'gemini-2.5-flash',
+            { contents: [] },
+            'openai',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-ultra-1',
+            'Ultra 1',
+            expiredCodexRetryContext()
+        ));
+
+        expect(res.statusCode).toBe(429);
+        expect(res.statusCode).not.toBe(500);
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+        expect(providerPoolManager.markAntigravityModelCapacityUnavailable).toHaveBeenCalled();
+    });
+
+    test('switches OpenAI stream credentials after capacity even when Codex retry budget expired', async () => {
+        const firstService = {
+            generateContentStream: jest.fn().mockImplementation(async function* () {
+                throw createReadOnlyAxiosCapacityError('gemini-2.5-flash');
+            })
+        };
+        const secondService = {
+            generateContentStream: jest.fn().mockImplementation(async function* () {
+                yield {
+                    candidates: [{
+                        content: {
+                            role: 'model',
+                            parts: [{ text: 'capacity-stream-remaining' }]
+                        }
+                    }]
+                };
+            })
+        };
+        mockGetApiServiceWithFallback.mockResolvedValueOnce({
+            service: secondService,
+            uuid: 'provider-ultra-2',
+            actualModel: 'gemini-2.5-flash',
+            actualProviderType: 'gemini-antigravity',
+            serviceConfig: {}
+        });
+        const providerPoolManager = createCapacityPoolManager();
+        const res = new StreamFakeResponse();
+
+        await requestContext.run({ requestId: 'capacity-stream-switch-budget' }, () => handleStreamRequest(
+            res,
+            firstService,
+            'gemini-2.5-flash',
+            { contents: [] },
+            'openai',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-ultra-1',
+            'Ultra 1',
+            expiredCodexRetryContext()
+        ));
+
+        expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(
+            expect.anything(),
+            'gemini-2.5-flash',
+            expect.objectContaining({
+                excludeProviderUuids: ['provider-ultra-1']
+            })
+        );
+        expect(secondService.generateContentStream).toHaveBeenCalledTimes(1);
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+    });
+
+    test('writes OpenAI stream rate_limit_error for read-only 503 capacity after remaining credentials fail', async () => {
+        mockGetApiServiceWithFallback.mockRejectedValueOnce(new Error('No healthy provider found in pool'));
+        const firstService = {
+            generateContentStream: jest.fn().mockImplementation(async function* () {
+                throw createReadOnlyAxiosCapacityError();
+            })
+        };
+        const providerPoolManager = createCapacityPoolManager();
+        const res = new StreamFakeResponse();
+
+        await requestContext.run({ requestId: 'capacity-stream-readonly-503' }, () => handleStreamRequest(
+            res,
+            firstService,
+            'gemini-2.5-flash',
+            { contents: [] },
+            'openai',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-ultra-1',
+            'Ultra 1',
+            expiredCodexRetryContext()
+        ));
+
+        expect(parseSseErrorType(res.body)).toBe('rate_limit_error');
+        expect(res.body).not.toContain('"type":"server_error"');
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
     });
 });

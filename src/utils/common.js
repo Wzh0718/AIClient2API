@@ -305,7 +305,19 @@ export function ensureValidStatusCode(code) {
     return 500;
 }
 
+function looksLikeAntigravityCapacityError(error) {
+    if (!error) return false;
+    if (error.isAntigravityModelCapacity === true) return true;
+    if (error.code === 'MODEL_CAPACITY_UNAVAILABLE') return true;
+    return isAntigravityTransientCapacityError(error, MODEL_PROVIDER.ANTIGRAVITY);
+}
+
 function getNumericHttpStatus(error) {
+    // Capacity 503s often keep a gRPC `UNAVAILABLE` / axios 503 after normalize.
+    // Client-facing exits must still emit 429 instead of 503 or the ?? 500 fallback.
+    if (looksLikeAntigravityCapacityError(error)) {
+        return 429;
+    }
     const candidates = [
         error?.response?.status,
         error?.statusCode,
@@ -374,6 +386,57 @@ export function isAntigravityTransientCapacityError(error, providerType) {
     }
 
     return antigravityCapacityPayloadLooksExhausted(error?.response?.data);
+}
+
+function hasActiveCodexRetryBudget(retryContext, CONFIG) {
+    return hasCodexRetryBudget({
+        startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(),
+        maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000
+    });
+}
+
+function shouldAttemptCredentialSwitch({
+    isTerminalAntigravityUnavailable,
+    isAntigravityTransientCapacity,
+    credentialMarkedUnhealthy,
+    upstreamBudgetAvailable,
+    retryContext,
+    CONFIG,
+    currentRetry,
+    maxRetries,
+    providerPoolManager
+}) {
+    if (isTerminalAntigravityUnavailable || currentRetry >= maxRetries || !providerPoolManager || !CONFIG) {
+        return false;
+    }
+    // Capacity errors must keep switching remaining credentials even after the
+    // Codex retry window has expired. That window is unrelated to Antigravity.
+    if (isAntigravityTransientCapacity) {
+        return true;
+    }
+    return Boolean(
+        credentialMarkedUnhealthy
+        && upstreamBudgetAvailable
+        && hasActiveCodexRetryBudget(retryContext, CONFIG)
+    );
+}
+
+function logSkippedAntigravityCapacitySwitch(label, {
+    isAntigravityTransientCapacity,
+    isTerminalAntigravityUnavailable,
+    CONFIG,
+    providerPoolManager,
+    currentRetry,
+    maxRetries,
+    upstreamBudgetAvailable
+}) {
+    if (!isAntigravityTransientCapacity || isTerminalAntigravityUnavailable) return;
+    const reasons = [];
+    if (!CONFIG) reasons.push('no CONFIG');
+    if (!providerPoolManager) reasons.push('no pool');
+    if (currentRetry >= maxRetries) reasons.push('maxRetries');
+    if (!upstreamBudgetAvailable) reasons.push('budget');
+    logger.warn(`[${label}] Skipping Antigravity capacity credential switch: ${reasons.join(', ') || 'no eligible'}`);
 }
 
 function antigravityCapacityPayloadLooksExhausted(data) {
@@ -2151,7 +2214,18 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
             logger.warn(`[Retry] Upstream attempt cap (${getMaxUpstreamAttempts(CONFIG, error, retryBudgetModel)}) reached for ${toProvider}/${model}; not switching credential again.`);
         }
-        if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && upstreamBudgetAvailable && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
+        const shouldSwitchNow = shouldAttemptCredentialSwitch({
+            isTerminalAntigravityUnavailable,
+            isAntigravityTransientCapacity,
+            credentialMarkedUnhealthy,
+            upstreamBudgetAvailable,
+            retryContext,
+            CONFIG,
+            currentRetry,
+            maxRetries,
+            providerPoolManager
+        });
+        if (shouldSwitchNow) {
             const isCodexTransient = isCodexTransientCredentialError(error);
             const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity;
             if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
@@ -2271,6 +2345,15 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 } else {
                     logGeminiRetryDiagnostic({ mode: 'stream', model, providerType: toProvider, providerUuid: pooluuid, attempt: currentRetry + 1, maxRetries, error, backoffMs: randomDelay, switchedProvider: false, nextEligibleCount: selectionDiagnostics.eligibleCandidateCount, fallbackCount: retryContext?.geminiFallbackCount || 0, outcome: 'exhausted' });
                     logger.info(`[Stream Retry] No healthy credential available for retry.`);
+                    logSkippedAntigravityCapacitySwitch('Stream Retry', {
+                        isAntigravityTransientCapacity,
+                        isTerminalAntigravityUnavailable,
+                        CONFIG,
+                        providerPoolManager,
+                        currentRetry,
+                        maxRetries,
+                        upstreamBudgetAvailable
+                    });
                 }
             } catch (retryError) {
                 if (shouldRecordRetryAudit(error)) {
@@ -2287,7 +2370,26 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                     });
                 }
                 logger.error(`[Stream Retry] Failed to get alternative service:`, retryError.message);
+                logSkippedAntigravityCapacitySwitch('Stream Retry', {
+                    isAntigravityTransientCapacity,
+                    isTerminalAntigravityUnavailable,
+                    CONFIG,
+                    providerPoolManager,
+                    currentRetry,
+                    maxRetries,
+                    upstreamBudgetAvailable
+                });
             }
+        } else {
+            logSkippedAntigravityCapacitySwitch('Stream Retry', {
+                isAntigravityTransientCapacity,
+                isTerminalAntigravityUnavailable,
+                CONFIG,
+                providerPoolManager,
+                currentRetry,
+                maxRetries,
+                upstreamBudgetAvailable
+            });
         }
 
         if (!anyDataSent && !isTerminalAntigravityUnavailable) {
@@ -2569,7 +2671,18 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
             logger.warn(`[Retry] Upstream attempt cap (${getMaxUpstreamAttempts(CONFIG, error, retryBudgetModel)}) reached for ${toProvider}/${model}; not switching credential again.`);
         }
-        if (!isTerminalAntigravityUnavailable && credentialMarkedUnhealthy && upstreamBudgetAvailable && hasCodexRetryBudget({ startedAt: retryContext?.retryStartedAt || retryContext?._startedAt || Date.now(), maxDurationMs: CONFIG?.CODEX_RETRY_MAX_DURATION_MS ?? 120000 }) && currentRetry < maxRetries && providerPoolManager && CONFIG) {
+        const shouldSwitchNow = shouldAttemptCredentialSwitch({
+            isTerminalAntigravityUnavailable,
+            isAntigravityTransientCapacity,
+            credentialMarkedUnhealthy,
+            upstreamBudgetAvailable,
+            retryContext,
+            CONFIG,
+            currentRetry,
+            maxRetries,
+            providerPoolManager
+        });
+        if (shouldSwitchNow) {
             const isCodexTransient = isCodexTransientCredentialError(error);
             const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity;
             if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
@@ -2687,6 +2800,15 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 } else {
                     logGeminiRetryDiagnostic({ mode: 'unary', model, providerType: toProvider, providerUuid: pooluuid, attempt: currentRetry + 1, maxRetries, error, backoffMs: randomDelay, switchedProvider: false, nextEligibleCount: selectionDiagnostics.eligibleCandidateCount, fallbackCount: retryContext?.geminiFallbackCount || 0, outcome: 'exhausted' });
                     logger.info(`[Unary Retry] No healthy credential available for retry.`);
+                    logSkippedAntigravityCapacitySwitch('Unary Retry', {
+                        isAntigravityTransientCapacity,
+                        isTerminalAntigravityUnavailable,
+                        CONFIG,
+                        providerPoolManager,
+                        currentRetry,
+                        maxRetries,
+                        upstreamBudgetAvailable
+                    });
                 }
             } catch (retryError) {
                 if (shouldRecordRetryAudit(error)) {
@@ -2703,7 +2825,26 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                     });
                 }
                 logger.error(`[Unary Retry] Failed to get alternative service:`, retryError.message);
+                logSkippedAntigravityCapacitySwitch('Unary Retry', {
+                    isAntigravityTransientCapacity,
+                    isTerminalAntigravityUnavailable,
+                    CONFIG,
+                    providerPoolManager,
+                    currentRetry,
+                    maxRetries,
+                    upstreamBudgetAvailable
+                });
             }
+        } else {
+            logSkippedAntigravityCapacitySwitch('Unary Retry', {
+                isAntigravityTransientCapacity,
+                isTerminalAntigravityUnavailable,
+                CONFIG,
+                providerPoolManager,
+                currentRetry,
+                maxRetries,
+                upstreamBudgetAvailable
+            });
         }
 
         try {
