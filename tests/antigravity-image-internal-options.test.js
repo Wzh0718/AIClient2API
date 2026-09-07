@@ -101,7 +101,7 @@ describe('Antigravity image payloads', () => {
         expect(payload.request.generationConfig.imageConfig.imageSize).toBe('1K');
     });
 
-    test('retries a model-capacity 503 only once on the same credential', async () => {
+    test('retries a model-capacity error only once on the same credential and surfaces 429', async () => {
         const service = new AntigravityApiService({
             MODEL_PROVIDER: 'gemini-antigravity',
             ANTIGRAVITY_BASE_URL: 'https://example.invalid',
@@ -117,7 +117,7 @@ describe('Antigravity image payloads', () => {
         service.authClient.request = jest.fn().mockRejectedValue(capacityError);
 
         await expect(service.callApi('generateContent', { model: 'gemini-3.1-flash-lite' }))
-            .rejects.toMatchObject({ response: { status: 503 } });
+            .rejects.toMatchObject({ response: { status: 429 } });
         expect(service.authClient.request).toHaveBeenCalledTimes(2);
     });
 
@@ -141,7 +141,7 @@ describe('Antigravity image payloads', () => {
         expect(service.authClient.request).toHaveBeenCalledTimes(4);
     });
 
-    test('retries a model-capacity 503 only once during streamApi', async () => {
+    test('retries a model-capacity error only once during streamApi and surfaces 429', async () => {
         const service = new AntigravityApiService({
             MODEL_PROVIDER: 'gemini-antigravity',
             ANTIGRAVITY_BASE_URL: 'https://example.invalid',
@@ -167,7 +167,7 @@ describe('Antigravity image payloads', () => {
             for await (const chunk of service.streamApi('streamGenerateContent', { model: 'gemini-2.5-flash' })) {
                 void chunk;
             }
-        })()).rejects.toMatchObject({ response: { status: 503 } });
+        })()).rejects.toMatchObject({ response: { status: 429 } });
         expect(service.authClient.request).toHaveBeenCalledTimes(2);
     });
 });
