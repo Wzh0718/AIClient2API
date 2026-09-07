@@ -234,7 +234,9 @@ export async function refreshUsage() {
         updateTimeInfo(data);
         
         // 成功提示
-        showToast(t('common.success'), t('common.refresh.success'), 'success', 6000);
+        if (!Array.isArray(data.refreshErrors) || data.refreshErrors.length === 0) {
+            showToast(t('common.success'), t('common.refresh.success'), 'success', 6000);
+        }
     } catch (error) {
         console.error('刷新用量失败:', error);
         showToast(t('common.error'), error.message || t('common.requestFailed'), 'error');
@@ -378,7 +380,9 @@ export async function refreshProviderUsage(providerType, refreshButton = null) {
             await loadUsage();
         }
         
-        showToast(t('common.refresh.success'), 'success');
+        if (!Array.isArray(data.refreshErrors) || data.refreshErrors.length === 0) {
+            showToast(t('common.refresh.success'), 'success');
+        }
     } catch (error) {
         console.error('刷新提供商用量失败:', error);
         showToast(error.message || t('common.requestFailed'), 'error');
@@ -552,6 +556,13 @@ function renderCollapsedStatusIcons(instance, providerType) {
     const icons = [
         renderStatusIcon('基础状态', getBaseStatusState(instance))
     ];
+
+    if (instance.staleUsage || instance.subscriptionExpired) {
+        const title = instance.subscriptionExpired
+            ? 'Pro 订阅已过期，当前显示最后一次成功数据'
+            : `刷新异常，当前显示最后一次成功数据${instance.lastRefreshError ? `：${instance.lastRefreshError}` : ''}`;
+        icons.push(`<i class="fas fa-exclamation-triangle status-warning" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"></i>`);
+    }
 
     if (providerType === 'openai-codex-oauth') {
         icons.push(
@@ -893,6 +904,12 @@ export function scheduleAntigravityRecoveryRefresh(data, now = Date.now(), sched
 }
 
 function renderUsageRefreshWarning(instance) {
+    if (instance.subscriptionExpired) {
+        const warning = document.createElement('div');
+        warning.className = 'usage-error-message usage-stale-warning';
+        warning.innerHTML = '<i class="fas fa-exclamation-triangle"></i> <span>Pro 订阅已过期，正在显示最后一次成功数据</span>';
+        return warning;
+    }
     const message = instance.lastRefreshError || instance.error;
     if (!message) return null;
 
@@ -1139,7 +1156,7 @@ function createInstanceUsageCard(instance, providerType) {
             <div class="collapsed-summary-row collapsed-summary-name-row">
                 <i class="fas fa-chevron-right usage-toggle-icon"></i>
                 <span class="collapsed-name" title="${displayName} ${t('usage.clickToManage')}" onclick="event.stopPropagation(); window.jumpToProviderNode('${providerType}', '${instance.uuid}', event)">${displayName}</span>
-                ${summary.plan ? `<span class="collapsed-plan-badge ${planClass}">${summary.plan}</span>` : ''}
+                ${summary.plan ? `<span class="collapsed-plan-badge ${planClass}${instance.subscriptionExpired ? ' is-expired' : ''}"${instance.subscriptionExpired ? ' title="历史订阅数据：Pro 订阅已过期"' : ''}>${summary.plan}${instance.subscriptionExpired ? '（已过期）' : ''}</span>` : ''}
                 ${renderCollapsedStatusIcons(instance, providerType)}
             </div>
             ${hasVisibleUsage ? `

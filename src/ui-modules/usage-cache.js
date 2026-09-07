@@ -86,6 +86,31 @@ function recalculateProviderCounts(providerData = {}) {
     return providerData;
 }
 
+function normalizePlan(plan) {
+    return String(plan || '').trim().toLowerCase();
+}
+
+function isPaidPlan(plan) {
+    const normalized = normalizePlan(plan);
+    return Boolean(normalized)
+        && !normalized.includes('free')
+        && /pro|plus|team|business|enterprise|premium/.test(normalized);
+}
+
+function isFreePlan(plan) {
+    const normalized = normalizePlan(plan);
+    return normalized === 'free'
+        || normalized === 'free plan'
+        || normalized.includes('quota(free)')
+        || normalized.includes('free tier');
+}
+
+export function isPaidPlanDowngrade(cachedInstance, incomingInstance) {
+    const cachedPlan = cachedInstance?.usage?.summary?.plan;
+    const incomingPlan = incomingInstance?.usage?.summary?.plan;
+    return isPaidPlan(cachedPlan) && isFreePlan(incomingPlan);
+}
+
 export function mergeCodexResetCreditsWithLastSuccessfulUsage(incomingInstance, cachedInstance, cachedAt) {
     if (!incomingInstance?.success || !incomingInstance?.usage?.summary || incomingInstance?.usage?.summary?.rateLimitResetCredits) {
         return incomingInstance;
@@ -121,8 +146,32 @@ export function mergeCodexResetCreditsWithLastSuccessfulUsage(incomingInstance, 
     };
 }
 
-function mergeInstanceWithLastSuccessfulUsage(incomingInstance, cachedByUuid, cachedAt) {
+function mergeInstanceWithLastSuccessfulUsage(providerType, incomingInstance, cachedByUuid, cachedAt) {
     const cachedInstance = cachedByUuid.get(incomingInstance?.uuid);
+    if (incomingInstance?.success && isPaidPlanDowngrade(cachedInstance, incomingInstance)) {
+        return {
+            ...cachedInstance,
+            name: incomingInstance.name || cachedInstance.name,
+            codexAccountKey: incomingInstance.codexAccountKey || cachedInstance.codexAccountKey || null,
+            codexAccountId: incomingInstance.codexAccountId || cachedInstance.codexAccountId || null,
+            codexEmail: incomingInstance.codexEmail || cachedInstance.codexEmail || null,
+            codexQuotaHealth: incomingInstance.codexQuotaHealth || cachedInstance.codexQuotaHealth || null,
+            antigravityQuotaHealth: incomingInstance.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null,
+            configFilePath: incomingInstance.configFilePath || cachedInstance.configFilePath || null,
+            isHealthy: incomingInstance.isHealthy,
+            isDisabled: incomingInstance.isDisabled,
+            needsRefresh: incomingInstance.needsRefresh,
+            scheduledRecoveryTime: incomingInstance.scheduledRecoveryTime || cachedInstance.scheduledRecoveryTime || null,
+            success: true,
+            error: null,
+            staleUsage: true,
+            subscriptionExpired: true,
+            subscriptionStatus: 'expired',
+            lastRefreshError: 'subscription_downgrade',
+            lastSuccessfulUsageAt: cachedInstance.lastSuccessfulUsageAt || cachedAt || null
+        };
+    }
+
     if (incomingInstance?.success || !incomingInstance?.error) {
         return mergeCodexResetCreditsWithLastSuccessfulUsage(incomingInstance, cachedInstance, cachedAt);
     }
@@ -170,7 +219,7 @@ function mergeProviderWithLastSuccessfulUsage(providerType, incomingProviderData
 
     const cachedByUuid = getCachedInstancesByUuid(cachedProviderData);
     const instances = incomingProviderData.instances.map(instance =>
-        mergeInstanceWithLastSuccessfulUsage(instance, cachedByUuid, cachedSuccessfulAt)
+        mergeInstanceWithLastSuccessfulUsage(providerType, instance, cachedByUuid, cachedSuccessfulAt)
     );
 
     return recalculateProviderCounts({

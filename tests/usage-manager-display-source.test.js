@@ -300,9 +300,14 @@ describe('usage manager display source regressions', () => {
         expect(usageApiSource).toContain('readUsageCache({ maxAgeMs: null, allowStale: true })');
         expect(usageCacheSource).toContain('mergeUsageDataWithExistingLastSuccessfulUsage');
         expect(usageCacheSource).toContain('lastRefreshError: incomingInstance.error');
+        expect(usageCacheSource).toContain('subscriptionExpired: true');
+        expect(usageApiSource).toContain('isPaidPlanDowngrade');
         expect(usageManagerSource).toContain('const hasVisibleUsage = Boolean(instance.usage);');
         expect(usageManagerSource).toContain('contentArea.appendChild(renderUsageDetails(instance.usage, accountUsageSummary, instance));');
         expect(usageManagerSource).toContain('renderUsageRefreshWarning(instance)');
+        expect(usageManagerSource).toContain('Pro 订阅已过期，正在显示最后一次成功数据');
+        expect(usageManagerSource).toContain('instance.staleUsage || instance.subscriptionExpired');
+        expect(usageManagerSource).toContain('data.refreshErrors.length === 0');
         expect(usageManagerSource).toContain('showUsageRefreshErrors(data.refreshErrors)');
     });
     test('Codex usage cards prefer backend codexEmail before provider display name', () => {

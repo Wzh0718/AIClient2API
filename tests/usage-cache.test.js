@@ -196,6 +196,59 @@ describe('usage cache TTL', () => {
         expect(cache.providers['openai-codex-oauth'].errorCount).toBe(0);
     });
 
+    test('write keeps the last paid plan snapshot when a refresh downgrades PRO to FREE', async () => {
+        writeCache({
+            timestamp: '2026-06-16T11:50:00.000Z',
+            providers: {
+                'openai-codex-oauth': {
+                    providerType: 'openai-codex-oauth',
+                    totalCount: 1,
+                    successCount: 1,
+                    errorCount: 0,
+                    lastSuccessfulRefreshAt: '2026-06-16T11:50:00.000Z',
+                    instances: [{
+                        uuid: 'codex-a',
+                        name: 'paid-account',
+                        success: true,
+                        usage: {
+                            summary: { plan: 'Pro', usedPercent: 42.5 }
+                        }
+                    }]
+                }
+            }
+        });
+
+        const { writeUsageCache, readUsageCache } = await loadUsageCacheModule();
+
+        await writeUsageCache({
+            timestamp: '2026-06-16T12:00:00.000Z',
+            providers: {
+                'openai-codex-oauth': {
+                    providerType: 'openai-codex-oauth',
+                    totalCount: 1,
+                    successCount: 1,
+                    errorCount: 0,
+                    instances: [{
+                        uuid: 'codex-a',
+                        name: 'paid-account',
+                        success: true,
+                        usage: {
+                            summary: { plan: 'FREE', usedPercent: 0 }
+                        }
+                    }]
+                }
+            }
+        });
+
+        const cache = await readUsageCache({ maxAgeMs: null });
+        const instance = cache.providers['openai-codex-oauth'].instances[0];
+        expect(instance.usage.summary.plan).toBe('Pro');
+        expect(instance.usage.summary.usedPercent).toBe(42.5);
+        expect(instance.staleUsage).toBe(true);
+        expect(instance.lastRefreshError).toBe('subscription_downgrade');
+        expect(instance.lastSuccessfulUsageAt).toBe('2026-06-16T11:50:00.000Z');
+    });
+
     test('write reuses last successful Codex reset credits when the current field is unavailable', async () => {
         writeCache({
             timestamp: '2026-06-16T11:50:00.000Z',

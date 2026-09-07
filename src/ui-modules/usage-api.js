@@ -6,7 +6,7 @@ import { readUsageCache, readUsageDisplayCache, writeUsageCache, writeUsageCache
 import { PROVIDER_MAPPINGS } from '../utils/provider-utils.js';
 import { MODEL_PROVIDER, getRequestBody } from '../utils/common.js';
 import { withFileLock } from '../utils/file-lock.js';
-import { normalizeAntigravityQuotaHealth, mergeCodexResetCreditsWithLastSuccessfulUsage } from './usage-cache.js';
+import { normalizeAntigravityQuotaHealth, mergeCodexResetCreditsWithLastSuccessfulUsage, isPaidPlanDowngrade } from './usage-cache.js';
 import path from 'path';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import {
@@ -466,7 +466,8 @@ function collectRefreshError(providerType, instance) {
 
 function classifyUsageRefreshError(error) {
     const message = String(error || '').toLowerCase();
-    if (/401|unauthorized|reauthori[sz]e|refresh token/.test(message)) return 'auth_401';
+    if (/subscription_downgrade|subscription.*(expired|downgrad)|plan.*(free|expired)|\bexpired\b|\brevoked\b/.test(message)) return 'subscription_expired';
+    if (/401|403|unauthorized|forbidden|reauthori[sz]e|refresh token/.test(message)) return 'auth_401';
     if (/timeout|timed out|etimedout/.test(message)) return 'timeout';
     if (/econnreset|socket hang up|econnrefused|network/.test(message)) return 'network_reset';
     if (/429|rate.?limit|too many/.test(message)) return 'upstream_429';
@@ -541,6 +542,31 @@ function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderDa
 
     const cachedByUuid = getCachedInstancesByUuid(cachedProviderData);
     const instances = (freshProviderData.instances || []).map(instance => {
+        const cachedInstance = cachedByUuid.get(instance.uuid);
+        if (instance.success && isPaidPlanDowngrade(cachedInstance, instance)) {
+            refreshErrors.push({
+                providerType,
+                uuid: instance.uuid,
+                name: instance.name || instance.uuid,
+                error: 'subscription_downgrade',
+                errorClass: 'subscription_expired'
+            });
+            return {
+                ...cachedInstance,
+                ...Object.fromEntries(['name', 'codexAccountKey', 'codexAccountId', 'codexEmail', 'configFilePath', 'isHealthy', 'isDisabled', 'needsRefresh', 'scheduledRecoveryTime']
+                    .filter(key => instance[key] !== undefined && instance[key] !== null)
+                    .map(key => [key, instance[key]])),
+                codexQuotaHealth: instance.codexQuotaHealth || cachedInstance.codexQuotaHealth || null,
+                antigravityQuotaHealth: instance.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null,
+                success: true,
+                error: null,
+                staleUsage: true,
+                subscriptionExpired: true,
+                subscriptionStatus: 'expired',
+                lastRefreshError: 'subscription_downgrade',
+                lastSuccessfulUsageAt: cachedInstance.lastSuccessfulUsageAt || cachedSuccessfulAt
+            };
+        }
         if (instance.success) {
             return {
                 ...mergeCodexResetCreditsWithLastSuccessfulUsage(instance, cachedByUuid.get(instance.uuid), cachedSuccessfulAt),
@@ -551,7 +577,6 @@ function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderDa
         const refreshError = collectRefreshError(providerType, instance);
         if (refreshError) refreshErrors.push(refreshError);
 
-        const cachedInstance = cachedByUuid.get(instance.uuid);
         if (!cachedInstance?.success || !cachedInstance.usage) {
             return instance;
         }
@@ -621,7 +646,8 @@ function mergeUsageResultsWithLastSuccessfulCache(freshResults, cachedData) {
 
 function getCachedInstanceUsageFallback(providerType, uuid, instanceResult, cachedData) {
     const cachedInstance = getCachedInstancesByUuid(cachedData?.providers?.[providerType]).get(uuid);
-    if (!instanceResult?.error || !cachedInstance?.success || !cachedInstance.usage) {
+    const subscriptionDowngrade = instanceResult?.success && isPaidPlanDowngrade(cachedInstance, instanceResult);
+    if ((!instanceResult?.error && !subscriptionDowngrade) || !cachedInstance?.success || !cachedInstance.usage) {
         return instanceResult;
     }
 
@@ -643,9 +669,14 @@ function getCachedInstanceUsageFallback(providerType, uuid, instanceResult, cach
         success: true,
         error: null,
         staleUsage: true,
-        lastRefreshError: instanceResult.error,
+        subscriptionExpired: subscriptionDowngrade || instanceResult.subscriptionExpired || false,
+        subscriptionStatus: subscriptionDowngrade ? 'expired' : instanceResult.subscriptionStatus,
+        lastRefreshError: subscriptionDowngrade ? 'subscription_downgrade' : instanceResult.error,
         lastSuccessfulUsageAt: cachedData?.timestamp || null,
-        refreshErrors: [collectRefreshError(providerType, instanceResult)].filter(Boolean)
+        refreshErrors: [collectRefreshError(providerType, {
+            ...instanceResult,
+            error: subscriptionDowngrade ? 'subscription_downgrade' : instanceResult.error
+        })].filter(Boolean)
     };
 }
 
