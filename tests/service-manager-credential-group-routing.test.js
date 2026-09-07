@@ -473,6 +473,82 @@ describe('Service Manager Codex credential-group routing', () => {
         });
     });
 
+    test('auto routing spills over after the primary group hits Codex weekly quota', async () => {
+        const usageCachePath = path.join(process.cwd(), 'configs', 'usage-cache.json');
+        const originalUsageCacheExisted = fs.existsSync(usageCachePath);
+        const originalUsageCacheContent = originalUsageCacheExisted ? fs.readFileSync(usageCachePath, 'utf8') : null;
+        fs.mkdirSync(path.dirname(usageCachePath), { recursive: true });
+        fs.writeFileSync(usageCachePath, JSON.stringify({
+            timestamp: new Date().toISOString(),
+            providers: {
+                [providerType]: {
+                    providerType,
+                    instances: [
+                        {
+                            uuid: 'codex-a',
+                            success: true,
+                            usage: {
+                                summary: { plan: 'pro' },
+                                items: [
+                                    { id: 'primary_window', percent: 10, unit: 'percent' },
+                                    { id: 'secondary_window', percent: 100, unit: 'percent' }
+                                ]
+                            }
+                        },
+                        {
+                            uuid: 'codex-b',
+                            success: true,
+                            usage: {
+                                summary: { plan: 'pro' },
+                                items: [
+                                    { id: 'primary_window', percent: 10, unit: 'percent' },
+                                    { id: 'secondary_window', percent: 20, unit: 'percent' }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        }), 'utf8');
+
+        try {
+            writeGroupConfig({
+                groups: [
+                    { id: 'group-a', credentialUuids: ['codex-a'] },
+                    { id: 'group-b', credentialUuids: ['codex-b'] }
+                ],
+                keyAssignments: [{ keyId: 'key-1', routingMode: 'auto', primaryGroupId: 'group-a' }]
+            });
+            const config = createConfig({
+                providers: [
+                    provider('codex-a', { lastKnownCodexPlan: 'pro', codexGeneralMaxWeeklyPercent: 90 }),
+                    provider('codex-b', { lastKnownCodexPlan: 'pro', codexGeneralMaxWeeklyPercent: 90 })
+                ],
+                keyData: { routingMode: 'auto', primaryGroupId: 'group-a' },
+                extra: { CODEX_POOL_SNAPSHOT_TTL_MS: 30_000 }
+            });
+            await initialize(config);
+
+            const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
+
+            expect(result.uuid).toBe('codex-b');
+            expect(config._codexRouting).toMatchObject({
+                routingMode: 'auto',
+                requestedPrimaryGroupId: 'group-a',
+                selectedGroupId: 'group-b',
+                selectedProviderUuid: 'codex-b',
+                spillover: true,
+                spilloverReason: 'PRIMARY_GROUP_UNAVAILABLE'
+            });
+        } finally {
+            if (originalUsageCacheExisted) {
+                fs.writeFileSync(usageCachePath, originalUsageCacheContent, 'utf8');
+            } else if (fs.existsSync(usageCachePath)) {
+                fs.rmSync(usageCachePath, { force: true });
+            }
+        }
+    });
+
     test('auto routing maps Spark requests to Luna before group selection', async () => {
         writeGroupConfig({
             groups: [

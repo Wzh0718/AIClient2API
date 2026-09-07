@@ -1802,8 +1802,24 @@ export class ProviderPoolManager {
         return candidates;
     }
 
-    _getCodexPoolSnapshotScope(providerType, bucket) {
-        return `codex-pool:${providerType}:${bucket}:${this.providerConfigRevision}`;
+    _getCodexQuotaCandidateKey(providers = []) {
+        return (Array.isArray(providers) ? providers : [])
+            .map(provider => String(provider?.config?.uuid || provider?.uuid || ''))
+            .filter(Boolean)
+            .sort()
+            .join(',');
+    }
+
+    _getCodexQuotaSnapshotKey(providerType, bucket, providers = []) {
+        return `${providerType}:${bucket}:${this._getCodexQuotaCandidateKey(providers)}`;
+    }
+
+    _getCodexPoolSnapshotScope(providerType, bucket, providers = []) {
+        const candidateHash = crypto.createHash('sha256')
+            .update(this._getCodexQuotaCandidateKey(providers))
+            .digest('hex')
+            .slice(0, 16);
+        return `codex-pool:${providerType}:${bucket}:${this.providerConfigRevision}:${candidateHash}`;
     }
 
     _getCodexPoolStateFingerprint(providers, bucket) {
@@ -1840,13 +1856,14 @@ export class ProviderPoolManager {
     async _hydrateCodexPoolSnapshotUnmetered(providerType, providers, requestedModel) {
         const bucket = CODEX_QUOTA_BUCKET.GENERAL;
         if (this._hasFreshLocalCodexPoolSnapshot(providerType, bucket, providers)) return;
-        const scope = this._getCodexPoolSnapshotScope(providerType, bucket);
+        const scope = this._getCodexPoolSnapshotScope(providerType, bucket, providers);
+        const snapshotKey = this._getCodexQuotaSnapshotKey(providerType, bucket, providers);
         try {
             const snapshot = await this.coordination.getRuntimeSnapshot(scope);
             if (!snapshot || snapshot.providerConfigRevision !== this.providerConfigRevision) {
                 if (this.coordination.acquireRuntimeSnapshotLock) {
                     const owner = await this.coordination.acquireRuntimeSnapshotLock(scope, { ttlMs: 1500 });
-                    if (owner) this._codexPoolSnapshotLocks.set(`${providerType}:${bucket}`, { scope, owner });
+                    if (owner) this._codexPoolSnapshotLocks.set(snapshotKey, { scope, owner });
                     else {
                         for (let attempt = 0; attempt < 3; attempt += 1) {
                             await new Promise(resolve => setTimeout(resolve, 50));
@@ -1871,7 +1888,7 @@ export class ProviderPoolManager {
         const usageCacheVersion = getCodexUsageCacheVersion(readFreshUsageCacheSync());
         const fingerprint = this._getCodexPoolStateFingerprint(providers, bucket);
         const shared = this._codexQuotaFilterSnapshots.get(`${providerType}:${bucket}:*`);
-        const exhausted = this._codexPoolExhaustedSnapshots.get(`${providerType}:${bucket}`);
+        const exhausted = this._codexPoolExhaustedSnapshots.get(this._getCodexQuotaSnapshotKey(providerType, bucket, providers));
         const cached = shared?.expiresAt > now
             ? shared
             : exhausted?.expiresAt > now
@@ -1886,7 +1903,7 @@ export class ProviderPoolManager {
     _applySharedCodexPoolSnapshot(providerType, bucket, providers, snapshot) {
         const ttlMs = Math.max(500, Number(snapshot.ttlMs) || getCodexQuotaFilterTtlMs(this.globalConfig, Number(snapshot.unavailableCount || 0) > 0));
         if (snapshot.exhausted) {
-            this._codexPoolExhaustedSnapshots.set(`${providerType}:${bucket}`, {
+            this._codexPoolExhaustedSnapshots.set(this._getCodexQuotaSnapshotKey(providerType, bucket, providers), {
                 ...snapshot,
                 expiresAt: Date.now() + ttlMs
             });
@@ -2924,14 +2941,18 @@ export class ProviderPoolManager {
             selectionDiagnostics.unavailableProviderCount = 0;
         }
         const bucket = CODEX_QUOTA_BUCKET.GENERAL;
-        const snapshotKey = `${providerType}:${bucket}`;
-        const getStateFingerprint = () => this._getCodexPoolStateFingerprint(this.providerStatus[providerType] || providers, bucket);
+        const snapshotKey = this._getCodexQuotaSnapshotKey(providerType, bucket, providers);
+        const getStateFingerprint = () => this._getCodexPoolStateFingerprint(providers, bucket);
         const stateFingerprint = getStateFingerprint();
+        const usageCache = readFreshUsageCacheSync();
+        const usageCacheVersion = getCodexUsageCacheVersion(usageCache);
         const cachedExhaustion = this._codexPoolExhaustedSnapshots.get(snapshotKey);
         const snapshotTtlMs = Math.min(Math.max(500, Number(this.globalConfig?.CODEX_POOL_SNAPSHOT_TTL_MS ?? 3000) || 3000), 15000);
         if (cachedExhaustion
             && cachedExhaustion.expiresAt > Date.now()
             && cachedExhaustion.providerConfigRevision === this.providerConfigRevision
+            && (!cachedExhaustion.stateFingerprint || cachedExhaustion.stateFingerprint === stateFingerprint)
+            && (cachedExhaustion.usageCacheVersion || 'none') === usageCacheVersion
             ) {
             const error = new Error(cachedExhaustion.message);
             error.status = 429;
@@ -2962,10 +2983,8 @@ export class ProviderPoolManager {
             filterReasons[reason] = (filterReasons[reason] || 0) + 1;
         };
         let updatedLastKnownPlan = false;
-        const usageCache = readFreshUsageCacheSync();
         const now = Date.now();
         const candidateUuids = providers.map(provider => provider.config?.uuid || provider.uuid || '').sort();
-        const usageCacheVersion = getCodexUsageCacheVersion(usageCache);
         const filterCacheKey = `${providerType}:${bucket}:${candidateUuids.join(',')}`;
         const stateFingerprintBefore = getStateFingerprint();
         const localCachedFilter = this._codexQuotaFilterSnapshots.get(filterCacheKey);
@@ -3094,7 +3113,7 @@ export class ProviderPoolManager {
             });
             const lock = this._codexPoolSnapshotLocks.get(snapshotKey);
             if (this.coordination?.setRuntimeSnapshot) {
-                Promise.resolve(this.coordination.setRuntimeSnapshot(this._getCodexPoolSnapshotScope(providerType, bucket), {
+                Promise.resolve(this.coordination.setRuntimeSnapshot(this._getCodexPoolSnapshotScope(providerType, bucket, providers), {
                     providerConfigRevision: this.providerConfigRevision,
                     stateFingerprint: getStateFingerprint(),
                     message,
@@ -3123,7 +3142,7 @@ export class ProviderPoolManager {
             crossWorkerReuse: false
         });
         if (this.coordination?.setRuntimeSnapshot) {
-            Promise.resolve(this.coordination.setRuntimeSnapshot(this._getCodexPoolSnapshotScope(providerType, bucket), {
+            Promise.resolve(this.coordination.setRuntimeSnapshot(this._getCodexPoolSnapshotScope(providerType, bucket, providers), {
                 providerConfigRevision: this.providerConfigRevision,
                 stateFingerprint: finalStateFingerprint,
                 allowedProviderUuids: allowed.map(provider => provider.config?.uuid || provider.uuid || ''),

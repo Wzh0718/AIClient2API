@@ -890,4 +890,138 @@ describe('provider pool Codex token quota', () => {
         expect(selected.uuid).toBe('aaa-codex-over');
     });
 
+    test('does not reuse a subset exhausted snapshot for a different candidate set', () => {
+        const usageTimestamp = new Date().toISOString();
+        writeCodexUsageCache([
+            {
+                uuid: 'aaa-codex-over',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 10, unit: 'percent' },
+                        { id: 'secondary_window', percent: 100, unit: 'percent' }
+                    ]
+                }
+            },
+            {
+                uuid: 'zzz-codex-ok',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 10, unit: 'percent' },
+                        { id: 'secondary_window', percent: 20, unit: 'percent' }
+                    ]
+                }
+            }
+        ], usageTimestamp);
+
+        const manager = createQuotaPoolManager();
+        const providers = manager.providerStatus['openai-codex-oauth'];
+        const over = providers.find(provider => provider.uuid === 'aaa-codex-over');
+        const ok = providers.find(provider => provider.uuid === 'zzz-codex-ok');
+
+        expect(() => manager._filterCodexProvidersByTokenQuota(
+            'openai-codex-oauth',
+            [over],
+            'gpt-5.5',
+            { candidateGroupId: 'group-a' }
+        )).toThrow(/group-a exceeded configured usage quotas \(general_quota_exceeded=1\)/);
+
+        const allowed = manager._filterCodexProvidersByTokenQuota(
+            'openai-codex-oauth',
+            [ok],
+            'gpt-5.5',
+            { candidateGroupId: 'group-b' }
+        );
+        expect(allowed.map(provider => provider.uuid)).toEqual(['zzz-codex-ok']);
+    });
+
+    test('still returns 429 when every candidate in the filtered set is exhausted', () => {
+        writeCodexUsageCache([
+            {
+                uuid: 'aaa-codex-over',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 10, unit: 'percent' },
+                        { id: 'secondary_window', percent: 100, unit: 'percent' }
+                    ]
+                }
+            },
+            {
+                uuid: 'zzz-codex-ok',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 10, unit: 'percent' },
+                        { id: 'secondary_window', percent: 100, unit: 'percent' }
+                    ]
+                }
+            }
+        ]);
+
+        const manager = createQuotaPoolManager();
+        const providers = manager.providerStatus['openai-codex-oauth'];
+
+        expect(() => manager._filterCodexProvidersByTokenQuota('openai-codex-oauth', providers, 'gpt-5.5'))
+            .toThrow(/general_quota_exceeded=2/);
+    });
+
+    test('does not apply a shared exhausted snapshot to a different candidate set', () => {
+        const usageTimestamp = new Date().toISOString();
+        writeCodexUsageCache([
+            {
+                uuid: 'aaa-codex-over',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 10, unit: 'percent' },
+                        { id: 'secondary_window', percent: 100, unit: 'percent' }
+                    ]
+                }
+            },
+            {
+                uuid: 'zzz-codex-ok',
+                success: true,
+                usage: {
+                    summary: { plan: 'Plus' },
+                    items: [
+                        { id: 'primary_window', percent: 10, unit: 'percent' },
+                        { id: 'secondary_window', percent: 20, unit: 'percent' }
+                    ]
+                }
+            }
+        ], usageTimestamp);
+
+        const manager = createQuotaPoolManager();
+        const providers = manager.providerStatus['openai-codex-oauth'];
+        const over = providers.find(provider => provider.uuid === 'aaa-codex-over');
+        const ok = providers.find(provider => provider.uuid === 'zzz-codex-ok');
+        const bucket = 'general';
+
+        manager._applySharedCodexPoolSnapshot('openai-codex-oauth', bucket, [over], {
+            providerConfigRevision: manager.providerConfigRevision,
+            stateFingerprint: manager._getCodexPoolStateFingerprint([over], bucket),
+            exhausted: true,
+            message: 'All Codex providers in credential group group-a exceeded configured usage quotas (general_quota_exceeded=1)',
+            filterReasons: { general_quota_exceeded: 1 },
+            ttlMs: 30_000,
+            usageCacheVersion: usageTimestamp
+        });
+
+        const allowed = manager._filterCodexProvidersByTokenQuota('openai-codex-oauth', [ok], 'gpt-5.5');
+        expect(allowed.map(provider => provider.uuid)).toEqual(['zzz-codex-ok']);
+        expect(() => manager._filterCodexProvidersByTokenQuota(
+            'openai-codex-oauth',
+            [over],
+            'gpt-5.5',
+            { candidateGroupId: 'group-a' }
+        )).toThrow(/group-a exceeded configured usage quotas/);
+    });
+
 });
