@@ -318,6 +318,9 @@ export function isAntigravityTransientCapacityError(error, providerType) {
     if (providerType !== MODEL_PROVIDER.ANTIGRAVITY || !error) {
         return false;
     }
+    if (error.isAntigravityModelCapacity === true) {
+        return true;
+    }
 
     const errorText = [
         error?.message,
@@ -327,15 +330,42 @@ export function isAntigravityTransientCapacityError(error, providerType) {
         .join(' ')
         .toLowerCase();
 
-    return errorText.includes('model_capacity_exhausted')
+    if (errorText.includes('model_capacity_exhausted')
         || errorText.includes('model capacity exhausted')
-        || errorText.includes('no capacity available for model');
+        || errorText.includes('no capacity available for model')) {
+        return true;
+    }
+
+    return antigravityCapacityPayloadLooksExhausted(error?.response?.data);
 }
 
-function normalizeAntigravityCapacityExhaustion(error, providerType, requestedModel) {
+function antigravityCapacityPayloadLooksExhausted(data) {
+    let hit = false;
+    walkErrorPayload(parseErrorBody(data), value => {
+        if (hit || !value || typeof value !== 'object' || Array.isArray(value)) return;
+        const reason = String(value.reason || '').toLowerCase();
+        const status = String(value.status || '').toLowerCase();
+        if (reason === 'model_capacity_exhausted' || status === 'model_capacity_exhausted') {
+            hit = true;
+            return;
+        }
+        const errorNumber = String(value.metadata?.error_number ?? value.error_number ?? '');
+        if (errorNumber === '2010') hit = true;
+    });
+    return hit;
+}
+
+export function normalizeAntigravityCapacityExhaustion(error, providerType, requestedModel) {
     if (!isAntigravityTransientCapacityError(error, providerType)) {
         return false;
     }
+
+    const retryAfterMs = getRetryAfterMs(error);
+    const fallbackMs = Number(error.capacityCooldownMs || 15_000);
+    const cooldownMs = Math.min(
+        60_000,
+        Math.max(5_000, Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : fallbackMs)
+    );
 
     error.isAntigravityModelCapacity = true;
     error.status = 429;
@@ -348,7 +378,6 @@ function normalizeAntigravityCapacityExhaustion(error, providerType, requestedMo
     error.response = error.response || {};
     error.response.status = 429;
     if (!error.nextRecoveryTime) {
-        const cooldownMs = Math.min(60_000, Math.max(5_000, Number(error.capacityCooldownMs || 15_000)));
         error.nextRecoveryTime = new Date(Date.now() + cooldownMs).toISOString();
         error.retryAfterSeconds = Math.ceil(cooldownMs / 1000);
     }
@@ -3345,6 +3374,7 @@ function _applyCustomModelParameters(requestBody, customConfig, provider) {
 }
 
 export function handleError(res, error, provider = null, fromProvider = null, req = null) {
+    normalizeAntigravityCapacityExhaustion(error, provider, error?.capacityKey);
     const statusCode = getNumericHttpStatus(error) ?? 500;
     logUpstreamResponse(error, 'Server Request Failed');
     

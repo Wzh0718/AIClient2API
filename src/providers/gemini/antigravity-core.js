@@ -12,7 +12,7 @@ import * as readline from 'readline';
 import { v4 as uuidv4 } from 'uuid';
 import open from 'open';
 import { configureTLSSidecar } from '../../utils/proxy-utils.js';
-import { formatExpiryTime, isRetryableNetworkError, formatExpiryLog, getRetryAfterMs, normalizeProviderErrorMessage, isAntigravityTransientCapacityError } from '../../utils/common.js';
+import { formatExpiryTime, isRetryableNetworkError, formatExpiryLog, getRetryAfterMs, normalizeProviderErrorMessage, isAntigravityTransientCapacityError, normalizeAntigravityCapacityExhaustion } from '../../utils/common.js';
 import { getProviderModels } from '../provider-models.js';
 import { handleGeminiAntigravityOAuth } from '../../auth/oauth-handlers.js';
 import { getRequiredProxyConfigForProvider, isTLSSidecarEnabledForProvider } from '../../utils/proxy-utils.js';
@@ -1842,6 +1842,7 @@ export class AntigravityApiService {
                     await new Promise(resolve => setTimeout(resolve, delay));
                     return this.callApi(method, body, isRetry, retryCount + 1, baseURLIndex);
                 }
+                normalizeAntigravityCapacityExhaustion(error, providerType, body?.model || body?.modelName);
                 throw error;
             }
 
@@ -2030,6 +2031,7 @@ export class AntigravityApiService {
                     yield* this.streamApi(method, body, isRetry, retryCount + 1, baseURLIndex);
                     return;
                 }
+                normalizeAntigravityCapacityExhaustion(error, providerType, body?.model || body?.modelName);
                 throw error;
             }
 

@@ -2,7 +2,10 @@ import { afterEach, describe, expect, jest, test } from '@jest/globals';
 import {
     applyProviderRateLimitCooldown,
     getRetryAfterMs,
-    handleUnaryRequest
+    handleError,
+    handleStreamRequest,
+    handleUnaryRequest,
+    isAntigravityTransientCapacityError
 } from '../src/utils/common.js';
 import requestContext from '../src/utils/context.js';
 
@@ -29,9 +32,55 @@ class FakeResponse {
     }
 }
 
+class StreamFakeResponse {
+    constructor() {
+        this.body = '';
+        this.writableEnded = false;
+        this.statusCode = null;
+        this.headers = {};
+        this._listeners = {};
+    }
+    on(event, handler) {
+        (this._listeners[event] ||= []).push(handler);
+        return this;
+    }
+    off(event, handler) {
+        this._listeners[event] = (this._listeners[event] || []).filter(item => item !== handler);
+        return this;
+    }
+    once(event, handler) {
+        const wrapped = (...args) => {
+            this.off(event, wrapped);
+            handler(...args);
+        };
+        return this.on(event, wrapped);
+    }
+    writeHead(statusCode, headers = {}) {
+        this.statusCode = statusCode;
+        this.headers = headers;
+    }
+    write(chunk) {
+        this.body += String(chunk);
+        return true;
+    }
+    end(chunk = '') {
+        this.body += String(chunk);
+        this.writableEnded = true;
+    }
+}
+
 afterEach(() => {
+    restoreRandom();
     jest.restoreAllMocks();
 });
+
+const originalMathRandom = Math.random;
+function freezeRandom() {
+    Math.random = () => 0;
+}
+function restoreRandom() {
+    Math.random = originalMathRandom;
+}
 
 function createQuotaError({ model = 'gemini-3.1-flash-image', resetDelay = '26h13m8s', resetAt = null } = {}) {
     const metadata = {
@@ -119,9 +168,56 @@ function createGeneric503Error() {
     return error;
 }
 
+function createGrpcCapacityError() {
+    const error = new Error('Request failed');
+    error.status = 'UNAVAILABLE';
+    error.code = 14;
+    error.response = {
+        data: {
+            error: {
+                code: 14,
+                message: 'Service Unavailable',
+                status: 'UNAVAILABLE',
+                details: [{
+                    '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+                    reason: 'MODEL_CAPACITY_EXHAUSTED',
+                    metadata: { error_number: '2010', model: 'gemini-3.1-flash-lite' }
+                }, {
+                    '@type': 'type.googleapis.com/google.rpc.RetryInfo',
+                    retryDelay: '55s'
+                }]
+            }
+        }
+    };
+    return error;
+}
+
+function createCapacityPoolManager() {
+    return {
+        markAntigravityModelCapacityUnavailable: jest.fn(),
+        markAntigravityModelQuotaUnhealthy: jest.fn(),
+        markProviderUnhealthyWithRecoveryTime: jest.fn(),
+        markProviderUnhealthy: jest.fn(),
+        markProviderUnhealthyImmediately: jest.fn(),
+        markProviderHealthy: jest.fn(),
+        recordAntigravityRoutingEvent: jest.fn(),
+        recordGeminiSchedulingEvent: jest.fn(),
+        releaseSlot: jest.fn()
+    };
+}
+
+function parseSseErrorType(body) {
+    const match = String(body).match(/data: ({.*})/);
+    if (!match) return null;
+    try {
+        return JSON.parse(match[1])?.error?.type || null;
+    } catch {
+        return null;
+    }
+}
+
 describe('Antigravity model quota cooldown', () => {
     test('switches accounts for transient image capacity without marking the account unhealthy', async () => {
-        jest.spyOn(Math, 'random').mockReturnValue(0);
         const firstService = { generateContent: jest.fn().mockRejectedValue(createCapacityError()) };
         const secondService = { generateContent: jest.fn().mockResolvedValue({ id: 'antigravity-capacity-retry-success' }) };
         mockGetApiServiceWithFallback.mockResolvedValueOnce({
@@ -182,7 +278,6 @@ describe('Antigravity model quota cooldown', () => {
     });
 
     test('returns HTTP 429 when every alternative is unavailable after an Antigravity capacity error', async () => {
-        jest.spyOn(Math, 'random').mockReturnValue(0);
         const firstService = { generateContent: jest.fn().mockRejectedValue(createCapacityError()) };
         mockGetApiServiceWithFallback.mockRejectedValueOnce(new Error('No healthy provider found in pool'));
         const providerPoolManager = {
@@ -221,7 +316,6 @@ describe('Antigravity model quota cooldown', () => {
     });
 
     test('maps production UNAVAILABLE capacity errors to HTTP 429 instead of 500', async () => {
-        jest.spyOn(Math, 'random').mockReturnValue(0);
         mockGetApiServiceWithFallback.mockRejectedValueOnce(new Error('No healthy provider found in pool'));
         const firstService = { generateContent: jest.fn().mockRejectedValue(createProductionCapacityError()) };
         const providerPoolManager = {
@@ -419,7 +513,7 @@ describe('Antigravity model quota cooldown', () => {
     });
 
     test('excludes the rate-limited account and retries the same model on another account', async () => {
-        jest.spyOn(Math, 'random').mockReturnValue(0);
+        freezeRandom();
         const firstService = { generateContent: jest.fn().mockRejectedValue(createQuotaError()) };
         const secondService = { generateContent: jest.fn().mockResolvedValue({ id: 'antigravity-retry-success' }) };
         mockGetApiServiceWithFallback.mockResolvedValueOnce({
@@ -459,6 +553,7 @@ describe('Antigravity model quota cooldown', () => {
             'Provider Pro 1',
             { CONFIG: config, maxRetries: 1 }
         );
+        restoreRandom();
 
         expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(config, 'gemini-3.1-flash-image', expect.objectContaining({
             acquireSlot: true,
@@ -621,7 +716,6 @@ describe('Antigravity model quota cooldown', () => {
     });
 
     test('caps upstream attempts per request even when more credentials are healthy', async () => {
-        jest.spyOn(Math, 'random').mockReturnValue(0);
         mockGetApiServiceWithFallback.mockReset();
         const upstreamCalls = [];
         const makeService = uuid => ({
@@ -672,5 +766,241 @@ describe('Antigravity model quota cooldown', () => {
 
         expect(upstreamCalls).toHaveLength(6);
         expect(providerPoolManager.recordAntigravityRoutingEvent).toHaveBeenCalledWith('retrySuppressed');
+    });
+});
+
+describe('Antigravity capacity exhaustion across client protocols', () => {
+    const clientProtocols = ['openai', 'openaiResponses', 'claude', 'gemini'];
+
+    afterEach(() => {
+        mockGetApiServiceWithFallback.mockReset();
+    });
+
+    test('detects production gRPC capacity errors hidden behind a shallow Service Unavailable message', () => {
+        expect(isAntigravityTransientCapacityError(createGrpcCapacityError(), 'gemini-antigravity')).toBe(true);
+        expect(isAntigravityTransientCapacityError(createGeneric503Error(), 'gemini-antigravity')).toBe(false);
+    });
+
+    test('uses upstream retryDelay for capacity cooldown instead of the 15s default', () => {
+        const now = Date.parse('2026-09-06T09:41:04Z');
+        jest.spyOn(Date, 'now').mockReturnValue(now);
+        const error = createGrpcCapacityError();
+        const providerPoolManager = createCapacityPoolManager();
+
+        const applied = applyProviderRateLimitCooldown({
+            error,
+            config: { RATE_LIMIT_COOLDOWN_MS: 30000 },
+            providerPoolManager,
+            providerType: 'gemini-antigravity',
+            providerUuid: 'provider-ultra-1',
+            requestedModel: 'gemini-3.1-flash-lite'
+        });
+
+        expect(applied).toBe(true);
+        expect(error.status).toBe(429);
+        expect(error.statusCode).toBe(429);
+        expect(error.shouldSwitchCredential).toBe(true);
+        expect(providerPoolManager.markAntigravityModelCapacityUnavailable).toHaveBeenCalledWith(
+            'gemini-antigravity',
+            { uuid: 'provider-ultra-1' },
+            'gemini-3.1-flash-lite',
+            new Date(now + 55_000)
+        );
+    });
+
+    test.each(clientProtocols)('switches Antigravity accounts after a gRPC capacity error for %s clients', async (fromProvider) => {
+        const firstService = { generateContent: jest.fn().mockRejectedValue(createGrpcCapacityError()) };
+        const secondService = {
+            generateContent: jest.fn().mockResolvedValue({
+                candidates: [{
+                    content: {
+                        role: 'model',
+                        parts: [{ text: `capacity-switch-${fromProvider}` }]
+                    }
+                }]
+            })
+        };
+        mockGetApiServiceWithFallback.mockResolvedValueOnce({
+            service: secondService,
+            uuid: 'provider-ultra-2',
+            actualModel: 'gemini-3.1-flash-lite',
+            actualProviderType: 'gemini-antigravity',
+            serviceConfig: {}
+        });
+        const providerPoolManager = createCapacityPoolManager();
+        const res = new FakeResponse();
+
+        await requestContext.run({ requestId: `capacity-switch-${fromProvider}` }, () => handleUnaryRequest(
+            res,
+            firstService,
+            'gemini-3.1-flash-lite',
+            { contents: [] },
+            fromProvider,
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-ultra-1',
+            'Ultra 1',
+            { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 1 }, maxRetries: 1 }
+        ));
+
+        expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(
+            expect.anything(),
+            'gemini-3.1-flash-lite',
+            expect.objectContaining({
+                excludeProviderUuids: ['provider-ultra-1'],
+                acquireSlot: true
+            })
+        );
+        expect(secondService.generateContent).toHaveBeenCalledTimes(1);
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+        expect(providerPoolManager.markAntigravityModelCapacityUnavailable).toHaveBeenCalled();
+        if (fromProvider === 'gemini') {
+            expect(res.statusCode).not.toBe(500);
+            expect(res.body).toContain(`capacity-switch-${fromProvider}`);
+        }
+    });
+
+    test.each(clientProtocols)('returns HTTP 429 instead of 500 when capacity is exhausted for %s clients', async (fromProvider) => {
+        mockGetApiServiceWithFallback.mockRejectedValueOnce(new Error('No healthy provider found in pool'));
+        const firstService = { generateContent: jest.fn().mockRejectedValue(createGrpcCapacityError()) };
+        const providerPoolManager = createCapacityPoolManager();
+        const res = new FakeResponse();
+
+        await requestContext.run({ requestId: `capacity-exhausted-${fromProvider}` }, () => handleUnaryRequest(
+            res,
+            firstService,
+            'gemini-3.1-flash-lite',
+            { contents: [] },
+            fromProvider,
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-ultra-1',
+            'Ultra 1',
+            { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 1 }, maxRetries: 1 }
+        ));
+
+        expect(res.statusCode).toBe(429);
+        expect(res.statusCode).not.toBe(500);
+        expect(res.headers['Retry-After']).toBeDefined();
+        const body = JSON.parse(res.body);
+        if (fromProvider === 'gemini') {
+            expect(body.error).toMatchObject({ code: 429, status: 'RESOURCE_EXHAUSTED' });
+        } else if (fromProvider === 'claude') {
+            expect(body.error).toMatchObject({ type: 'rate_limit_error' });
+        } else {
+            expect(body.error).toMatchObject({ type: 'rate_limit_error', code: 'rate_limit_error' });
+        }
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+        expect(providerPoolManager.markAntigravityModelCapacityUnavailable).toHaveBeenCalled();
+    });
+
+    test('switches OpenAI stream accounts before writing an error event', async () => {
+        const firstService = {
+            generateContentStream: jest.fn().mockImplementation(async function* () {
+                throw createGrpcCapacityError();
+            })
+        };
+        const secondService = {
+            generateContentStream: jest.fn().mockImplementation(async function* () {
+                yield {
+                    candidates: [{
+                        content: {
+                            role: 'model',
+                            parts: [{ text: 'capacity-stream-switch' }]
+                        }
+                    }]
+                };
+            })
+        };
+        mockGetApiServiceWithFallback.mockResolvedValueOnce({
+            service: secondService,
+            uuid: 'provider-ultra-2',
+            actualModel: 'gemini-3.1-flash-lite',
+            actualProviderType: 'gemini-antigravity',
+            serviceConfig: {}
+        });
+        const providerPoolManager = createCapacityPoolManager();
+        const res = new StreamFakeResponse();
+
+        await requestContext.run({ requestId: 'capacity-stream-switch' }, () => handleStreamRequest(
+            res,
+            firstService,
+            'gemini-3.1-flash-lite',
+            { contents: [] },
+            'openai',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-ultra-1',
+            'Ultra 1',
+            { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 1 }, maxRetries: 1 }
+        ));
+
+        expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(
+            expect.anything(),
+            'gemini-3.1-flash-lite',
+            expect.objectContaining({
+                excludeProviderUuids: ['provider-ultra-1'],
+                acquireSlot: true
+            })
+        );
+        expect(secondService.generateContentStream).toHaveBeenCalledTimes(1);
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+        expect(providerPoolManager.markAntigravityModelCapacityUnavailable).toHaveBeenCalled();
+    });
+
+    test('writes OpenAI stream rate_limit_error instead of server_error when capacity stays exhausted', async () => {
+        mockGetApiServiceWithFallback.mockRejectedValueOnce(new Error('No healthy provider found in pool'));
+        const firstService = {
+            generateContentStream: jest.fn().mockImplementation(async function* () {
+                throw createGrpcCapacityError();
+            })
+        };
+        const providerPoolManager = createCapacityPoolManager();
+        const res = new StreamFakeResponse();
+
+        await requestContext.run({ requestId: 'capacity-stream-exhausted' }, () => handleStreamRequest(
+            res,
+            firstService,
+            'gemini-3.1-flash-lite',
+            { contents: [] },
+            'openai',
+            'gemini-antigravity',
+            'none',
+            null,
+            providerPoolManager,
+            'provider-ultra-1',
+            'Ultra 1',
+            { CONFIG: { CREDENTIAL_SWITCH_MAX_RETRIES: 1 }, maxRetries: 1 }
+        ));
+
+        expect(parseSseErrorType(res.body)).toBe('rate_limit_error');
+        expect(res.body).not.toContain('"type":"server_error"');
+        expect(providerPoolManager.markAntigravityModelCapacityUnavailable).toHaveBeenCalled();
+    });
+
+    test('maps bubbled OpenAI chat-completions capacity errors to HTTP 429 in handleError', () => {
+        const res = new FakeResponse();
+        const error = createGrpcCapacityError();
+
+        handleError(
+            res,
+            error,
+            'gemini-antigravity',
+            null,
+            { url: '/gemini-antigravity/v1/chat/completions' }
+        );
+
+        expect(res.statusCode).toBe(429);
+        expect(res.statusCode).not.toBe(500);
+        expect(JSON.parse(res.body).error).toMatchObject({
+            type: 'rate_limit_error',
+            code: 'rate_limit_error'
+        });
     });
 });
