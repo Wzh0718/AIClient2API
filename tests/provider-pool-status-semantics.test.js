@@ -118,7 +118,7 @@ describe('provider status update semantics', () => {
         manager.markProviderHealthCheckFailed(
             'gemini-antigravity',
             { uuid: config.uuid },
-            'Health check timed out after 15000ms',
+            'Health check timed out after 60000ms',
             'gemini-3.1-flash-lite',
             true
         );
@@ -128,7 +128,7 @@ describe('provider status update semantics', () => {
             isHealthy: false,
             lastHealthCheckTime: '2026-08-25T07:11:58.000Z',
             lastHealthCheckModel: 'gemini-3.1-flash-lite',
-            lastErrorMessage: 'Health check timed out after 15000ms'
+            lastErrorMessage: 'Health check timed out after 60000ms'
         });
     });
 

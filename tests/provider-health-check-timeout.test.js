@@ -37,7 +37,7 @@ afterEach(() => {
 });
 
 describe('provider health check timeout and de-duplication', () => {
-    test('returns a timeout result after the hard 15 second deadline', async () => {
+    test('returns a timeout result after the hard 60 second deadline', async () => {
         const generateContent = jest.fn(() => new Promise(() => {}));
         const { manager, serviceAdapterFactory } = createManager(generateContent);
         const promise = manager._checkProviderHealth('gemini-antigravity', {
@@ -45,15 +45,15 @@ describe('provider health check timeout and de-duplication', () => {
             checkModelName: 'gemini-3.1-flash-lite'
         });
 
-        await jest.advanceTimersByTimeAsync(15_000);
+        await jest.advanceTimersByTimeAsync(60_000);
 
         await expect(promise).resolves.toMatchObject({
             success: false,
             modelName: 'gemini-3.1-flash-lite',
-            errorMessage: expect.stringMatching(/timed out/i)
+            errorMessage: expect.stringMatching(/timed out after 60000ms/i)
         });
         expect(serviceAdapterFactory).toHaveBeenCalledWith(expect.objectContaining({
-            HEALTH_CHECK_REQUEST_TIMEOUT_MS: 15_000
+            HEALTH_CHECK_REQUEST_TIMEOUT_MS: 60_000
         }));
     });
 
@@ -79,7 +79,7 @@ describe('provider health check timeout and de-duplication', () => {
         const config = { uuid: 'health-one', checkModelName: 'gemini-3.1-flash-lite' };
         const first = manager._checkProviderHealth('gemini-antigravity', config);
 
-        await jest.advanceTimersByTimeAsync(15_000);
+        await jest.advanceTimersByTimeAsync(60_000);
         await expect(first).resolves.toMatchObject({ success: false, timedOut: true });
 
         await expect(manager._checkProviderHealth('gemini-antigravity', config)).resolves.toMatchObject({

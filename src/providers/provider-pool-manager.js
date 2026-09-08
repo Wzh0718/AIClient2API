@@ -6251,7 +6251,7 @@ export class ProviderPoolManager {
         }
 
         // ========== 实际 API 健康检查（带超时保护）==========
-        const healthCheckTimeout = 15000;
+        const healthCheckTimeout = 60_000;
         const tempConfig = {
             ...this.globalConfig,
             ...providerConfig,
