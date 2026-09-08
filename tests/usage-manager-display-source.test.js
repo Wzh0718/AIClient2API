@@ -331,4 +331,23 @@ describe('usage manager display source regressions', () => {
         expect(source).toContain('enrichUsageResultsWithProviderConfig(usageResults, currentConfig, providerPoolManager)');
         expect(source).toContain('enrichProviderDataWithProviderConfig(providerType, usageResults, currentConfig, providerPoolManager);');
     });
+
+    test('Codex usage cards show subscription until next to the plan badge and hide empty values', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/usage-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+        const i18n = fs.readFileSync(path.join(process.cwd(), 'static/app/i18n.js'), 'utf8').replace(/\r\n/g, '\n');
+        const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-usage.css'), 'utf8').replace(/\r\n/g, '\n');
+        const cardStart = source.indexOf('function createInstanceUsageCard(instance, providerType) {');
+        const cardEnd = source.indexOf('card.querySelector(\'.usage-card-collapsed-summary\')', cardStart);
+        const cardBlock = source.slice(cardStart, cardEnd);
+
+        expect(cardBlock).toContain('${renderCodexSubscriptionUntil(instance)}');
+        expect(cardBlock.indexOf('collapsed-plan-badge')).toBeGreaterThanOrEqual(0);
+        expect(cardBlock.indexOf('${renderCodexSubscriptionUntil(instance)}')).toBeGreaterThan(cardBlock.indexOf('collapsed-plan-badge'));
+        expect(source).toContain("if (!label) return '';");
+        expect(source).toContain('function renderCodexSubscriptionUntil(instance = {}, now = Date.now())');
+        expect(source.slice(source.indexOf('function renderCodexSubscriptionUntil'))).not.toContain('summary.resetAt');
+        expect(i18n).toContain("'usage.card.subscriptionUntilExpired': '{time} · 已到期'");
+        expect(i18n).toContain("'usage.card.subscriptionUntilExpired': '{time} · expired'");
+        expect(css).toContain('.collapsed-subscription-until');
+    });
 });

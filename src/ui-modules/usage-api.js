@@ -4,6 +4,7 @@ import { serviceInstances, getServiceAdapter } from '../providers/adapter.js';
 import { usageService } from '../services/usage-service.js';
 import { readUsageCache, readUsageDisplayCache, writeUsageCache, writeUsageCacheUnlocked, readProviderUsageCache, updateProviderUsageCache } from './usage-cache.js';
 import { PROVIDER_MAPPINGS } from '../utils/provider-utils.js';
+import { mergeCodexSubscriptionWindow, readCodexSubscriptionWindowSync } from '../utils/codex-utils.js';
 import { MODEL_PROVIDER, getRequestBody } from '../utils/common.js';
 import { withFileLock } from '../utils/file-lock.js';
 import { normalizeAntigravityQuotaHealth, mergeCodexResetCreditsWithLastSuccessfulUsage, isPaidPlanDowngrade } from './usage-cache.js';
@@ -281,6 +282,16 @@ function getProviderCodexEmail(provider = {}) {
     return provider.codexEmail || provider.CODEX_EMAIL || provider.email || null;
 }
 
+function getProviderSubscriptionWindow(provider, providerType, instance = {}) {
+    return mergeCodexSubscriptionWindow(
+        {
+            subscription_active_start: instance.subscription_active_start || null,
+            subscription_active_until: instance.subscription_active_until || null
+        },
+        readCodexSubscriptionWindowSync(getProviderConfigFilePath(provider, providerType))
+    );
+}
+
 function getScheduledRecoveryError(provider, now = Date.now()) {
     if (provider?.isHealthy !== false || !provider?.scheduledRecoveryTime) {
         return null;
@@ -553,7 +564,7 @@ function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderDa
             });
             return {
                 ...cachedInstance,
-                ...Object.fromEntries(['name', 'codexAccountKey', 'codexAccountId', 'codexEmail', 'configFilePath', 'isHealthy', 'isDisabled', 'needsRefresh', 'scheduledRecoveryTime']
+                ...Object.fromEntries(['name', 'codexAccountKey', 'codexAccountId', 'codexEmail', 'configFilePath', 'isHealthy', 'isDisabled', 'needsRefresh', 'scheduledRecoveryTime', 'subscription_active_start', 'subscription_active_until']
                     .filter(key => instance[key] !== undefined && instance[key] !== null)
                     .map(key => [key, instance[key]])),
                 codexQuotaHealth: instance.codexQuotaHealth || cachedInstance.codexQuotaHealth || null,
@@ -592,6 +603,8 @@ function mergeProviderUsageWithLastSuccessfulCache(providerType, freshProviderDa
                 instance.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null
             ),
             configFilePath: instance.configFilePath || cachedInstance.configFilePath || null,
+            subscription_active_start: instance.subscription_active_start || cachedInstance.subscription_active_start || null,
+            subscription_active_until: instance.subscription_active_until || cachedInstance.subscription_active_until || null,
             isHealthy: instance.isHealthy,
             isDisabled: instance.isDisabled,
             needsRefresh: instance.needsRefresh,
@@ -662,6 +675,8 @@ function getCachedInstanceUsageFallback(providerType, uuid, instanceResult, cach
             instanceResult.antigravityQuotaHealth || cachedInstance.antigravityQuotaHealth || null
         ),
         configFilePath: instanceResult.configFilePath || cachedInstance.configFilePath || null,
+        subscription_active_start: instanceResult.subscription_active_start || cachedInstance.subscription_active_start || null,
+        subscription_active_until: instanceResult.subscription_active_until || cachedInstance.subscription_active_until || null,
         isHealthy: instanceResult.isHealthy,
         isDisabled: instanceResult.isDisabled,
         needsRefresh: instanceResult.needsRefresh,
@@ -725,6 +740,7 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
             codexQuotaHealth: provider.codexQuotaHealth || null,
             antigravityQuotaHealth: provider.antigravityQuotaHealth || null,
             configFilePath: getProviderConfigFilePath(provider, providerType),
+            ...getProviderSubscriptionWindow(provider, providerType),
             isHealthy: provider.isHealthy !== false,
             isDisabled: provider.isDisabled === true,
             needsRefresh: provider.needsRefresh === true,
@@ -867,6 +883,7 @@ function enrichProviderDataWithProviderConfig(providerType, providerData, curren
             codexQuotaHealth: instance.codexQuotaHealth || provider.codexQuotaHealth || null,
             antigravityQuotaHealth: instance.antigravityQuotaHealth || provider.antigravityQuotaHealth || null,
             configFilePath: instance.configFilePath || getProviderConfigFilePath(provider, providerType),
+            ...getProviderSubscriptionWindow(provider, providerType, instance),
             isHealthy: provider.isHealthy !== false,
             isDisabled: provider.isDisabled === true,
             needsRefresh: provider.needsRefresh === true,
@@ -936,6 +953,7 @@ async function resolveProviderInstance(currentConfig, providerPoolManager, provi
         codexQuotaHealth: provider.codexQuotaHealth || null,
         antigravityQuotaHealth: provider.antigravityQuotaHealth || null,
         configFilePath: getProviderConfigFilePath(provider, providerType),
+        ...getProviderSubscriptionWindow(provider, providerType),
         isHealthy: provider.isHealthy !== false,
         isDisabled: provider.isDisabled === true,
         needsRefresh: provider.needsRefresh === true,

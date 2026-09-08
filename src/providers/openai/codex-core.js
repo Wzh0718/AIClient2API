@@ -29,7 +29,7 @@ import { codexPromptCacheObservability } from './codex-prompt-cache-observabilit
 import requestContext from '../../utils/context.js';
 import { performance } from 'node:perf_hooks';
 import { getCodexOverloadRetryDelayMs, getCodexOverloadRetryMaxAttempts, getCodexRetryDelayMs, shouldRetryCodex429 } from './codex-retry-policy.js';
-import { getCodexModelIds, sanitizeCodexModelParameters, normalizeCodexReasoningEffort } from './codex-model-capabilities.js';
+import { extractPersistedCodexSubscriptionWindow, mergeCodexSubscriptionWindow } from '../../utils/codex-utils.js';
 
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
 const CODEX_MODELS = getCodexModelIds(baseModels);
@@ -251,6 +251,8 @@ export class CodexApiService {
         this.expiresAt = null;
         this.idToken = null;
         this.last_refresh = null;
+        this.subscription_active_start = null;
+        this.subscription_active_until = null;
         this.credsPath = null; // 记录本次加载/使用的凭据文件路径，确保刷新后写回同一文件
         this.accessTokenOnlyRefreshLogged = false;
         this.uuid = config.uuid; // 保存 uuid 用于号池管理
@@ -355,6 +357,9 @@ export class CodexApiService {
             this.email = creds.email;
             this.last_refresh = creds.last_refresh || this.last_refresh;
             this.expiresAt = new Date(creds.expired); // 注意：字段名是 expired
+            const subscriptionWindow = extractPersistedCodexSubscriptionWindow(creds);
+            this.subscription_active_start = subscriptionWindow.subscription_active_start;
+            this.subscription_active_until = subscriptionWindow.subscription_active_until;
 
             // 检查 token 是否需要刷新（异步触发，不阻塞加载）
             if (this.isExpiryDateNear()) {
@@ -1001,6 +1006,15 @@ export class CodexApiService {
             this.accountId = newTokens.account_id;
             this.email = newTokens.email;
             this.last_refresh = new Date().toISOString();
+            const subscriptionWindow = mergeCodexSubscriptionWindow(
+                {
+                    subscription_active_start: this.subscription_active_start,
+                    subscription_active_until: this.subscription_active_until
+                },
+                newTokens
+            );
+            this.subscription_active_start = subscriptionWindow.subscription_active_start;
+            this.subscription_active_until = subscriptionWindow.subscription_active_until;
 
             // 关键修复：refreshCodexTokensWithRetry 返回字段名是 `expired`（ISO string），不是 `expire`
             const expiredValue = newTokens.expired || newTokens.expire || newTokens.expires_at || newTokens.expiresAt;
@@ -1089,7 +1103,9 @@ export class CodexApiService {
                     last_refresh: this.last_refresh || new Date().toISOString(),
                     email: this.email,
                     type: 'codex',
-                    expired: this.expiresAt.toISOString()
+                    expired: this.expiresAt.toISOString(),
+                    subscription_active_start: this.subscription_active_start || null,
+                    subscription_active_until: this.subscription_active_until || null
                 },
                 null,
                 2

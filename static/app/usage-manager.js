@@ -1161,6 +1161,7 @@ function createInstanceUsageCard(instance, providerType) {
                 <i class="fas fa-chevron-right usage-toggle-icon"></i>
                 <span class="collapsed-name" title="${displayName} ${t('usage.clickToManage')}" onclick="event.stopPropagation(); window.jumpToProviderNode('${providerType}', '${instance.uuid}', event)">${displayName}</span>
                 ${summary.plan ? `<span class="collapsed-plan-badge ${planClass}${instance.subscriptionExpired ? ' is-expired' : ''}"${instance.subscriptionExpired ? ' title="历史订阅数据：Pro 订阅已过期"' : ''}>${summary.plan}${instance.subscriptionExpired ? '（已过期）' : ''}</span>` : ''}
+                ${renderCodexSubscriptionUntil(instance)}
                 ${renderCollapsedStatusIcons(instance, providerType)}
             </div>
             ${hasVisibleUsage ? `
@@ -1572,4 +1573,47 @@ function formatDate(str) {
     } catch (e) {
         return str;
     }
+}
+
+export function formatCodexSubscriptionUntilLabel(until, now = Date.now()) {
+    const untilMs = Date.parse(until);
+    if (!Number.isFinite(untilMs)) return '';
+
+    const parts = Object.fromEntries(
+        new Intl.DateTimeFormat('en-US', {
+            timeZone: 'Asia/Shanghai',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        }).formatToParts(new Date(untilMs)).map(part => [part.type, part.value])
+    );
+    const compact = `${parts.month}/${parts.day} ${parts.hour}:${parts.minute}`;
+    const diffMs = untilMs - Number(now);
+    if (diffMs <= 0) {
+        return t('usage.card.subscriptionUntilExpired', { time: compact });
+    }
+
+    const dayMs = 24 * 60 * 60 * 1000;
+    const hourMs = 60 * 60 * 1000;
+    if (diffMs < dayMs) {
+        return t('usage.card.subscriptionUntil', {
+            time: compact,
+            relative: t('usage.card.subscriptionRelativeHours', { count: Math.max(1, Math.round(diffMs / hourMs)) })
+        });
+    }
+
+    return t('usage.card.subscriptionUntil', {
+        time: compact,
+        relative: t('usage.card.subscriptionRelativeDays', { count: Math.max(1, Math.round(diffMs / dayMs)) })
+    });
+}
+
+function renderCodexSubscriptionUntil(instance = {}, now = Date.now()) {
+    const until = instance.subscription_active_until;
+    const label = formatCodexSubscriptionUntilLabel(until, now);
+    if (!label) return '';
+    const expired = Date.parse(until) <= Number(now) || instance.subscriptionExpired === true;
+    return `<span class="collapsed-subscription-until${expired ? ' is-expired' : ''}" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
 }

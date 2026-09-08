@@ -10,7 +10,7 @@ import { autoLinkProviderConfigs, replaceProviderCredentialPath } from '../servi
 import { CONFIG } from '../core/config-manager.js';
 import { configureAxiosProxy, parseProxyUrl } from '../utils/proxy-utils.js';
 import { resolveProxyPoolEntry } from '../utils/proxy-pool-store.js';
-import { buildCodexRedirectUri } from '../utils/codex-utils.js';
+import { attachCodexSubscriptionWindow, buildCodexRedirectUri } from '../utils/codex-utils.js';
 import { generateCodexCallbackPage } from './codex-oauth-response-page.js';
 
 /**
@@ -287,7 +287,7 @@ class CodexAuth {
         const claims = this.parseJWT(tokens.id_token);
 
         // 保存凭据（遵循 CLIProxyAPI 格式）
-        const credentials = {
+        const credentials = attachCodexSubscriptionWindow({
             id_token: tokens.id_token,
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
@@ -296,7 +296,7 @@ class CodexAuth {
             email: claims.email,
             type: 'codex',
             expired: new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString()
-        };
+        }, claims);
 
         // 保存凭据并获取路径
         const saveResult = await this.saveCredentials(credentials);
@@ -365,7 +365,7 @@ class CodexAuth {
         const claims = this.parseJWT(tokens.id_token);
 
         // 保存凭据（遵循 CLIProxyAPI 格式）
-        const credentials = {
+        const credentials = attachCodexSubscriptionWindow({
             id_token: tokens.id_token,
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
@@ -374,7 +374,7 @@ class CodexAuth {
             email: claims.email,
             type: 'codex',
             expired: new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString()
-        };
+        }, claims);
 
         await this.saveCredentials(credentials);
 
@@ -542,7 +542,7 @@ class CodexAuth {
             const tokens = response.data;
             const claims = this.parseJWT(tokens.id_token);
 
-            return {
+            return attachCodexSubscriptionWindow({
                 id_token: tokens.id_token,
                 access_token: tokens.access_token,
                 refresh_token: tokens.refresh_token || refreshToken,
@@ -551,7 +551,7 @@ class CodexAuth {
                 email: claims.email,
                 type: 'codex',
                 expired: new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString()
-            };
+            }, claims);
         } catch (error) {
             logger.error(`${CODEX_OAUTH_CONFIG.logPrefix} Token refresh failed:`, error.response?.data || error.message);
             throw new Error(`Failed to refresh tokens: ${error.response?.data?.error_description || error.message}`);
@@ -872,7 +872,7 @@ export async function batchImportCodexTokensStream(tokens, onProgress = null, sk
             }
 
             // 构建凭据对象
-            const credentials = {
+            const credentials = attachCodexSubscriptionWindow({
                 id_token: tokenData.id_token || '',
                 access_token: tokenData.access_token,
                 refresh_token: refreshToken,
@@ -882,7 +882,7 @@ export async function batchImportCodexTokensStream(tokens, onProgress = null, sk
                 type: 'codex',
                 expired,
                 access_token_only: !refreshToken
-            };
+            }, claims, tokenData);
 
             // 保存凭据
             const saveResult = await auth.saveCredentials(credentials);

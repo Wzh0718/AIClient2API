@@ -1,3 +1,5 @@
+import { extractCodexSubscriptionWindow, mergeCodexSubscriptionWindow } from '../utils/codex-utils.js';
+
 function isPlainObject(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -129,6 +131,10 @@ function normalizeCredential(raw, source, index, exportedAt = null) {
         expires_in: data.expires_in,
         claims
     });
+    const subscriptionWindow = mergeCodexSubscriptionWindow(
+        extractCodexSubscriptionWindow(data),
+        extractCodexSubscriptionWindow(claims)
+    );
 
     return {
         source,
@@ -142,7 +148,9 @@ function normalizeCredential(raw, source, index, exportedAt = null) {
         type: 'codex',
         last_refresh: cleanString(data.last_refresh || exportedAt) || new Date().toISOString(),
         expired,
-        access_token_only: !refreshToken
+        access_token_only: !refreshToken,
+        subscription_active_start: subscriptionWindow.subscription_active_start,
+        subscription_active_until: subscriptionWindow.subscription_active_until
     };
 }
 
