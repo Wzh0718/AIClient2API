@@ -197,6 +197,8 @@ export async function handleGetConfig(req, res, currentConfig) {
         REFRESH_CONCURRENCY_PER_PROVIDER: currentConfig.REFRESH_CONCURRENCY_PER_PROVIDER,
         providerFallbackChain: currentConfig.providerFallbackChain,
         modelFallbackMapping: currentConfig.modelFallbackMapping,
+        temporaryKeyModelRoutes: currentConfig.temporaryKeyModelRoutes || [],
+        workdayCalendars: currentConfig.workdayCalendars || {},
         antigravityElasticRouting: currentConfig.antigravityElasticRouting,
         PROXY_URL: currentConfig.PROXY_URL,
         PROXY_ENABLED_PROVIDERS: currentConfig.PROXY_ENABLED_PROVIDERS,
@@ -368,6 +370,8 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
         if (newConfig.REFRESH_CONCURRENCY_PER_PROVIDER !== undefined) currentConfig.REFRESH_CONCURRENCY_PER_PROVIDER = newConfig.REFRESH_CONCURRENCY_PER_PROVIDER;
         if (newConfig.providerFallbackChain !== undefined) currentConfig.providerFallbackChain = newConfig.providerFallbackChain;
         if (newConfig.modelFallbackMapping !== undefined) currentConfig.modelFallbackMapping = newConfig.modelFallbackMapping;
+        if (newConfig.temporaryKeyModelRoutes !== undefined) currentConfig.temporaryKeyModelRoutes = newConfig.temporaryKeyModelRoutes;
+        if (newConfig.workdayCalendars !== undefined) currentConfig.workdayCalendars = newConfig.workdayCalendars;
         if (newConfig.antigravityElasticRouting !== undefined) {
             currentConfig.antigravityElasticRouting = normalizeAntigravityElasticRoutingUpdate(
                 newConfig.antigravityElasticRouting,
@@ -560,6 +564,8 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
                 REFRESH_CONCURRENCY_PER_PROVIDER: currentConfig.REFRESH_CONCURRENCY_PER_PROVIDER,
                 providerFallbackChain: currentConfig.providerFallbackChain,
                 modelFallbackMapping: currentConfig.modelFallbackMapping,
+                temporaryKeyModelRoutes: currentConfig.temporaryKeyModelRoutes || [],
+                workdayCalendars: currentConfig.workdayCalendars || {},
                 antigravityElasticRouting: currentConfig.antigravityElasticRouting,
                 PROXY_URL: currentConfig.PROXY_URL,
                 PROXY_ENABLED_PROVIDERS: currentConfig.PROXY_ENABLED_PROVIDERS,

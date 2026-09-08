@@ -127,7 +127,7 @@
         "targetBlackout": {
           "timezone": "Asia/Shanghai",
           "calendar": "cn-statutory-workday",
-          "start": "10:00",
+          "start": "05:00",
           "end": "19:00",
           "modelFamilies": ["gpt-5.4", "gpt-5.3-codex-spark"],
           "fallbackProviderType": "openai-codex-oauth",

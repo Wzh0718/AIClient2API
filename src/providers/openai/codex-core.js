@@ -30,6 +30,7 @@ import requestContext from '../../utils/context.js';
 import { performance } from 'node:perf_hooks';
 import { getCodexOverloadRetryDelayMs, getCodexOverloadRetryMaxAttempts, getCodexRetryDelayMs, shouldRetryCodex429 } from './codex-retry-policy.js';
 import { extractPersistedCodexSubscriptionWindow, mergeCodexSubscriptionWindow } from '../../utils/codex-utils.js';
+import { getCodexModelIds, sanitizeCodexModelParameters, normalizeCodexReasoningEffort } from './codex-model-capabilities.js';
 
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
 const CODEX_MODELS = getCodexModelIds(baseModels);

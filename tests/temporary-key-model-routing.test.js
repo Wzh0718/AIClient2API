@@ -50,7 +50,7 @@ function createScheduledConfig(overrides = {}) {
     config.temporaryKeyModelRoutes[0].targetBlackout = {
         timezone: 'Asia/Shanghai',
         calendar: 'cn-statutory-workday',
-        start: '10:00',
+        start: '05:00',
         end: '19:00',
         modelFamilies: ['gpt-5.4', 'gpt-5.3-codex-spark'],
         fallbackProviderType: 'openai-codex-oauth',
@@ -214,8 +214,8 @@ describe('temporary per-key model routing', () => {
     });
 
     test.each([
-        ['2026-08-18T01:59:59.000Z', false],
-        ['2026-08-18T02:00:00.000Z', true],
+        ['2026-08-17T20:59:59.000Z', false],
+        ['2026-08-17T21:00:00.000Z', true],
         ['2026-08-18T10:59:59.000Z', true],
         ['2026-08-18T11:00:00.000Z', false]
     ])('uses a Beijing half-open blackout window at %s', (now, expectedBlackout) => {

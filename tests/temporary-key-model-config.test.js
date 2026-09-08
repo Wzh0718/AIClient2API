@@ -40,7 +40,7 @@ describe('temporary key model route configuration', () => {
                 targetBlackout: {
                     timezone: 'Asia/Shanghai',
                     calendar: 'cn-statutory-workday',
-                    start: '10:00',
+                    start: '05:00',
                     end: '19:00',
                     modelFamilies: ['gpt-5.4', 'gpt-5.3-codex-spark'],
                     fallbackProviderType: 'openai-codex-oauth',
@@ -49,5 +49,22 @@ describe('temporary key model route configuration', () => {
             }
         ]);
         expect(JSON.stringify(example.temporaryKeyModelRoutes)).not.toContain('maki_');
+    });
+
+    test('persists temporary routes and workday calendars through UI config save', () => {
+        const source = fs.readFileSync('src/ui-modules/config-api.js', 'utf8');
+        const saveBlockStart = source.indexOf('const configToSave = {');
+        const saveBlockEnd = source.indexOf('await atomicWriteFile(configPath', saveBlockStart);
+        const saveBlock = source.slice(saveBlockStart, saveBlockEnd);
+        const getBlockStart = source.indexOf('const safeConfig = {');
+        const getBlockEnd = source.indexOf('res.writeHead(200', getBlockStart);
+        const getBlock = source.slice(getBlockStart, getBlockEnd);
+
+        expect(saveBlock).toContain('temporaryKeyModelRoutes: currentConfig.temporaryKeyModelRoutes || []');
+        expect(saveBlock).toContain('workdayCalendars: currentConfig.workdayCalendars || {}');
+        expect(getBlock).toContain('temporaryKeyModelRoutes: currentConfig.temporaryKeyModelRoutes || []');
+        expect(getBlock).toContain('workdayCalendars: currentConfig.workdayCalendars || {}');
+        expect(source).toContain('if (newConfig.temporaryKeyModelRoutes !== undefined) currentConfig.temporaryKeyModelRoutes = newConfig.temporaryKeyModelRoutes;');
+        expect(source).toContain('if (newConfig.workdayCalendars !== undefined) currentConfig.workdayCalendars = newConfig.workdayCalendars;');
     });
 });
