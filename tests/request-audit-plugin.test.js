@@ -279,6 +279,79 @@ describe('request audit plugin', () => {
     await waitFor(() => expect(rawCaptureStore.capture).toHaveBeenCalledTimes(1));
   });
 
+  test('cache fingerprints do not skip finalize raw capture when execution never captured', async () => {
+    const auditStore = { append: jest.fn(), cleanup: jest.fn() };
+    const rawCaptureStore = { capture: jest.fn(async () => ({ captured: true })), cleanup: jest.fn() };
+    await plugin.init({
+      REQUEST_AUDIT_ENABLED: true,
+      REQUEST_AUDIT_RAW_CAPTURE_ENABLED: true,
+      REQUEST_AUDIT_RAW_CAPTURE_KEY_HASHES: ['sha256:1f223db5f9b186a5'],
+      _requestAuditStore: auditStore,
+      _requestAuditRawCaptureStore: rawCaptureStore
+    });
+
+    await plugin.hooks.onUnaryResponse({
+      requestId: 'req-cache-not-captured',
+      nativeResponse: { usage: { prompt_tokens: 10, total_tokens: 10 } }
+    });
+    await plugin.hooks.onContentGenerated({
+      _monitorRequestId: 'req-cache-not-captured',
+      potluckApiKey: 'maki_secret_key',
+      originalRequestBody: { input: 'desktop prompt that must be captured' },
+      model: 'gpt-6-astra',
+      cache: { keySource: 'shared_template', instructionsHash: 'sha256:c567a425552768e7' }
+    });
+
+    await waitFor(() => expect(auditStore.append).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(rawCaptureStore.capture).toHaveBeenCalledTimes(1));
+    expect(rawCaptureStore.capture.mock.calls[0][0].originalRequestBody.input).toBe('desktop prompt that must be captured');
+  });
+
+  test('does not finalize-capture a compact model-only body from the control worker', async () => {
+    const auditStore = { append: jest.fn(), cleanup: jest.fn() };
+    const rawCaptureStore = { capture: jest.fn(async () => ({ captured: true })), cleanup: jest.fn() };
+    await plugin.init({
+      REQUEST_AUDIT_ENABLED: true,
+      REQUEST_AUDIT_RAW_CAPTURE_ENABLED: true,
+      REQUEST_AUDIT_RAW_CAPTURE_KEY_HASHES: ['sha256:1f223db5f9b186a5'],
+      _requestAuditStore: auditStore,
+      _requestAuditRawCaptureStore: rawCaptureStore
+    });
+
+    await plugin.hooks.onContentGenerated({
+      _monitorRequestId: 'req-compact-model-only',
+      potluckApiKey: 'maki_secret_key',
+      originalRequestBody: { model: 'gpt-6-astra' },
+      processedRequestBody: { model: 'gpt-6-astra' },
+      model: 'gpt-6-astra',
+      cache: { keySource: 'shared_template' }
+    });
+
+    await waitFor(() => expect(auditStore.append).toHaveBeenCalledTimes(1));
+    expect(rawCaptureStore.capture).not.toHaveBeenCalled();
+  });
+
+  test('execution-local init still captures prepared upstream requests', async () => {
+    const rawCaptureStore = { capture: jest.fn(async () => ({ captured: true })), cleanup: jest.fn() };
+    await plugin.init({
+      REQUEST_AUDIT_ENABLED: true,
+      REQUEST_AUDIT_RAW_CAPTURE_ENABLED: true,
+      REQUEST_AUDIT_RAW_CAPTURE_KEY_HASHES: ['sha256:1f223db5f9b186a5'],
+      _requestAuditExecutionLocalOnly: true,
+      _requestAuditRawCaptureStore: rawCaptureStore
+    });
+
+    await plugin.hooks.onUpstreamRequestPrepared({
+      requestId: 'req-execution-local',
+      potluckApiKey: 'maki_secret_key',
+      originalRequestBody: { input: 'desktop prompt' },
+      upstreamRequestBody: { input: 'prepared desktop prompt' }
+    });
+
+    await waitFor(() => expect(rawCaptureStore.capture).toHaveBeenCalledTimes(1));
+    expect(rawCaptureStore.capture.mock.calls[0][0].processedRequestBody.input).toBe('prepared desktop prompt');
+  });
+
   test('applies a newer raw capture revision on an execution worker', async () => {
     const auditStore = { append: jest.fn(), cleanup: jest.fn() };
     const rawCaptureStore = { capture: jest.fn(async () => ({ captured: true })), cleanup: jest.fn(), updateOptions: jest.fn() };

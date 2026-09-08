@@ -8,6 +8,7 @@ import { buildBoundedRawCaptureEvent, RequestAuditRawCaptureStore, shouldCapture
 const pendingUsage = new Map();
 const pendingAuditContexts = new Map();
 const finalizedRequestIds = new Map();
+const executionCapturedRequestIds = new Map();
 const auditQueue = [];
 const executionRawCaptureQueue = [];
 let auditQueueBytes = 0;
@@ -151,6 +152,25 @@ function rememberFinalizedRequest(requestId) {
     }
 }
 
+function rememberExecutionRawCapture(requestId) {
+    if (!requestId) return;
+    executionCapturedRequestIds.set(requestId, Date.now());
+    while (executionCapturedRequestIds.size > MAX_PENDING_USAGE_ENTRIES) {
+        executionCapturedRequestIds.delete(executionCapturedRequestIds.keys().next().value);
+    }
+}
+
+function isCapturableRequestBody(body) {
+    if (!body || typeof body !== 'object') return false;
+    return Object.keys(body).some(key => key !== 'model');
+}
+
+function hasCapturableRequestBody(context = {}) {
+    return isCapturableRequestBody(context.originalRequestBody)
+        || isCapturableRequestBody(context.processedRequestBody)
+        || isCapturableRequestBody(context.upstreamRequestBody);
+}
+
 async function enqueueFinalAudit(context = {}) {
     const requestId = getRequestId(context);
     if (!requestId || finalizedRequestIds.has(requestId)) return;
@@ -168,8 +188,8 @@ async function enqueueFinalAudit(context = {}) {
         timestamp: new Date().toISOString()
     });
     let rawCaptureEvent = null;
-    const alreadyCapturedByExecutionWorker = Boolean(context.cache);
-    if (!alreadyCapturedByExecutionWorker && shouldCaptureRawRequest(rawCaptureOptions, event) && rawCaptureStore) {
+    const alreadyCapturedByExecutionWorker = executionCapturedRequestIds.has(requestId);
+    if (!alreadyCapturedByExecutionWorker && hasCapturableRequestBody(context) && shouldCaptureRawRequest(rawCaptureOptions, event) && rawCaptureStore) {
         try {
             rawCaptureEvent = buildBoundedRawCaptureEvent(event, context, rawCaptureStore.maxBytes);
         } catch {
@@ -205,6 +225,9 @@ function cleanupPendingUsage() {
     }
     for (const [requestId, finalizedAt] of finalizedRequestIds.entries()) {
         if (finalizedAt < cutoff) finalizedRequestIds.delete(requestId);
+    }
+    for (const [requestId, capturedAt] of executionCapturedRequestIds.entries()) {
+        if (capturedAt < cutoff) executionCapturedRequestIds.delete(requestId);
     }
 }
 
@@ -516,13 +539,10 @@ const requestAuditPlugin = {
         enabled = config.REQUEST_AUDIT_ENABLED !== false && config.REQUEST_AUDIT_ENABLED !== 'false';
         acceptingAuditContext = enabled;
         destroyPromise = null;
+        executionCapturedRequestIds.clear();
         auditLossCounts = new Map();
         backgroundFailureCounts = new Map();
         auditQueueBytes = 0;
-        store = config._requestAuditStore || getAuditStore(config);
-        setAuditStore(store);
-        const materializedStore = config._requestAuditAnalysisStore || getAnalysisStore(config);
-        setAnalysisStore(materializedStore);
         rawCaptureStore = config._requestAuditRawCaptureStore || new RequestAuditRawCaptureStore({
             dir: config.REQUEST_AUDIT_RAW_CAPTURE_DIR,
             ttlMinutes: config.REQUEST_AUDIT_RAW_CAPTURE_TTL_MINUTES || 60,
@@ -539,6 +559,15 @@ const requestAuditPlugin = {
         rawCaptureEventSink = config._requestAuditRawCaptureEventSink || null;
         rawCaptureConfigTarget = config;
         setRawCaptureController(createRawCaptureController());
+        if (config._requestAuditExecutionLocalOnly === true) {
+            store = config._requestAuditStore || null;
+            logger.info(`[Request Audit] Initialized execution-local raw capture enabled=${enabled}`);
+            return;
+        }
+        store = config._requestAuditStore || getAuditStore(config);
+        setAuditStore(store);
+        const materializedStore = config._requestAuditAnalysisStore || getAnalysisStore(config);
+        setAnalysisStore(materializedStore);
         lastCleanupAt = 0;
         startCleanupTimer();
         cleanupRawCaptureOnInit();
@@ -575,6 +604,7 @@ const requestAuditPlugin = {
         pendingUsage.clear();
         pendingAuditContexts.clear();
         finalizedRequestIds.clear();
+        executionCapturedRequestIds.clear();
         if (cleanupTimer) {
             clearInterval(cleanupTimer);
             cleanupTimer = null;
@@ -641,6 +671,7 @@ const requestAuditPlugin = {
                     processedRequestBody: context.upstreamRequestBody
                 }
             });
+            rememberExecutionRawCapture(event.requestId);
             scheduleExecutionRawCapture();
         },
 

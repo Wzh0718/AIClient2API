@@ -272,7 +272,8 @@ class PluginManager {
             const pluginConfig = this.pluginsConfig.plugins[name] || {};
             const enabled = pluginConfig.enabled !== false; // 默认启用
             const executionSkipped = this.runtimeRole === 'execution'
-                && ['request-audit', 'model-usage-stats'].includes(name);
+                && name === 'model-usage-stats';
+            const executionLocalRawCapture = this.runtimeRole === 'execution' && name === 'request-audit';
             
             if (!enabled || executionSkipped) {
                 logger.info(`[PluginManager] Plugin "${name}" is disabled, skipping init`);
@@ -281,7 +282,10 @@ class PluginManager {
 
             try {
                 if (typeof plugin.init === 'function') {
-                    await this.executePluginOperation(plugin, 'init', () => plugin.init(config));
+                    const pluginInitConfig = executionLocalRawCapture
+                        ? { ...config, _requestAuditExecutionLocalOnly: true }
+                        : config;
+                    await this.executePluginOperation(plugin, 'init', () => plugin.init(pluginInitConfig));
                     logger.info(`[PluginManager] Initialized plugin: ${name}`);
                 }
                 plugin._enabled = true;

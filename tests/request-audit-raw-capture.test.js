@@ -95,6 +95,28 @@ describe('request audit raw capture', () => {
     expect(listFiles(dir).filter(file => file.endsWith('.json.gz'))).toHaveLength(1);
   });
 
+  test('does not overwrite an existing raw capture with a later compact body', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-raw-keep-'));
+    const store = new RequestAuditRawCaptureStore({ dir, maxBytes: 1024 * 1024 });
+
+    const first = await store.capture({
+      requestId: 'keep-existing',
+      timestamp: '2026-09-07T12:09:30.000Z',
+      originalRequestBody: { input: 'full prepared desktop prompt' }
+    });
+    const second = await store.capture({
+      requestId: 'keep-existing',
+      timestamp: '2026-09-07T12:10:01.000Z',
+      originalRequestBody: { model: 'gpt-6-astra' }
+    });
+
+    expect(first.captured).toBe(true);
+    expect(second).toMatchObject({ captured: false, skipped: 'already_exists' });
+    const raw = zlib.gunzipSync(fs.readFileSync(first.path)).toString('utf8');
+    expect(raw).toContain('full prepared desktop prompt');
+    expect(raw).not.toContain('"originalRequestBody":{"model":"gpt-6-astra"}');
+  });
+
   test('preserves prompt text while redacting credentials and replacing binary payloads', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-raw-redaction-'));
     const store = new RequestAuditRawCaptureStore({ dir, maxBytes: 1024 * 1024 });

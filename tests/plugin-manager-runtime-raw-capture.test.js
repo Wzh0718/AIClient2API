@@ -23,6 +23,29 @@ describe('execution worker local raw capture hook', () => {
     expect(localHook).toHaveBeenCalledWith({ requestId: 'one' });
   });
 
+  test('initializes request-audit on execution workers so local raw capture can run', async () => {
+    const manager = new PluginManager();
+    manager.runtimeRole = 'execution';
+    manager.runtimeHookBridge = { handle: jest.fn() };
+    manager.loadConfig = jest.fn(async () => {
+      manager.pluginsConfig = { plugins: { 'request-audit': { enabled: true } } };
+    });
+    const init = jest.fn(async () => {});
+    manager.register({
+      name: 'request-audit',
+      init,
+      hooks: { onUpstreamRequestPrepared: jest.fn() }
+    });
+
+    await manager.initAll({ REQUEST_AUDIT_RAW_CAPTURE_ENABLED: true });
+
+    expect(init).toHaveBeenCalledWith(expect.objectContaining({
+      REQUEST_AUDIT_RAW_CAPTURE_ENABLED: true,
+      _requestAuditExecutionLocalOnly: true
+    }));
+    expect(manager.isEnabled('request-audit')).toBe(true);
+  });
+
   test('executes one durable usage projection and propagates its failure', async () => {
     const manager = new PluginManager();
     const potluckHook = jest.fn().mockResolvedValue(undefined);

@@ -262,6 +262,9 @@ export class RequestAuditRawCaptureStore {
             if (stats.totalBytes >= this.maxTotalBytes) return { captured: false, stopReason: 'max_total_bytes' };
             const filePath = this.getFilePath(event);
             await fsp.mkdir(path.dirname(filePath), { recursive: true });
+            if (fs.existsSync(filePath)) {
+                return { captured: false, skipped: 'already_exists', path: filePath };
+            }
             const boundedEvent = buildBoundedRawCaptureEvent(event, {
                 originalRequestBody: event.originalRequestBody,
                 processedRequestBody: event.processedRequestBody
