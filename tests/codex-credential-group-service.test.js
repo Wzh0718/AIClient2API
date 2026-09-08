@@ -57,12 +57,12 @@ describe('Codex credential group sizing and capacity', () => {
         [0, 0],
         [1, 1],
         [2, 2],
-        [3, 2],
-        [4, 2],
-        [5, 3],
-        [6, 3],
-        [9, 5],
-        [10, 5]
+        [3, 3],
+        [4, 4],
+        [5, 5],
+        [6, 6],
+        [9, 9],
+        [10, 10]
     ])('uses %i healthy credentials to create %i groups', (credentials, groups) => {
         expect(calculateTargetGroupCount(credentials)).toBe(groups);
     });
@@ -91,7 +91,7 @@ describe('Codex credential group sizing and capacity', () => {
         });
     });
 
-    test('creates balanced groups with no more than two credentials each', () => {
+    test('creates one group per credential', () => {
         const suggestion = generateCredentialGroupSuggestion({
             credentials: createCredentials(10),
             keys: [],
@@ -99,19 +99,19 @@ describe('Codex credential group sizing and capacity', () => {
         });
 
         expect(suggestion.applicable).toBe(true);
-        expect(suggestion.groups.map(group => group.credentialUuids.length)).toEqual([2, 2, 2, 2, 2]);
-        expect(suggestion.groups.every(group => group.credentialUuids.length <= 2)).toBe(true);
+        expect(suggestion.groups.map(group => group.credentialUuids.length)).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+        expect(suggestion.groups.every(group => group.credentialUuids.length === 1)).toBe(true);
         expect(new Set(suggestion.groups.flatMap(group => group.credentialUuids)).size).toBe(10);
     });
 
-    test('keeps a singleton final group for an odd credential count', () => {
+    test('creates one group per credential when the count is odd', () => {
         const suggestion = generateCredentialGroupSuggestion({
             credentials: createCredentials(5),
             keys: [],
             now: NOW
         });
 
-        expect(suggestion.groups.map(group => group.credentialUuids.length)).toEqual([2, 2, 1]);
+        expect(suggestion.groups.map(group => group.credentialUuids.length)).toEqual([1, 1, 1, 1, 1]);
     });
 
     test('reports an oversized manually locked group instead of silently splitting it', () => {
@@ -128,6 +128,26 @@ describe('Codex credential group sizing and capacity', () => {
         expect(suggestion.reason).toBe('MANUAL_GROUP_EXCEEDS_MAX_SIZE');
         expect(suggestion.anomalies).toEqual(expect.arrayContaining([
             expect.objectContaining({ reason: 'MANUAL_GROUP_EXCEEDS_MAX_SIZE' })
+        ]));
+    });
+
+    test('reports a locked two-credential group as oversized', () => {
+        const suggestion = generateCredentialGroupSuggestion({
+            credentials: createCredentials(2),
+            keys: [],
+            currentConfig: {
+                groups: [{ id: 'group-1', manualLock: true, credentialUuids: ['cred-1', 'cred-2'] }]
+            },
+            now: NOW
+        });
+
+        expect(suggestion.applicable).toBe(false);
+        expect(suggestion.reason).toBe('MANUAL_GROUP_EXCEEDS_MAX_SIZE');
+        expect(suggestion.anomalies).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                reason: 'MANUAL_GROUP_EXCEEDS_MAX_SIZE',
+                credentialCount: 2
+            })
         ]));
     });
 
@@ -376,7 +396,7 @@ describe('Codex key demand and capacity-aware assignment', () => {
             .map(group => suggestion.keyAssignments.filter(item => item.primaryGroupId === group.id).length)
             .sort((a, b) => b - a);
 
-        expect(counts).toEqual([2, 2, 2]);
+        expect(counts).toEqual([1, 1, 1, 1, 1, 1]);
         expect(suggestion.keyAssignments.every(item => item.demand.isNew)).toBe(true);
     });
 
@@ -823,7 +843,7 @@ describe('Codex credential group suggestion validation', () => {
             'automatic group exceeds the maximum size',
             {
                 applicable: true,
-                groups: [{ id: 'group-1', credentialUuids: ['cred-1', 'cred-2', 'cred-3'] }],
+                groups: [{ id: 'group-1', credentialUuids: ['cred-1', 'cred-2'] }],
                 keyAssignments: []
             },
             'GROUP_EXCEEDS_MAX_SIZE'

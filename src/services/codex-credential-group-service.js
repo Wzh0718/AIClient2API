@@ -7,7 +7,7 @@ const DEFAULT_HISTORY_DAYS = 7;
 const DEFAULT_UNKNOWN_CAPACITY = 0.5;
 const STORE_VERSION = 1;
 const MAX_RETAINED_REVISIONS = 2;
-const MAX_CREDENTIALS_PER_GROUP = 2;
+const MAX_CREDENTIALS_PER_GROUP = 1;
 const DEMAND_MODEL_FILTER = 'gpt-*';
 const DEMAND_MODEL_FILTER_CASE_SENSITIVE = false;
 
@@ -242,7 +242,7 @@ export function validateCredentialGroupSuggestion(suggestion, options = {}) {
         if (!group.manualLock && group.credentialUuids.length > MAX_CREDENTIALS_PER_GROUP) {
             throw createCredentialGroupError(
                 'INVALID_CREDENTIAL_GROUP_CONFIG',
-                'Automatic credential groups may contain at most two credentials',
+                'Automatic credential groups may contain at most one credential',
                 { reason: 'GROUP_EXCEEDS_MAX_SIZE' }
             );
         }
@@ -335,9 +335,7 @@ export function validateCredentialGroupSuggestion(suggestion, options = {}) {
 }
 
 export function calculateTargetGroupCount(healthyCredentialCount) {
-    const count = Math.max(0, Math.floor(toFiniteNumber(healthyCredentialCount, 0)));
-    if (count <= 2) return count;
-    return Math.ceil(count / MAX_CREDENTIALS_PER_GROUP);
+    return Math.max(0, Math.floor(toFiniteNumber(healthyCredentialCount, 0)));
 }
 
 export function calculateCredentialCapacity(credential = {}) {
