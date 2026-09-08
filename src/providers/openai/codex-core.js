@@ -33,7 +33,7 @@ import { getCodexModelIds, sanitizeCodexModelParameters, normalizeCodexReasoning
 
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
 const CODEX_MODELS = getCodexModelIds(baseModels);
-const CODEX_VERSION = '0.153.3';
+const CODEX_VERSION = '0.153.4';
 export const IMAGE_MODELS = new Set(['gpt-image-2']);
 const IMAGE_GENERATION_FUNCTION_NAMES = new Set(['image_gen.imagegen', 'image_gen__imagegen']);
 const IMAGE_TOOL_STRING_FIELDS = ['size', 'quality', 'background', 'output_format', 'input_fidelity', 'moderation'];

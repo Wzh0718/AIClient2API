@@ -41,8 +41,8 @@ describe('Codex session cache key handling', () => {
         try {
             const headers = service.buildHeaders(null, false);
 
-            expect(headers.version).toBe('0.153.3');
-            expect(headers['user-agent']).toContain('codex-tui/0.153.3');
+            expect(headers.version).toBe('0.153.4');
+            expect(headers['user-agent']).toContain('codex-tui/0.153.4');
         } finally {
             service.stopCacheCleanup();
         }
