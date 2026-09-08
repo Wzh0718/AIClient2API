@@ -53,6 +53,7 @@ const ANTIGRAVITY_ELASTIC_DEFAULTS = Object.freeze({
     recoveryJitterMinMs: 50,
     recoveryJitterMaxMs: 250
 });
+const STUCK_NEEDS_REFRESH_SWEEP_MS = 10 * 60 * 1000;
 
 function isCodexQuotaExhaustionMessage(value) {
     const message = String(value || '').toLowerCase();
@@ -665,6 +666,7 @@ export class ProviderPoolManager {
         this.refreshShutdownPromise = null;
         this.activeRefreshTasks = new Set();
         this.activeRefreshOperations = new Set();
+        this.refreshRetryTimers = new Map();
         
         // 用于并发选点时的原子排序辅助（自增序列）
         this._selectionSequence = 0;
@@ -978,6 +980,7 @@ export class ProviderPoolManager {
      */
     async checkAndRefreshExpiringNodes() {
         this._log('info', 'Checking nodes for approaching expiration dates using provider adapters...');
+        this._sweepStuckNeedsRefresh();
         
         for (const providerType in this.providerStatus) {
             const providers = this.providerStatus[providerType];
@@ -1116,10 +1119,12 @@ export class ProviderPoolManager {
             return;
         }
 
-        // 判断提供商池内的总可用节点数，小于5个时，不等待缓冲，直接加入刷新队列
+        // 强制刷新或池内可调度节点不足时，跳过缓冲直接入队
         const healthyCount = this.getHealthyCount(providerType);
-        if (healthyCount < 5) {
-            this._log('info', `Provider ${providerType} has only ${healthyCount} healthy nodes. Bypassing buffer and enqueuing refresh for ${this._getDisplayName(providerStatus.config)} immediately.`);
+        if (force || healthyCount < 5) {
+            if (!force) {
+                this._log('info', `Provider ${providerType} has only ${healthyCount} healthy nodes. Bypassing buffer and enqueuing refresh for ${this._getDisplayName(providerStatus.config)} immediately.`);
+            }
             this._enqueueRefreshImmediate(providerType, providerStatus, force);
             return;
         }
@@ -1365,6 +1370,11 @@ export class ProviderPoolManager {
 
         this.refreshShutdownRequested = true;
 
+        for (const timer of this.refreshRetryTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.refreshRetryTimers.clear();
+
         for (const timer of Object.values(this.refreshBufferTimers)) {
             clearTimeout(timer);
         }
@@ -1416,7 +1426,9 @@ export class ProviderPoolManager {
                 this.refreshTaskTimeoutMs + 30000
             );
             if (refreshFence === null) {
-                this._log('debug', `Token refresh already owned by another worker for ${this._getDisplayName(config)}`);
+                this._log('warn', `Token refresh already owned by another worker for ${this._getDisplayName(config)}; retrying after fence TTL`);
+                config.lastRefreshAttemptTime = Date.now();
+                this._scheduleRefreshRetryAfterFence(providerType, providerStatus);
                 return false;
             }
             const refreshFenceTtl = this.refreshTaskTimeoutMs + 30000;
@@ -2183,7 +2195,52 @@ export class ProviderPoolManager {
      * 获取指定类型的健康节点数量
      */
     getHealthyCount(providerType) {
-        return (this.providerStatus[providerType] || []).filter(p => p.config.isHealthy && !p.config.isDisabled).length;
+        return (this.providerStatus[providerType] || []).filter(p =>
+            p.config.isHealthy && !p.config.isDisabled && !p.config.needsRefresh
+        ).length;
+    }
+
+    /**
+     * Re-enqueue a refresh after another worker's fence TTL, so a lost in-memory
+     * queue cannot leave needsRefresh stuck forever.
+     * @private
+     */
+    _scheduleRefreshRetryAfterFence(providerType, providerStatus) {
+        const uuid = providerStatus?.uuid;
+        if (!uuid || this.refreshShutdownRequested) return;
+        if (this.refreshRetryTimers.has(uuid)) return;
+
+        const delay = this.refreshTaskTimeoutMs + 30000;
+        const timer = setTimeout(() => {
+            this.refreshRetryTimers.delete(uuid);
+            if (this.refreshShutdownRequested) return;
+            if (providerStatus.config?.needsRefresh !== true) return;
+            this._enqueueRefresh(providerType, providerStatus, true);
+        }, delay);
+        timer.unref?.();
+        this.refreshRetryTimers.set(uuid, timer);
+    }
+
+    /**
+     * Re-queue credentials that were marked needsRefresh but never actually started
+     * a refresh (refreshCount stays 0) for longer than the stuck threshold.
+     * @private
+     */
+    _sweepStuckNeedsRefresh(now = Date.now()) {
+        for (const providerType in this.providerStatus) {
+            for (const providerStatus of this.providerStatus[providerType] || []) {
+                const config = providerStatus.config;
+                if (!config || config.isDisabled || config.needsRefresh !== true) continue;
+                if ((config.refreshCount || 0) !== 0) continue;
+                const lastActivity = Math.max(
+                    Date.parse(config.lastHealthStateTime || '') || 0,
+                    Number(config.lastRefreshAttemptTime || 0)
+                );
+                if (lastActivity > 0 && (now - lastActivity) < STUCK_NEEDS_REFRESH_SWEEP_MS) continue;
+                this._log('warn', `Sweeping stuck needsRefresh for ${this._getDisplayName(config)} (${providerType})`);
+                this.refreshNode(providerType, config.uuid, true);
+            }
+        }
     }
 
     /**
@@ -5941,6 +5998,7 @@ export class ProviderPoolManager {
      * It respects provider-level isDisabled flag.
      */
     async performHealthChecks() {
+        this._sweepStuckNeedsRefresh();
         const scheduledConfig = this.globalConfig?.SCHEDULED_HEALTH_CHECK;
         const checkStartTime = Date.now();
         

@@ -12,7 +12,10 @@ jest.mock('../src/providers/adapter.js', () => ({
 jest.mock('../src/ui-modules/event-broadcast.js', () => ({ broadcastEvent: jest.fn() }));
 
 describe('provider refresh fencing', () => {
-    afterEach(() => jest.clearAllMocks());
+    afterEach(() => {
+        jest.clearAllMocks();
+        jest.useRealTimers();
+    });
 
     test('does not refresh when another worker owns the refresh lock', async () => {
         const coordination = { acquireRefreshFence: jest.fn(async () => null) };
@@ -22,6 +25,7 @@ describe('provider refresh fencing', () => {
         });
         await expect(manager._refreshNodeToken('test', manager.providerStatus.test[0], true)).resolves.toBe(false);
         expect(coordination.acquireRefreshFence).toHaveBeenCalled();
+        manager.shutdownRefreshQueue();
     });
 
     test('validates the fencing token before accepting refreshed state', async () => {
@@ -211,5 +215,116 @@ describe('provider refresh fencing', () => {
         await expect(manager._refreshNodeToken('gemini-antigravity', status, true))
             .rejects.toMatchObject({ code: 'REFRESH_POSTCONDITION_FAILED' });
         expect(status.config.needsRefresh).toBe(true);
+    });
+
+    test('does not increment refreshCount when another worker owns the refresh lock', async () => {
+        jest.useFakeTimers();
+        const coordination = { acquireRefreshFence: jest.fn(async () => null) };
+        const manager = new ProviderPoolManager({ test: [{ uuid: 'one', needsRefresh: true }] }, {
+            coordination,
+            persistenceEnabled: false,
+            globalConfig: { REFRESH_TASK_TIMEOUT_MS: 1000 }
+        });
+        const status = manager.providerStatus.test[0];
+        status.config.needsRefresh = true;
+        status.config.refreshCount = 0;
+        const enqueueSpy = jest.spyOn(manager, '_enqueueRefresh').mockImplementation(() => {});
+
+        await expect(manager._refreshNodeToken('test', status, true)).resolves.toBe(false);
+        expect(status.config.refreshCount || 0).toBe(0);
+        expect(status.config.needsRefresh).toBe(true);
+        expect(status.config.lastRefreshAttemptTime).toEqual(expect.any(Number));
+        expect(enqueueSpy).not.toHaveBeenCalled();
+
+        await jest.advanceTimersByTimeAsync(1000 + 30000);
+        expect(enqueueSpy).toHaveBeenCalledWith('test', status, true);
+
+        enqueueSpy.mockRestore();
+        manager.shutdownRefreshQueue();
+        jest.useRealTimers();
+    });
+
+    test('getHealthyCount excludes nodes that still need a token refresh', () => {
+        const manager = new ProviderPoolManager({
+            test: [
+                { uuid: 'healthy', isHealthy: true },
+                { uuid: 'refreshing', isHealthy: true, needsRefresh: true },
+                { uuid: 'disabled', isHealthy: true, isDisabled: true },
+                { uuid: 'unhealthy', isHealthy: false }
+            ]
+        }, { persistenceEnabled: false });
+        manager.providerStatus.test.find(p => p.uuid === 'refreshing').config.needsRefresh = true;
+
+        expect(manager.getHealthyCount('test')).toBe(1);
+    });
+
+    test('sweeps nodes stuck in needsRefresh with refreshCount 0', async () => {
+        const manager = new ProviderPoolManager({
+            test: [{
+                uuid: 'stuck',
+                isHealthy: true,
+                needsRefresh: true,
+                refreshCount: 0,
+                lastHealthStateTime: new Date(Date.now() - 11 * 60 * 1000).toISOString()
+            }, {
+                uuid: 'fresh',
+                isHealthy: true,
+                needsRefresh: true,
+                refreshCount: 0,
+                lastHealthStateTime: new Date().toISOString()
+            }, {
+                uuid: 'retrying',
+                isHealthy: true,
+                needsRefresh: true,
+                refreshCount: 2,
+                lastHealthStateTime: new Date(Date.now() - 11 * 60 * 1000).toISOString()
+            }]
+        }, { persistenceEnabled: false });
+        const byId = Object.fromEntries(manager.providerStatus.test.map(p => [p.uuid, p.config]));
+        byId.stuck.needsRefresh = true;
+        byId.stuck.refreshCount = 0;
+        byId.stuck.lastHealthStateTime = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+        byId.fresh.needsRefresh = true;
+        byId.fresh.refreshCount = 0;
+        byId.fresh.lastHealthStateTime = new Date().toISOString();
+        byId.retrying.needsRefresh = true;
+        byId.retrying.refreshCount = 2;
+        byId.retrying.lastHealthStateTime = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+        const refreshSpy = jest.fn(async () => true);
+        manager.refreshNode = refreshSpy;
+
+        manager._sweepStuckNeedsRefresh();
+
+        expect(refreshSpy).toHaveBeenCalledWith('test', 'stuck', true);
+        expect(refreshSpy).not.toHaveBeenCalledWith('test', 'fresh', true);
+        expect(refreshSpy).not.toHaveBeenCalledWith('test', 'retrying', true);
+        refreshSpy.mockRestore();
+    });
+
+    test('scheduled health checks sweep stuck refresh flags even for unselected provider types', async () => {
+        const manager = new ProviderPoolManager({
+            test: [{
+                uuid: 'stuck',
+                isHealthy: true,
+                needsRefresh: true,
+                refreshCount: 0,
+                lastHealthStateTime: new Date(Date.now() - 11 * 60 * 1000).toISOString()
+            }]
+        }, {
+            persistenceEnabled: false,
+            globalConfig: {
+                SCHEDULED_HEALTH_CHECK: {
+                    enabled: true,
+                    interval: 600000,
+                    providerTypes: ['openai-codex-oauth']
+                }
+            }
+        });
+        const sweepSpy = jest.spyOn(manager, '_sweepStuckNeedsRefresh');
+
+        await manager.performHealthChecks();
+
+        expect(sweepSpy).toHaveBeenCalled();
+        sweepSpy.mockRestore();
     });
 });

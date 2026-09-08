@@ -744,6 +744,7 @@ body {
 
 .provider-item-card.healthy { border-bottom: 2px solid rgba(40, 167, 69, 0.7); }
 .provider-item-card.unhealthy { border-bottom: 2px solid rgba(220, 53, 69, 0.7); }
+.provider-item-card.refreshing { border-bottom: 2px solid rgba(255, 193, 7, 0.8); }
 .provider-item-card.disabled { border-bottom: 2px solid rgba(108, 117, 125, 0.7); }
 
 .provider-item-card .card-header {
@@ -764,7 +765,17 @@ body {
 
 .provider-item-card.healthy .card-status-dot { background: var(--success-color); box-shadow: 0 0 4px var(--success-color); }
 .provider-item-card.unhealthy .card-status-dot { background: var(--danger-color); box-shadow: 0 0 4px var(--danger-color); }
+.provider-item-card.refreshing .card-status-dot { background: var(--warning-color); box-shadow: 0 0 4px var(--warning-color); }
 .provider-item-card.disabled .card-status-dot { background: var(--text-tertiary); }
+
+.provider-item-card .card-refresh-label {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--warning-text, #b58105);
+    background: var(--warning-15, rgba(255, 193, 7, 0.18));
+    border-radius: 4px;
+    padding: 1px 6px;
+}
 
 .provider-item-card.healthy::before { background: var(--success-color); }
 .provider-item-card.unhealthy::before { background: var(--danger-color); }

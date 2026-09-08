@@ -231,6 +231,15 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         return await providerApi.handleSingleProviderHealthCheck(req, res, currentConfig, providerPoolManager, providerType, providerUuid);
     }
 
+    // Force-refresh OAuth token for a specific provider node
+    // NOTE: This must be before the generic /{providerType}/{uuid} route to avoid matching 'refresh-token' as UUID
+    const refreshTokenMatch = pathParam.match(/^\/api\/providers\/([^\/]+)\/([^\/]+)\/refresh-token$/);
+    if (method === 'POST' && refreshTokenMatch) {
+        const providerType = decodeURIComponent(refreshTokenMatch[1]);
+        const providerUuid = refreshTokenMatch[2];
+        return await providerApi.handleRefreshProviderToken(req, res, currentConfig, providerPoolManager, providerType, providerUuid);
+    }
+
     // Delete all unhealthy providers for a specific type
     // NOTE: This must be before the generic /{providerType}/{uuid} route to avoid matching 'delete-unhealthy' as UUID
     const deleteUnhealthyMatch = pathParam.match(/^\/api\/providers\/([^\/]+)\/delete-unhealthy$/);

@@ -182,6 +182,22 @@ describe('Antigravity cooldown UI behavior', () => {
         expect(usageManager.getAntigravityModelAvailabilitySummaries('gemini-antigravity', instances)).toEqual([]);
     });
 
+    test('classifies needsRefresh without model probe state as credential unavailable instead of unprobed', async () => {
+        const usageManager = await import('../static/app/usage-manager.js');
+        const instances = [
+            { isHealthy: true, antigravityQuotaHealth: { models: { 'gemini-2.5-flash': { isHealthy: true } } } },
+            { isHealthy: true, needsRefresh: true, antigravityQuotaHealth: { models: {} } }
+        ];
+        expect(usageManager.getAntigravityModelAvailabilitySummaries('gemini-antigravity', instances)).toContainEqual({
+            model: 'gemini-2.5-flash',
+            availableCount: 1,
+            quotaExhaustedCount: 0,
+            credentialUnavailableCount: 1,
+            unprobedCount: 0,
+            earliestRecoveryTime: null
+        });
+    });
+
     test('does not expose healthy-only models and classifies needsRefresh as credential unavailable', async () => {
         const usageManager = await import('../static/app/usage-manager.js');
         const instances = [

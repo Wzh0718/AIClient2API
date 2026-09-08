@@ -1303,6 +1303,48 @@ export async function handleHealthCheck(req, res, currentConfig, providerPoolMan
 }
 
 /**
+ * 强制刷新单个提供商的 OAuth Token
+ */
+export async function handleRefreshProviderToken(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
+    try {
+        if (!providerPoolManager) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'Provider pool manager not initialized' } }));
+            return true;
+        }
+
+        const queued = await providerPoolManager.refreshNode(providerType, providerUuid, true);
+        if (!queued) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'Provider not found' } }));
+            return true;
+        }
+
+        logger.info(`[UI API] Queued token refresh for provider ${providerUuid} in ${providerType}`);
+        broadcastEvent('config_update', {
+            action: 'refresh_token',
+            providerType,
+            providerUuid,
+            timestamp: new Date().toISOString()
+        });
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            providerType,
+            uuid: providerUuid,
+            queued: true
+        }));
+        return true;
+    } catch (error) {
+        logger.error('[UI API] Token refresh error:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: error.message } }));
+        return true;
+    }
+}
+
+/**
  * 快速链接配置文件到对应的提供商
  * 支持单个文件路径或文件路径数组
  */

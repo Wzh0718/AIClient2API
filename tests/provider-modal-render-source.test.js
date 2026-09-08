@@ -39,16 +39,32 @@ describe('provider modal source regressions', () => {
         expect(source).not.toContain('sessionId');
     });
 
-    test('provider cards do not expose the internal needsRefresh flag as a persistent loading state', () => {
+    test('provider cards and details show needsRefresh as a scheduling-blocking refreshing state', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/modal.js'), 'utf8').replace(/\r\n/g, '\n');
         const detailStart = source.indexOf('function renderProviderDetailList(providers)');
         const detailEnd = source.indexOf('function renderProviderCardList(providers)', detailStart);
         const cardEnd = source.indexOf('function renderProviderConfig(provider)', detailEnd);
         const providerListRendering = source.slice(detailStart, cardEnd);
 
-        expect(providerListRendering).not.toContain('provider.needsRefresh');
-        expect(providerListRendering).not.toContain('providers.status.needsRefresh');
-        expect(providerListRendering).not.toContain('card-refresh-icon');
+        expect(providerListRendering).toContain('provider.needsRefresh');
+        expect(providerListRendering).toContain('providers.status.needsRefresh');
+        expect(source).toContain('refreshProviderToken');
+        expect(source).toContain('/refresh-token');
+        expect(source).toContain('modal.provider.refreshToken');
+        expect(source).not.toContain("onclick=\"window.refreshProviderUuid('${provider.uuid}', event)\" title=\"${t('modal.provider.refreshToken");
+    });
+
+    test('refresh-token API is registered before the generic provider uuid route', () => {
+        const uiManager = fs.readFileSync(path.join(process.cwd(), 'src/services/ui-manager.js'), 'utf8').replace(/\r\n/g, '\n');
+        const providerApi = fs.readFileSync(path.join(process.cwd(), 'src/ui-modules/provider-api.js'), 'utf8').replace(/\r\n/g, '\n');
+        const refreshTokenIndex = uiManager.indexOf('/refresh-token');
+        const genericRouteIndex = uiManager.indexOf('This generic route must be after all specific routes');
+
+        expect(refreshTokenIndex).toBeGreaterThan(0);
+        expect(genericRouteIndex).toBeGreaterThan(refreshTokenIndex);
+        expect(uiManager).toContain('handleRefreshProviderToken');
+        expect(providerApi).toContain('export async function handleRefreshProviderToken');
+        expect(providerApi).toContain('refreshNode(providerType, providerUuid, true)');
     });
 
     test('provider detail prefers the last successful request completion time', () => {

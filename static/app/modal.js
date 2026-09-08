@@ -1250,14 +1250,22 @@ function renderProviderDetailList(providers) {
     return providers.map(provider => {
         const isHealthy = provider.isHealthy;
         const isDisabled = provider.isDisabled || false;
+        const isRefreshing = provider.needsRefresh === true && !isDisabled;
         const lastSuccessfulUse = provider.lastSuccessTime || provider.lastUsed;
         const lastUsed = lastSuccessfulUse ? new Date(lastSuccessfulUse).toLocaleString() : t('modal.provider.neverUsed');
         const lastHealthCheckTime = provider.lastHealthCheckTime ? new Date(provider.lastHealthCheckTime).toLocaleString() : t('modal.provider.neverChecked');
         const lastHealthCheckModel = provider.lastHealthCheckModel || '-';
-        const healthClass = isHealthy ? 'healthy' : 'unhealthy';
+        const healthClass = isRefreshing ? 'refreshing' : (isHealthy ? 'healthy' : 'unhealthy');
         const disabledClass = isDisabled ? 'disabled' : '';
-        const healthIcon = isHealthy ? 'fas fa-check-circle text-success' : 'fas fa-exclamation-triangle text-warning';
-        const healthText = isHealthy ? t('modal.provider.status.healthy') : t('modal.provider.status.unhealthy');
+        const healthIcon = isRefreshing
+            ? 'fas fa-sync-alt fa-spin text-warning'
+            : (isHealthy ? 'fas fa-check-circle text-success' : 'fas fa-exclamation-triangle text-warning');
+        const healthText = isRefreshing
+            ? t('providers.status.needsRefresh')
+            : (isHealthy ? t('modal.provider.status.healthy') : t('modal.provider.status.unhealthy'));
+        const healthI18nKey = isRefreshing
+            ? 'providers.status.needsRefresh'
+            : (isHealthy ? 'modal.provider.status.healthy' : 'modal.provider.status.unhealthy');
         const disabledText = isDisabled ? t('modal.provider.status.disabled') : t('modal.provider.status.enabled');
         const disabledIcon = isDisabled ? 'fas fa-ban text-muted' : 'fas fa-play text-success';
         const toggleButtonText = isDisabled ? t('modal.provider.enabled') : t('modal.provider.disabled');
@@ -1293,7 +1301,7 @@ function renderProviderDetailList(providers) {
                         <div class="provider-meta">
                             <span class="health-status">
                                 <i class="${healthIcon}"></i>
-                                <span data-i18n="modal.provider.healthCheckLabel">健康状态</span>: <span data-i18n="${isHealthy ? 'modal.provider.status.healthy' : 'modal.provider.status.unhealthy'}">${healthText}</span>
+                                <span data-i18n="modal.provider.healthCheckLabel">健康状态</span>: <span data-i18n="${healthI18nKey}">${healthText}</span>
                             </span> |
                             <span class="disabled-status">
                                 <i class="${disabledIcon}"></i>
@@ -1326,6 +1334,9 @@ function renderProviderDetailList(providers) {
                         <button class="btn-small btn-info btn-provider-health-check" onclick="window.performSingleHealthCheck('${provider.uuid}', event)" title="${t('modal.provider.healthCheckCurrentTitle')}">
                             <i class="fas fa-stethoscope"></i> <span data-i18n="modal.provider.healthCheck">${t('modal.provider.healthCheck')}</span>
                         </button>
+                        <button class="btn-small btn-info btn-refresh-token" onclick="window.refreshProviderToken('${provider.uuid}', event)" title="${t('modal.provider.refreshTokenTitle')}">
+                            <i class="fas fa-redo-alt"></i> <span data-i18n="modal.provider.refreshToken">${t('modal.provider.refreshToken')}</span>
+                        </button>
                         ${reauthorizeButtonHtml}
                         <button class="btn-small btn-delete" onclick="window.deleteProvider('${provider.uuid}', event)">
                             <i class="fas fa-trash"></i> <span data-i18n="modal.provider.delete">删除</span>
@@ -1355,7 +1366,8 @@ function renderProviderCardList(providers) {
     html += providers.map(provider => {
         const isHealthy = provider.isHealthy;
         const isDisabled = provider.isDisabled || false;
-        const healthClass = isHealthy ? 'healthy' : 'unhealthy';
+        const isRefreshing = provider.needsRefresh === true && !isDisabled;
+        const healthClass = isRefreshing ? 'refreshing' : (isHealthy ? 'healthy' : 'unhealthy');
         const disabledClass = isDisabled ? 'disabled' : '';
         const displayName = provider.customName || provider.uuid;
         const toggleButtonText = isDisabled ? t('modal.provider.enabled') : t('modal.provider.disabled');
@@ -1373,6 +1385,7 @@ function renderProviderCardList(providers) {
                 <div class="card-header">
                     <div class="card-status-dot"></div>
                     <div class="card-name" title="${displayName}">${displayName}</div>
+                    ${isRefreshing ? `<span class="card-refresh-label" data-i18n="providers.status.needsRefresh">${t('providers.status.needsRefresh')}</span>` : ''}
                 </div>
                 <div class="card-body">
                     <div class="card-stat" title="${t('modal.provider.usageCount')}: ${provider.usageCount || 0}">
@@ -1388,6 +1401,9 @@ function renderProviderCardList(providers) {
                 <div class="card-actions" onclick="event.stopPropagation()">
                     <button class="card-action-btn ${toggleButtonClass}" onclick="window.toggleProviderStatus('${provider.uuid}', event)" title="${toggleButtonText}">
                         <i class="${toggleButtonIcon}"></i>
+                    </button>
+                    <button class="card-action-btn btn-info btn-refresh-token" onclick="window.refreshProviderToken('${provider.uuid}', event)" title="${t('modal.provider.refreshTokenTitle')}">
+                        <i class="fas fa-redo-alt"></i>
                     </button>
                     ${reauthorizeButtonHtml}
                     <button class="card-action-btn btn-delete" onclick="window.deleteProvider('${provider.uuid}', event)" title="${t('modal.provider.delete')}">
@@ -1983,6 +1999,9 @@ function cancelEdit(uuid, event) {
         </button>
         <button class="btn-small btn-info btn-provider-health-check" onclick="window.performSingleHealthCheck('${uuid}', event)" title="${t('modal.provider.healthCheckCurrentTitle')}">
             <i class="fas fa-stethoscope"></i> <span data-i18n="modal.provider.healthCheck">${t('modal.provider.healthCheck')}</span>
+        </button>
+        <button class="btn-small btn-info btn-refresh-token" onclick="window.refreshProviderToken('${uuid}', event)" title="${t('modal.provider.refreshTokenTitle')}">
+            <i class="fas fa-redo-alt"></i> <span data-i18n="modal.provider.refreshToken">${t('modal.provider.refreshToken')}</span>
         </button>
         ${reauthorizeButtonHtml}
         <button class="btn-small btn-delete" onclick="window.deleteProvider('${uuid}', event)">
@@ -2616,6 +2635,54 @@ async function performHealthCheck(providerType) {
 }
 
 /**
+ * 强制刷新提供商 OAuth Token
+ * @param {string} uuid - 提供商UUID
+ * @param {Event} event - 事件对象
+ */
+async function refreshProviderToken(uuid, event) {
+    event.stopPropagation();
+
+    const button = event.currentTarget || event.target.closest('button');
+    const providerDetail = event.target.closest('.provider-item-detail, .provider-item-card');
+    const providerType = providerDetail?.closest('.provider-modal')?.getAttribute('data-provider-type');
+
+    if (!providerDetail || !providerType) {
+        showToast(t('common.error'), t('modal.provider.refreshToken.failed'), 'error');
+        return;
+    }
+
+    const originalHtml = button ? button.innerHTML : '';
+
+    try {
+        if (button) {
+            button.disabled = true;
+            button.innerHTML = `<i class="fas fa-spinner fa-spin"></i> <span>${t('modal.provider.refreshToken')}</span>`;
+        }
+
+        const response = await window.apiClient.post(
+            `/providers/${encodeURIComponent(providerType)}/${uuid}/refresh-token`,
+            {}
+        );
+
+        if (!response.success) {
+            showToast(t('common.error'), t('modal.provider.refreshToken.failed'), 'error');
+            return;
+        }
+
+        showToast(t('common.success'), t('modal.provider.refreshToken.success'), 'success');
+        await refreshProviderConfig(providerType);
+    } catch (error) {
+        console.error('Provider token refresh failed:', error);
+        showToast(t('common.error'), t('modal.provider.refreshToken.failed') + ': ' + error.message, 'error');
+    } finally {
+        if (button && button.isConnected) {
+            button.innerHTML = originalHtml;
+            button.disabled = false;
+        }
+    }
+}
+
+/**
  * 刷新提供商UUID
  * @param {string} uuid - 提供商UUID
  * @param {Event} event - 事件对象
@@ -2869,6 +2936,7 @@ export {
     renderNotSupportedModelsSelector,
     goToProviderPage,
     performSingleHealthCheck,
+    refreshProviderToken,
     refreshProviderUuid,
     reauthorizeProvider,
     showProxyPoolManager,
@@ -2889,6 +2957,7 @@ window.toggleProviderStatus = toggleProviderStatus;
 window.resetAllProvidersHealth = resetAllProvidersHealth;
 window.performHealthCheck = performHealthCheck;
 window.performSingleHealthCheck = performSingleHealthCheck;
+window.refreshProviderToken = refreshProviderToken;
 window.deleteUnhealthyProviders = deleteUnhealthyProviders;
 window.refreshUnhealthyUuids = refreshUnhealthyUuids;
 window.openSupportedModelsPicker = openSupportedModelsPicker;

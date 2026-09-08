@@ -1915,6 +1915,16 @@
     background: var(--success-10);
 }
 
+.provider-item-detail.refreshing {
+    border: 2px solid var(--warning-color);
+    background: linear-gradient(135deg, var(--warning-bg) 0%, var(--bg-primary) 100%);
+}
+
+.provider-item-detail.refreshing .health-status {
+    color: var(--warning-text);
+    background: var(--warning-15);
+}
+
 @keyframes pulseWarning {
     0%, 100% { box-shadow: 0 4px 12px var(--warning-15); }
     50% { box-shadow: 0 4px 12px var(--warning-30); }

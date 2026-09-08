@@ -83,6 +83,7 @@ export const API_GUIDE_DATA = [
         { method: 'DELETE', path: '/api/providers/{type}/delete-unhealthy', desc: '删除该类型下所有不健康的账号' },
         { method: 'POST',   path: '/api/providers/{type}/health-check', desc: '触发该类型下所有账号的健康检查' },
         { method: 'POST',   path: '/api/providers/{type}/{uuid}/health-check', desc: '触发单个账号的健康检查' },
+        { method: 'POST',   path: '/api/providers/{type}/{uuid}/refresh-token', desc: '强制刷新单个账号的 OAuth Token' },
         { method: 'POST',   path: '/api/providers/{type}/reset-health', desc: '重置该类型下所有账号的健康状态' },
         { method: 'POST',   path: '/api/providers/{type}/{uuid}/detect-models', desc: '探测特定账号支持的模型列表' },
         { method: 'POST',   path: '/api/providers/{type}/refresh-unhealthy-uuids', desc: '刷新该类型下所有不健康账号的 UUID' },

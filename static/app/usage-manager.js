@@ -734,6 +734,10 @@ export function getAntigravityModelAvailabilitySummaries(providerType, instances
                 || Boolean(instance.error);
             const modelState = instance.antigravityQuotaHealth?.models?.[model];
             if (!modelState) {
+                if (instance.needsRefresh === true) {
+                    credentialUnavailableCount++;
+                    return;
+                }
                 unprobedCount++;
                 return;
             }
