@@ -254,8 +254,8 @@ describe('Codex subscription until label', () => {
         const now = Date.parse('2026-09-08T12:37:00.000Z');
 
         expect(formatCodexSubscriptionUntilLabel(null, now)).toBe('');
-        expect(formatCodexSubscriptionUntilLabel('2026-09-18T12:37:00.000Z', now)).toBe('09/18 20:37 · 10天后');
-        expect(formatCodexSubscriptionUntilLabel('2026-09-08T16:37:00.000Z', now)).toBe('09/09 00:37 · 4小时后');
-        expect(formatCodexSubscriptionUntilLabel('2026-09-01T12:37:00.000Z', now)).toBe('09/01 20:37 · 已到期');
+        expect(formatCodexSubscriptionUntilLabel('2026-09-18T12:37:00.000Z', now)).toBe('09/18');
+        expect(formatCodexSubscriptionUntilLabel('2026-09-08T16:37:00.000Z', now)).toBe('09/09');
+        expect(formatCodexSubscriptionUntilLabel('2026-09-01T12:37:00.000Z', now)).toBe('09/01');
     });
 });

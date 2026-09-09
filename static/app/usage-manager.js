@@ -1575,7 +1575,7 @@ function formatDate(str) {
     }
 }
 
-export function formatCodexSubscriptionUntilLabel(until, now = Date.now()) {
+export function formatCodexSubscriptionUntilLabel(until) {
     const untilMs = Date.parse(until);
     if (!Number.isFinite(untilMs)) return '';
 
@@ -1583,36 +1583,15 @@ export function formatCodexSubscriptionUntilLabel(until, now = Date.now()) {
         new Intl.DateTimeFormat('en-US', {
             timeZone: 'Asia/Shanghai',
             month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false
+            day: '2-digit'
         }).formatToParts(new Date(untilMs)).map(part => [part.type, part.value])
     );
-    const compact = `${parts.month}/${parts.day} ${parts.hour}:${parts.minute}`;
-    const diffMs = untilMs - Number(now);
-    if (diffMs <= 0) {
-        return t('usage.card.subscriptionUntilExpired', { time: compact });
-    }
-
-    const dayMs = 24 * 60 * 60 * 1000;
-    const hourMs = 60 * 60 * 1000;
-    if (diffMs < dayMs) {
-        return t('usage.card.subscriptionUntil', {
-            time: compact,
-            relative: t('usage.card.subscriptionRelativeHours', { count: Math.max(1, Math.round(diffMs / hourMs)) })
-        });
-    }
-
-    return t('usage.card.subscriptionUntil', {
-        time: compact,
-        relative: t('usage.card.subscriptionRelativeDays', { count: Math.max(1, Math.round(diffMs / dayMs)) })
-    });
+    return `${parts.month}/${parts.day}`;
 }
 
 function renderCodexSubscriptionUntil(instance = {}, now = Date.now()) {
     const until = instance.subscription_active_until;
-    const label = formatCodexSubscriptionUntilLabel(until, now);
+    const label = formatCodexSubscriptionUntilLabel(until);
     if (!label) return '';
     const expired = Date.parse(until) <= Number(now) || instance.subscriptionExpired === true;
     return `<span class="collapsed-subscription-until${expired ? ' is-expired' : ''}" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
