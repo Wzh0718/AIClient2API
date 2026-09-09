@@ -58,6 +58,82 @@ describe('Codex tool name normalization', () => {
         })]);
     });
 
+    test('sanitizes illegal tool-name characters after the image_gen mapping and restores the original name', () => {
+        const converter = new CodexConverter();
+        const requestId = 'illegal-tool-name-request';
+        const tools = [{
+            type: 'function',
+            name: 'my.tool',
+            description: 'Lookup',
+            parameters: { type: 'object', properties: {} }
+        }];
+
+        converter.buildToolNameMap(tools, requestId);
+        const converted = converter.convertTools(tools, requestId);
+
+        expect(converted[0].name).toBe('my_tool');
+        expect(converter.getOriginalToolName('my_tool', requestId)).toBe('my.tool');
+        expect(converter.shortenToolName('lookup_weather')).toBe('lookup_weather');
+    });
+
+    test('recursively strips schema dialect keywords and fills empty object properties', () => {
+        const converter = new CodexConverter();
+        const requestId = 'schema-dialect-request';
+        const tools = [{
+            type: 'function',
+            name: 'lookup_weather',
+            description: 'Lookup weather',
+            parameters: {
+                $schema: 'http://json-schema.org/draft-07/schema#',
+                type: 'object',
+                properties: {
+                    city: {
+                        $id: 'city-field',
+                        type: 'string'
+                    },
+                    extras: {
+                        type: 'object'
+                    }
+                }
+            }
+        }];
+
+        const converted = converter.convertTools(tools, requestId);
+
+        expect(converted[0].parameters).toEqual({
+            type: 'object',
+            properties: {
+                city: { type: 'string' },
+                extras: { type: 'object', properties: {} }
+            }
+        });
+        expect(converted[0].parameters).not.toHaveProperty('$schema');
+        expect(converted[0].parameters.properties.city).not.toHaveProperty('$id');
+    });
+
+    test('leaves a clean function tool schema unchanged', () => {
+        const converter = new CodexConverter();
+        const requestId = 'clean-schema-request';
+        const parameters = {
+            type: 'object',
+            properties: {
+                q: { type: 'string' }
+            },
+            required: ['q']
+        };
+        const tools = [{
+            type: 'function',
+            name: 'lookup_weather',
+            description: 'Lookup weather',
+            parameters
+        }];
+
+        const converted = converter.convertTools(tools, requestId);
+
+        expect(converted[0].parameters).toEqual(parameters);
+        expect(converted[0].name).toBe('lookup_weather');
+    });
+
     test('keeps distinct deterministic hashes for long tool names with the same prefix', () => {
         const converter = new CodexConverter();
         const sharedPrefix = 'tool_' + 'x'.repeat(80);

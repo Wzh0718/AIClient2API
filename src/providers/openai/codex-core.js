@@ -9,6 +9,7 @@ import {refreshCodexTokensWithRetry} from '../../auth/oauth-handlers.js';
 import {getProviderPoolManager} from '../../services/service-manager.js';
 import {configureTLSSidecar, isTLSSidecarEnabledForProvider} from '../../utils/proxy-utils.js';
 import {MODEL_PROVIDER, formatExpiryLog, normalizeProviderErrorMessage} from '../../utils/common.js';
+import {isSupportedGptImageModel} from '../../utils/constants.js';
 import {getProxyConfigForProvider} from '../../utils/proxy-utils.js';
 import {getProviderModels} from '../provider-models.js';
 import {
@@ -35,7 +36,7 @@ import { getCodexModelIds, sanitizeCodexModelParameters, normalizeCodexReasoning
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
 const CODEX_MODELS = getCodexModelIds(baseModels);
 const CODEX_VERSION = '0.153.4';
-export const IMAGE_MODELS = new Set(['gpt-image-2']);
+export const IMAGE_MODELS = new Set(['gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst']);
 const IMAGE_GENERATION_FUNCTION_NAMES = new Set(['image_gen.imagegen', 'image_gen__imagegen']);
 const IMAGE_TOOL_STRING_FIELDS = ['size', 'quality', 'background', 'output_format', 'input_fidelity', 'moderation'];
 const IMAGE_TOOL_NUMERIC_FIELDS = ['output_compression', 'partial_images'];
@@ -53,6 +54,12 @@ function normalizeCodexTerminalError(parsed) {
         if (!errorBody) {
             errorBody = { message: parsed.message || 'Codex response failed' };
         }
+    } else if (isEmptyIncompleteResponse(parsed)) {
+        errorBody = {
+            type: 'service_unavailable_error',
+            code: 'server_is_overloaded',
+            message: parsed.response?.incomplete_details?.reason || 'Codex response incomplete with no output'
+        };
     }
 
     if (!errorBody) return null;
@@ -88,9 +95,32 @@ function shouldSwitchCodexCredential(errorBody) {
         isCodexModelCapacityError(errorBody);
 }
 
+function isRetryableServerError(errorBody) {
+    const type = String(errorBody?.type || '').trim().toLowerCase();
+    const code = String(errorBody?.code || '').trim().toLowerCase();
+    if (type !== 'server_error' && code !== 'server_error') return false;
+    return /you can retry|retry your request|please (?:retry|try again)|try again later/.test(
+        String(errorBody?.message || '').toLowerCase()
+    );
+}
+
+function isEmptyIncompleteResponse(parsed) {
+    if (!parsed || parsed.type !== 'response.incomplete') return false;
+    const response = parsed.response && typeof parsed.response === 'object' ? parsed.response : {};
+    const output = Array.isArray(response.output) ? response.output : [];
+    const outputTokens = Number(response.usage?.output_tokens ?? 0);
+    const hasContent = output.some(item => {
+        if (!item || typeof item !== 'object') return false;
+        if (Array.isArray(item.content) && item.content.length > 0) return true;
+        return Boolean(item.result || item.text || item.arguments);
+    });
+    return output.length === 0 && !hasContent && (!Number.isFinite(outputTokens) || outputTokens <= 0);
+}
+
 function isCodexOverloadErrorBody(errorBody) {
     return String(errorBody?.code || '').trim().toLowerCase() === 'server_is_overloaded' ||
-        String(errorBody?.type || '').trim().toLowerCase() === 'service_unavailable_error';
+        String(errorBody?.type || '').trim().toLowerCase() === 'service_unavailable_error' ||
+        isRetryableServerError(errorBody);
 }
 
 function parseCodexRetryAfterMs(errorBody) {
@@ -812,8 +842,8 @@ export class CodexApiService {
         const defaultServiceTier = isUltraFastModel ? 'ultrafast' : isFastModel ? 'priority' : 'default';
         const defaultReasoningEffort = isSpeedModel ? 'xhigh' : 'medium';
 
-        // 图像生成模型：gpt-image-2 通过 image_generation 工具 + gpt-5.6-luna 实现
-        const isImageModel = IMAGE_MODELS.has(upstreamModel);
+        // 图像生成模型：gpt-image-2 / Image 2.5 通过 image_generation 工具 + gpt-5.6-luna 实现
+        const isImageModel = isSupportedGptImageModel(upstreamModel);
         const effectiveUpstreamModel = isImageModel ? 'gpt-5.6-luna' : upstreamModel;
 
         const cleanedBody = sanitizeCodexModelParameters(upstreamModel, {...requestBody});
@@ -834,7 +864,7 @@ export class CodexApiService {
 
         if (isImageModel) {
             // 图像模型：强制使用 image_generation 工具，不加 web_search
-            const imageToolConfig = {type: 'image_generation'};
+            const imageToolConfig = {type: 'image_generation', model: upstreamModel};
             applyImageToolOptions(imageToolConfig, cleanedBody._imageToolOptions);
             if (cleanedBody._imageSize && !imageToolConfig.size) {
                 imageToolConfig.size = cleanedBody._imageSize;
@@ -1282,10 +1312,16 @@ export class CodexApiService {
                 let parsed = JSON.parse(jsonData);
                 switch (parsed.type) {
                     case 'error':
-                    case 'response.failed': {
-                        logger.error('[Codex] API returned terminal error:', parsed.error || parsed.response?.error || parsed);
+                    case 'response.failed':
+                    case 'response.incomplete': {
                         const error = createCodexTerminalError(parsed);
-                        if (error) throw error;
+                        if (error) {
+                            logger.error('[Codex] API returned terminal error:', parsed.error || parsed.response?.error || parsed);
+                            throw error;
+                        }
+                        if (parsed.type === 'response.incomplete') {
+                            completedEvent = this.patchCodexCompletedOutput(parsed, outputItemsByIndex, outputItemsFallback);
+                        }
                         break;
                     }
                     case 'response.output_item.added':

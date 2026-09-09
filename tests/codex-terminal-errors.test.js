@@ -147,6 +147,84 @@ describe('Codex terminal Responses errors', () => {
         expect(thrown.origin).toBe('upstream_codex');
     });
 
+    test('treats empty response.incomplete as an upstream failure', () => {
+        const service = createService();
+        const payload = {
+            type: 'response.incomplete',
+            response: {
+                id: 'resp_empty_incomplete',
+                status: 'incomplete',
+                output: [],
+                usage: { output_tokens: 0 }
+            }
+        };
+
+        let thrown;
+        try {
+            service.parseNonStreamResponse(JSON.stringify(payload));
+        } catch (error) {
+            thrown = error;
+        }
+
+        expect(thrown).toBeInstanceOf(Error);
+        expect(thrown.message).toContain('Codex API error');
+        expect(thrown.isCodexOverload).toBe(true);
+        expect(thrown.retrySameCredential).toBe(true);
+        expect(thrown.responseId).toBe('resp_empty_incomplete');
+    });
+
+    test('does not treat a completed empty response as an incomplete failure', () => {
+        const service = createService();
+        const payload = {
+            type: 'response.completed',
+            response: { id: 'resp_completed_empty', output: [] }
+        };
+
+        expect(service.parseNonStreamResponse(JSON.stringify(payload))).toEqual(payload);
+    });
+
+    test('maps retryable server_error messages to same-credential overload retry', () => {
+        const service = createService();
+
+        let thrown;
+        try {
+            service.parseNonStreamResponse(JSON.stringify({
+                type: 'error',
+                error: {
+                    type: 'server_error',
+                    message: 'The server had an error while processing your request. You can retry your request.'
+                }
+            }));
+        } catch (error) {
+            thrown = error;
+        }
+
+        expect(thrown.response.status).toBe(503);
+        expect(thrown.isCodexOverload).toBe(true);
+        expect(thrown.retrySameCredential).toBe(true);
+        expect(thrown.origin).toBe('upstream_codex');
+    });
+
+    test('keeps non-retryable server_error as a terminal 400', () => {
+        const service = createService();
+
+        let thrown;
+        try {
+            service.parseNonStreamResponse(JSON.stringify({
+                type: 'error',
+                error: {
+                    type: 'server_error',
+                    message: 'Internal error without retry advice'
+                }
+            }));
+        } catch (error) {
+            thrown = error;
+        }
+
+        expect(thrown.response.status).toBe(400);
+        expect(thrown.isCodexOverload).not.toBe(true);
+    });
+
     test('maps server overload to transient same-credential retry metadata', () => {
         const service = createService();
 

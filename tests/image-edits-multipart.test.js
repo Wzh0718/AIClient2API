@@ -785,6 +785,70 @@ describe('/v1/images/generations request handling', () => {
         });
     });
 
+    test.each([
+        ['gpt-image-2.5-flare', 'xhigh'],
+        ['gpt-image-2.5-sunburst', 'max'],
+        ['gpt-image-2.5-flare-2026-09-08', 'auto']
+    ])('accepts %s generation requests with quality %s', async (model, quality) => {
+        const req = makeJsonRequest({
+            model,
+            prompt: 'draw one green circle',
+            size: '1024x1024',
+            quality,
+            n: 1,
+            response_format: 'b64_json'
+        });
+        const res = makeResponse();
+
+        const handled = await handleAPIRequests(
+            'POST',
+            '/v1/images/generations',
+            req,
+            res,
+            { MODEL_PROVIDER: 'openai-codex-oauth', IMAGE_SIZE_NORMALIZATION_ENABLED: false },
+            null,
+            null,
+            null
+        );
+
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(200);
+
+        const [, requestBody] = mockGenerateContent.mock.calls[0];
+        expect(requestBody.model).toBe(model);
+        expect(requestBody._imageQuality).toBe(quality);
+        expect(requestBody._imageToolOptions).toEqual(expect.objectContaining({
+            size: '1024x1024',
+            quality
+        }));
+    });
+
+    test('rejects flavorless gpt-image-2.5 generation requests', async () => {
+        const req = makeJsonRequest({
+            model: 'gpt-image-2.5',
+            prompt: 'draw one green circle',
+            n: 1,
+            response_format: 'b64_json'
+        });
+        const res = makeResponse();
+
+        const handled = await handleAPIRequests(
+            'POST',
+            '/v1/images/generations',
+            req,
+            res,
+            { MODEL_PROVIDER: 'openai-codex-oauth' },
+            null,
+            null,
+            null
+        );
+
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(400);
+        expect(JSON.parse(res.body).error.message).toContain("model 'gpt-image-2.5' is not supported");
+        expect(mockGenerateContent).not.toHaveBeenCalled();
+    });
+
     test('preserves requested image quality for gpt-image-2 generation requests', async () => {
         const req = makeJsonRequest({
             model: 'gpt-image-2',

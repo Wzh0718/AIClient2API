@@ -40,7 +40,50 @@ describe('Codex image generation tool options', () => {
             }, false);
 
             expect(body.model).toBe('gpt-5.6-luna');
-            expect(body.tools).toEqual([{ type: 'image_generation' }]);
+            expect(body.tools).toEqual([{ type: 'image_generation', model: 'gpt-image-2' }]);
+        } finally {
+            service.stopCacheCleanup();
+        }
+    });
+
+    test.each([
+        ['gpt-image-2.5-flare', 'gpt-image-2.5-flare'],
+        ['gpt-image-2.5-sunburst', 'gpt-image-2.5-sunburst'],
+        ['gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-flare-2026-09-08'],
+        ['gpt-image-2.5-flare-fast', 'gpt-image-2.5-flare']
+    ])('routes %s through gpt-5.6-luna with the requested image tool model', async (requestedModel, toolModel) => {
+        const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
+
+        try {
+            const body = await service.prepareRequestBody(requestedModel, {
+                model: requestedModel,
+                input: [{
+                    role: 'user',
+                    content: [{ type: 'input_text', text: 'draw one green circle' }]
+                }]
+            }, false);
+
+            expect(body.model).toBe('gpt-5.6-luna');
+            expect(body.tools).toEqual([{ type: 'image_generation', model: toolModel }]);
+        } finally {
+            service.stopCacheCleanup();
+        }
+    });
+
+    test('does not treat flavorless gpt-image-2.5 as a hosted image model', async () => {
+        const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
+
+        try {
+            const body = await service.prepareRequestBody('gpt-image-2.5', {
+                model: 'gpt-image-2.5',
+                input: [{
+                    role: 'user',
+                    content: [{ type: 'input_text', text: 'hello' }]
+                }]
+            }, true);
+
+            expect(body.model).toBe('gpt-image-2.5');
+            expect(body.tools?.some(tool => tool.type === 'image_generation' && tool.model === 'gpt-image-2.5')).toBeFalsy();
         } finally {
             service.stopCacheCleanup();
         }
@@ -59,7 +102,7 @@ describe('Codex image generation tool options', () => {
             }, false);
 
             expect(body.model).toBe('gpt-5.6-luna');
-            expect(body.tools).toEqual([{ type: 'image_generation' }]);
+            expect(body.tools).toEqual([{ type: 'image_generation', model: 'gpt-image-2' }]);
         } finally {
             service.stopCacheCleanup();
         }
@@ -101,6 +144,7 @@ describe('Codex image generation tool options', () => {
 
             expect(body.tools).toEqual([{
                 type: 'image_generation',
+                model: 'gpt-image-2',
                 size: '1024x1024',
                 quality: 'medium'
             }]);
@@ -135,6 +179,7 @@ describe('Codex image generation tool options', () => {
 
             expect(body.tools).toEqual([{
                 type: 'image_generation',
+                model: 'gpt-image-2',
                 size: '1024x1024',
                 quality: 'high',
                 background: 'transparent',

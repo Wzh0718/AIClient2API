@@ -23,6 +23,27 @@ import {
  * An explicitly supplied non-default service tier takes precedence over the
  * suffix. The suffix is still removed so it is never sent upstream.
  */
+function sanitizeCodexToolParameters(schema) {
+    if (Array.isArray(schema)) {
+        return schema.map(item => sanitizeCodexToolParameters(item));
+    }
+    if (!schema || typeof schema !== 'object') {
+        return schema;
+    }
+
+    const sanitized = {};
+    for (const [key, value] of Object.entries(schema)) {
+        if (key === '$schema' || key === '$id') continue;
+        sanitized[key] = sanitizeCodexToolParameters(value);
+    }
+
+    if (sanitized.type === 'object' && (sanitized.properties === undefined || sanitized.properties === null)) {
+        sanitized.properties = {};
+    }
+
+    return sanitized;
+}
+
 function resolveCodexSpeedModel(model, serviceTier) {
     const suppliedTier = typeof serviceTier === 'string' && serviceTier.trim()
         ? serviceTier.trim()
@@ -661,14 +682,9 @@ export class CodexConverter extends BaseConverter {
                 type: 'function',
                 name: shortName,
                 description: func.description,
-                parameters: func.parameters || func.input_schema || { type: 'object', properties: {} },
+                parameters: sanitizeCodexToolParameters(func.parameters || func.input_schema || { type: 'object', properties: {} }),
                 strict: func.strict !== undefined ? func.strict : false
             };
-            
-            // 清理参数
-            if (result.parameters && result.parameters.$schema) {
-                delete result.parameters.$schema;
-            }
 
             return result;
         });
@@ -699,7 +715,8 @@ export class CodexConverter extends BaseConverter {
      * 规范化上游工具名称。
      */
     normalizeToolName(name) {
-        return name === 'image_gen.imagegen' ? 'image_gen__imagegen' : name;
+        const mapped = name === 'image_gen.imagegen' ? 'image_gen__imagegen' : name;
+        return String(mapped || '').replace(/[^a-zA-Z0-9_-]/g, '_');
     }
 
     /**

@@ -101,6 +101,27 @@ describe('api potluck cost estimator', () => {
         expect(cost.pricingSource).toBe('official');
     });
 
+    test('prices GPT Image 2.5 with the same flattened image rates as Image 2', () => {
+        const usage = {
+            promptTokens: 1000000,
+            cachedTokens: 250000,
+            completionTokens: 100000,
+            totalTokens: 1100000
+        };
+
+        const flare = estimateUsageCost(usage, 'gpt-image-2.5-flare');
+        const sunburst = estimateUsageCost(usage, 'gpt-image-2.5-sunburst');
+        const dated = estimateUsageCost(usage, 'gpt-image-2.5-flare-2026-09-08');
+        const image2 = estimateUsageCost(usage, 'gpt-image-2');
+
+        expect(flare.usd).toBeCloseTo(image2.usd, 8);
+        expect(sunburst.usd).toBeCloseTo(image2.usd, 8);
+        expect(dated.usd).toBeCloseTo(image2.usd, 8);
+        expect(flare.missingPriceTokens).toBe(0);
+        expect(dated.missingPriceTokens).toBe(0);
+        expect(flare.pricingSource).toBe('official');
+    });
+
     test('normalizes historical model aliases before pricing', () => {
         const usage = {
             promptTokens: 1000,
@@ -224,7 +245,9 @@ describe('api potluck cost estimator', () => {
             ['gpt-5.3-codex-spark-fast', 'gpt-5.3-codex-spark', 1],
             ['gpt-5.3-codex-fast', 'gpt-5.3-codex', 1],
             ['gpt-5.2-fast', 'gpt-5.2', 1],
-            ['gpt-image-2-fast', 'gpt-image-2', 1]
+            ['gpt-image-2-fast', 'gpt-image-2', 1],
+            ['gpt-image-2.5-flare-fast', 'gpt-image-2.5-flare', 1],
+            ['gpt-image-2.5-sunburst-fast', 'gpt-image-2.5-sunburst', 1]
         ];
 
         for (const [fastModel, baseModel, multiplier] of cases) {

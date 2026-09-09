@@ -22,6 +22,13 @@ describe('codex 5.6 model registration', () => {
         ]));
         expect(models).not.toContain('gpt-5.3-codex-spark');
         expect(models).not.toContain('gpt-5.4');
+        expect(models).toEqual(expect.arrayContaining([
+            'gpt-image-2',
+            'gpt-image-2.5-flare',
+            'gpt-image-2.5-sunburst'
+        ]));
+        expect(models).not.toContain('gpt-image-2.5');
+        expect(models).not.toContain('gpt-image-2.5-flare-2026-09-08');
     });
 
     test('keeps bare GPT-5.6 invalid and reports unsupported models instead of silently falling back', () => {

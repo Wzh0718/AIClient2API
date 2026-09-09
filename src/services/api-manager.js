@@ -14,7 +14,7 @@ import {
 import { getProviderPoolManager, getApiServiceWithFallback } from './service-manager.js';
 import logger from '../utils/logger.js';
 import busboy from 'busboy';
-import { SUPPORTED_IMAGE_MODELS } from '../utils/constants.js';
+import { SUPPORTED_IMAGE_MODELS, isSupportedGptImageModel, isSupportedImageApiModel } from '../utils/constants.js';
 import { convertData } from '../convert/convert.js';
 import { summarizePayloadForLog } from '../utils/log-sanitizer.js';
 import { writeImageJsonResponse } from '../runtime/image-json-response.js';
@@ -305,7 +305,8 @@ async function generateImageWithInternalRetry(service, model, requestBody, scope
 }
 
 function shouldLogImagePayloadSummary(model) {
-    return IMAGE_PAYLOAD_SUMMARY_MODELS.has(String(model || '').trim());
+    const normalized = String(model || '').trim();
+    return IMAGE_PAYLOAD_SUMMARY_MODELS.has(normalized) || isSupportedGptImageModel(normalized);
 }
 
 function logImagePayloadSummary(scope, model, payload) {
@@ -584,7 +585,7 @@ async function handleImageGenerationRequest(req, res, currentConfig, providerPoo
             n = Math.min(Math.max(1, parseInt(body.n) || 1), IMAGE_GEN_MAX_N);
             prompt = body.prompt;
 
-            if (!SUPPORTED_IMAGE_MODELS.has(model)) {
+            if (!isSupportedImageApiModel(model)) {
                 res.writeHead(400, {'Content-Type': 'application/json'});
                 res.end(JSON.stringify({error: {message: `model '${model}' is not supported; supported image models: ${[...SUPPORTED_IMAGE_MODELS].join(', ')}`, type: 'invalid_request_error'}}));
                 return;
@@ -1047,7 +1048,7 @@ async function handleImageEditsRequest(req, res, currentConfig, providerPoolMana
 
         logger.info(`[Image Edits] Received request: model=${model}, n=${n}, response_format=${response_format}, hasPrompt=${!!prompt}, imageCount=${imageFiles.length}${size ? `, size=${size}` : ''}, fields=${JSON.stringify(Object.keys(fields))}, fileKeys=${JSON.stringify(Object.keys(files))}`);
 
-        if (!SUPPORTED_IMAGE_MODELS.has(model)) {
+        if (!isSupportedImageApiModel(model)) {
             logger.warn(`[Image Edits] Unsupported model: ${model}`);
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: { message: `model '${model}' is not supported; supported image models: ${[...SUPPORTED_IMAGE_MODELS].join(', ')}`, type: 'invalid_request_error' } }));

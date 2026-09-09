@@ -75,6 +75,8 @@ export const MODEL_PROVIDER = {
 // 图像生成模型常量
 export const SUPPORTED_IMAGE_MODELS = new Set([
     'gpt-image-2',
+    'gpt-image-2.5-flare',
+    'gpt-image-2.5-sunburst',
     'grok-imagine-image-quality',
     'grok-imagine-image',
     'grok-imagine-image-pro',
@@ -82,6 +84,18 @@ export const SUPPORTED_IMAGE_MODELS = new Set([
     'grok-imagine-1.0-edit',
     'gemini-3.1-flash-image'
 ]);
+
+const GPT_IMAGE_25_SNAPSHOT = /^(gpt-image-2\.5-(?:flare|sunburst))(?:-\d{4}-\d{2}-\d{2})?$/;
+
+export function isSupportedGptImageModel(model) {
+    const normalized = String(model || '').trim();
+    return normalized === 'gpt-image-2' || GPT_IMAGE_25_SNAPSHOT.test(normalized);
+}
+
+export function isSupportedImageApiModel(model) {
+    const normalized = String(model || '').trim();
+    return SUPPORTED_IMAGE_MODELS.has(normalized) || isSupportedGptImageModel(normalized);
+}
 
 // 视频生成模型常量
 export const SUPPORTED_VIDEO_MODELS = new Set([
