@@ -455,6 +455,29 @@ function antigravityCapacityPayloadLooksExhausted(data) {
     return hit;
 }
 
+function assignOwnProperty(target, key, value) {
+    if (!target || (typeof target !== 'object' && typeof target !== 'function')) {
+        return false;
+    }
+    try {
+        target[key] = value;
+        return target[key] === value;
+    } catch {
+        return false;
+    }
+}
+
+function assignNormalizedHttpStatus(error, statusCode) {
+    if (!error) return;
+    assignOwnProperty(error, 'status', statusCode);
+    assignOwnProperty(error, 'statusCode', statusCode);
+    if (!error.response) {
+        assignOwnProperty(error, 'response', { status: statusCode });
+        return;
+    }
+    assignOwnProperty(error.response, 'status', statusCode);
+}
+
 export function normalizeAntigravityCapacityExhaustion(error, providerType, requestedModel) {
     if (!isAntigravityTransientCapacityError(error, providerType)) {
         return false;
@@ -468,15 +491,12 @@ export function normalizeAntigravityCapacityExhaustion(error, providerType, requ
     );
 
     error.isAntigravityModelCapacity = true;
-    error.status = 429;
-    error.statusCode = 429;
+    assignNormalizedHttpStatus(error, 429);
     error.code = 'MODEL_CAPACITY_UNAVAILABLE';
     error.retryable = true;
     error.shouldSwitchCredential = true;
     error.capacityScope = 'model';
     error.capacityKey = requestedModel || error.capacityKey;
-    error.response = error.response || {};
-    error.response.status = 429;
     if (!error.nextRecoveryTime) {
         error.nextRecoveryTime = new Date(Date.now() + cooldownMs).toISOString();
         error.retryAfterSeconds = Math.ceil(cooldownMs / 1000);
@@ -507,15 +527,12 @@ export function isAntigravityModelNotFoundError(error, providerType) {
 
 function normalizeAntigravityModelNotFound(error, requestedModel) {
     error.code = 'MODEL_NOT_FOUND';
-    error.status = 404;
-    error.statusCode = 404;
+    assignNormalizedHttpStatus(error, 404);
     error.retryable = false;
     error.shouldSwitchCredential = false;
     error.skipErrorCount = true;
     error.quotaScope = 'model';
     error.quotaKey = error.quotaKey || requestedModel || null;
-    error.response = error.response || {};
-    error.response.status = 404;
     return error;
 }
 

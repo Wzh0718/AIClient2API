@@ -5,7 +5,8 @@ import {
     handleError,
     handleStreamRequest,
     handleUnaryRequest,
-    isAntigravityTransientCapacityError
+    isAntigravityTransientCapacityError,
+    normalizeAntigravityCapacityExhaustion
 } from '../src/utils/common.js';
 import requestContext from '../src/utils/context.js';
 
@@ -168,12 +169,11 @@ function createGeneric503Error() {
     return error;
 }
 
-function defineIgnoredWrite(object, key, getValue) {
+function defineGetterOnly(object, key, getValue) {
     Object.defineProperty(object, key, {
         configurable: true,
         enumerable: true,
-        get: getValue,
-        set() {}
+        get: getValue
     });
 }
 
@@ -188,9 +188,9 @@ function createReadOnlyAxiosCapacityError(model = 'gemini-2.5-flash') {
             }
         }
     };
-    defineIgnoredWrite(response, 'status', () => 503);
-    defineIgnoredWrite(error, 'status', () => 'UNAVAILABLE');
-    defineIgnoredWrite(error, 'code', () => 503);
+    defineGetterOnly(response, 'status', () => 503);
+    error.status = 'UNAVAILABLE';
+    error.code = 503;
     error.response = response;
     return error;
 }
@@ -1048,6 +1048,19 @@ describe('Antigravity capacity exhaustion across client protocols', () => {
 describe('Antigravity capacity 503 maps to 429 and switches remaining credentials', () => {
     afterEach(() => {
         mockGetApiServiceWithFallback.mockReset();
+    });
+
+    test('normalizeAntigravityCapacityExhaustion does not throw on getter-only response.status', () => {
+        const error = createReadOnlyAxiosCapacityError('gemini-3.1-flash-lite');
+        expect(() => normalizeAntigravityCapacityExhaustion(
+            error,
+            'gemini-antigravity',
+            'gemini-3.1-flash-lite'
+        )).not.toThrow();
+        expect(error.isAntigravityModelCapacity).toBe(true);
+        expect(error.shouldSwitchCredential).toBe(true);
+        expect(error.code).toBe('MODEL_CAPACITY_UNAVAILABLE');
+        expect(error.response.status).toBe(503);
     });
 
     test('returns HTTP 429 when axios keeps a read-only 503 after capacity normalize', async () => {
