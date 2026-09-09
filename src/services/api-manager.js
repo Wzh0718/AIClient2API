@@ -11,6 +11,7 @@ import {
     resolveImageProviderRoutingStrategy,
     createErrorResponse
 } from '../utils/common.js';
+import { isTransientProviderJitterError } from '../utils/provider-error-classification.js';
 import { getProviderPoolManager, getApiServiceWithFallback } from './service-manager.js';
 import logger from '../utils/logger.js';
 import busboy from 'busboy';
@@ -814,7 +815,7 @@ async function handleImageGenerationRequest(req, res, currentConfig, providerPoo
             })) {
                 credentialMarkedUnhealthy = true;
                 cooldownApplied = true;
-            } else if (!credentialMarkedUnhealthy && !error.skipErrorCount && slotProviderType !== 'gemini-antigravity') {
+            } else if (!credentialMarkedUnhealthy && !error.skipErrorCount && !isTransientProviderJitterError(error) && slotProviderType !== 'gemini-antigravity') {
                 if (error.response?.status !== 400) {
                     logger.info(`[Provider Pool] Marking ${slotProviderType} as unhealthy due to image generation error (status: ${error.response?.status || 'unknown'})`);
                     providerPoolManager.markProviderUnhealthy(slotProviderType, {uuid: slotUuid}, error.message);

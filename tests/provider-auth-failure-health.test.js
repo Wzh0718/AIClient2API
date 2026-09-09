@@ -453,4 +453,62 @@ describe('provider auth failure health marking', () => {
         expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
         expect(providerPoolManager.releaseSlot).toHaveBeenCalledWith('openai-codex-oauth', 'codex-provider-1');
     });
+
+    test('does not accumulate errorCount for a Cloudflare 520 stream error', async () => {
+        const error = new Error('520 Web Server Returned an Unknown Error');
+        error.response = { status: 520 };
+        const service = {
+            async *generateContentStream() {
+                throw error;
+            }
+        };
+        const providerPoolManager = createProviderPoolManager();
+        const res = new FakeResponse();
+
+        await handleStreamRequest(
+            res,
+            service,
+            'gpt-5.4-mini',
+            { messages: [{ role: 'user', content: 'ping' }] },
+            'openai',
+            'openai-codex-oauth',
+            'none',
+            null,
+            providerPoolManager,
+            'codex-provider-520',
+            'Codex Provider'
+        );
+
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+        expect(providerPoolManager.markProviderUnhealthyImmediately).not.toHaveBeenCalled();
+        expect(providerPoolManager.releaseSlot).toHaveBeenCalledWith('openai-codex-oauth', 'codex-provider-520');
+    });
+
+    test('does not accumulate errorCount for a unary ECONNRESET', async () => {
+        const error = new Error('aborted');
+        error.code = 'ECONNRESET';
+        const service = {
+            generateContent: jest.fn().mockRejectedValue(error)
+        };
+        const providerPoolManager = createProviderPoolManager();
+        const res = new FakeResponse();
+
+        await handleUnaryRequest(
+            res,
+            service,
+            'gpt-5.4-mini',
+            { messages: [{ role: 'user', content: 'ping' }] },
+            'openai',
+            'openai-codex-oauth',
+            'none',
+            null,
+            providerPoolManager,
+            'codex-provider-reset',
+            'Codex Provider'
+        );
+
+        expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
+        expect(providerPoolManager.markProviderUnhealthyImmediately).not.toHaveBeenCalled();
+        expect(providerPoolManager.releaseSlot).toHaveBeenCalledWith('openai-codex-oauth', 'codex-provider-reset');
+    });
 });

@@ -52,6 +52,9 @@ describe('provider modal source regressions', () => {
         expect(source).toContain('/refresh-token');
         expect(source).toContain('modal.provider.refreshToken');
         expect(source).not.toContain("onclick=\"window.refreshProviderUuid('${provider.uuid}', event)\" title=\"${t('modal.provider.refreshToken");
+        expect(providerListRendering).not.toContain('modal.provider.usageCount');
+        expect(providerListRendering).not.toContain('modal.provider.errorCount');
+        expect(providerListRendering).not.toContain('disabled-status');
     });
 
     test('refresh-token API is registered before the generic provider uuid route', () => {

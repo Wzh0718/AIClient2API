@@ -104,6 +104,34 @@ describe('provider status update semantics', () => {
         });
     });
 
+    test('health check timeout records the last error without accumulating errorCount', () => {
+        const { manager, config } = createManager();
+        const protectedFields = {
+            usageCount: config.usageCount,
+            lastUsed: config.lastUsed,
+            lastSuccessTime: config.lastSuccessTime,
+            lastRefreshTime: config.lastRefreshTime,
+            needsRefresh: config.needsRefresh,
+            refreshCount: config.refreshCount,
+            errorCount: config.errorCount,
+            isHealthy: config.isHealthy
+        };
+
+        manager.markProviderHealthCheckFailed(
+            'gemini-antigravity',
+            { uuid: config.uuid },
+            'Health check timed out after 60000ms',
+            'gemini-3.1-flash-lite'
+        );
+
+        expect(config).toMatchObject({
+            ...protectedFields,
+            lastHealthCheckTime: '2026-08-25T07:11:58.000Z',
+            lastHealthCheckModel: 'gemini-3.1-flash-lite',
+            lastErrorMessage: 'Health check timed out after 60000ms'
+        });
+    });
+
     test('health check failure records completion without changing business or token-refresh fields', () => {
         const { manager, config } = createManager();
         const protectedFields = {

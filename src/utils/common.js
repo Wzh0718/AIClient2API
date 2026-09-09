@@ -40,6 +40,7 @@ import {
 import { getCachedModelList } from '../services/model-list-cache.js';
 import { hasCodexRetryBudget } from '../providers/openai/codex-retry-policy.js';
 import { UpstreamErrorLogSampler } from './upstream-error-sampler.js';
+import { isTransientProviderJitterError } from './provider-error-classification.js';
 
 const upstreamErrorLogSampler = new UpstreamErrorLogSampler();
 
@@ -2171,12 +2172,14 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         const isTerminalAntigravityUnavailable = isTerminalAntigravityModelUnavailable(error, toProvider);
         // Antigravity request/model errors must not quarantine the whole OAuth
         // credential; model capacity is tracked separately at model scope.
+        const isTransientJitter = isTransientProviderJitterError(error);
         const skipErrorCount = error.skipErrorCount === true
             || isAntigravityTransientCapacity
-            || toProvider === MODEL_PROVIDER.ANTIGRAVITY;
+            || toProvider === MODEL_PROVIDER.ANTIGRAVITY
+            || isTransientJitter;
         // 检查是否应该切换凭证（用于 429/5xx/402/403 等情况）
         const shouldSwitchCredential = !isTerminalAntigravityUnavailable
-            && (error.shouldSwitchCredential === true || isAntigravityTransientCapacity);
+            && (error.shouldSwitchCredential === true || isAntigravityTransientCapacity || isTransientJitter);
         if (isTerminalAntigravityUnavailable) {
             providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
         }
@@ -2628,12 +2631,14 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         const isTerminalAntigravityUnavailable = isTerminalAntigravityModelUnavailable(error, toProvider);
         // Antigravity request/model errors must not quarantine the whole OAuth
         // credential; model capacity is tracked separately at model scope.
+        const isTransientJitter = isTransientProviderJitterError(error);
         const skipErrorCount = error.skipErrorCount === true
             || isAntigravityTransientCapacity
-            || toProvider === MODEL_PROVIDER.ANTIGRAVITY;
+            || toProvider === MODEL_PROVIDER.ANTIGRAVITY
+            || isTransientJitter;
         // 检查是否应该切换凭证（用于 429/5xx/402/403 等情况）
         const shouldSwitchCredential = !isTerminalAntigravityUnavailable
-            && (error.shouldSwitchCredential === true || isAntigravityTransientCapacity);
+            && (error.shouldSwitchCredential === true || isAntigravityTransientCapacity || isTransientJitter);
         if (isTerminalAntigravityUnavailable) {
             providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
         }

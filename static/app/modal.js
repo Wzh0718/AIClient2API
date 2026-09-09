@@ -1266,8 +1266,6 @@ function renderProviderDetailList(providers) {
         const healthI18nKey = isRefreshing
             ? 'providers.status.needsRefresh'
             : (isHealthy ? 'modal.provider.status.healthy' : 'modal.provider.status.unhealthy');
-        const disabledText = isDisabled ? t('modal.provider.status.disabled') : t('modal.provider.status.enabled');
-        const disabledIcon = isDisabled ? 'fas fa-ban text-muted' : 'fas fa-play text-success';
         const toggleButtonText = isDisabled ? t('modal.provider.enabled') : t('modal.provider.disabled');
         const toggleButtonIcon = isDisabled ? 'fas fa-play' : 'fas fa-ban';
         const toggleButtonClass = isDisabled ? 'btn-success' : 'btn-warning';
@@ -1303,12 +1301,6 @@ function renderProviderDetailList(providers) {
                                 <i class="${healthIcon}"></i>
                                 <span data-i18n="modal.provider.healthCheckLabel">健康状态</span>: <span data-i18n="${healthI18nKey}">${healthText}</span>
                             </span> |
-                            <span class="disabled-status">
-                                <i class="${disabledIcon}"></i>
-                                <span data-i18n="upload.detail.status">状态</span>: <span data-i18n="${isDisabled ? 'modal.provider.status.disabled' : 'modal.provider.status.enabled'}">${disabledText}</span>
-                            </span> |
-                            <span data-i18n="modal.provider.usageCount">使用次数</span>: ${provider.usageCount || 0} |
-                            <span data-i18n="modal.provider.errorCount">失败次数</span>: ${provider.errorCount || 0} |
                             <span data-i18n="modal.provider.lastUsed">最后使用</span>: ${lastUsed}
                         </div>
                         <div class="provider-health-meta">
@@ -1388,14 +1380,6 @@ function renderProviderCardList(providers) {
                     ${isRefreshing ? `<span class="card-refresh-label" data-i18n="providers.status.needsRefresh">${t('providers.status.needsRefresh')}</span>` : ''}
                 </div>
                 <div class="card-body">
-                    <div class="card-stat" title="${t('modal.provider.usageCount')}: ${provider.usageCount || 0}">
-                        <i class="fas fa-paper-plane"></i>
-                        <span>${provider.usageCount || 0}</span>
-                    </div>
-                    <div class="card-stat" title="${t('modal.provider.errorCount')}: ${provider.errorCount || 0}">
-                        <i class="fas fa-exclamation-circle"></i>
-                        <span>${provider.errorCount || 0}</span>
-                    </div>
                     ${proxyBadgeHtml}
                 </div>
                 <div class="card-actions" onclick="event.stopPropagation()">

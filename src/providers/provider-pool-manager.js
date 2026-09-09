@@ -28,6 +28,7 @@ import { performance } from 'node:perf_hooks';
 import { createProviderStateEvent, applyProviderStateEvent } from '../runtime/provider-state-event.js';
 import { matchesModelFamily } from './openai/codex-model-routing.js';
 import { ANTIGRAVITY_ELASTIC_MODEL_ORDER, ANTIGRAVITY_ELASTIC_SOURCE_MODEL } from './antigravity-model-order.js';
+import { isTransientProviderJitterError } from '../utils/provider-error-classification.js';
 
 const ANTIGRAVITY_ELASTIC_MODEL_FALLBACKS = Object.freeze(
     Object.fromEntries(ANTIGRAVITY_ELASTIC_MODEL_ORDER.map((model, index) => [
@@ -5080,6 +5081,16 @@ export class ProviderPoolManager {
             return;
         }
 
+        if (isTransientProviderJitterError(errorMessage)) {
+            const jitterProvider = this._findProvider(providerType, providerConfig.uuid);
+            if (jitterProvider) {
+                if (errorMessage) jitterProvider.config.lastErrorMessage = errorMessage;
+                this._log('info', `Skipping errorCount for transient jitter on ${this._getDisplayName(jitterProvider.config)} (${providerType})`);
+                this._debouncedSave(providerType);
+            }
+            return;
+        }
+
         const provider = this._findProvider(providerType, providerConfig.uuid);
         if (provider) {
             const wasHealthy = provider.config.isHealthy;
@@ -5576,6 +5587,16 @@ export class ProviderPoolManager {
         const wasHealthy = provider.config.isHealthy;
         const now = Date.now();
         const lastErrorTime = provider.config.lastErrorTime ? Date.parse(provider.config.lastErrorTime) : 0;
+        if (!immediate && isTransientProviderJitterError(errorMessage)) {
+            provider.config.lastErrorTime = new Date(now).toISOString();
+            provider.config.lastErrorMessage = errorMessage || provider.config.lastErrorMessage || null;
+            provider.config.lastHealthStateTime = new Date(now).toISOString();
+            provider.config.lastHealthCheckTime = new Date(now).toISOString();
+            if (healthCheckModel) provider.config.lastHealthCheckModel = healthCheckModel;
+            this._log('info', `Skipping health-check errorCount for transient jitter on ${this._getDisplayName(provider.config)}`);
+            this._debouncedSave(providerType);
+            return;
+        }
         if (immediate) {
             provider.config.errorCount = this.maxErrorCount;
             provider.config.isHealthy = false;
