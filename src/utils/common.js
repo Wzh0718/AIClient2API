@@ -2179,7 +2179,9 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             || isTransientJitter;
         // 检查是否应该切换凭证（用于 429/5xx/402/403 等情况）
         const shouldSwitchCredential = !isTerminalAntigravityUnavailable
-            && (error.shouldSwitchCredential === true || isAntigravityTransientCapacity || isTransientJitter);
+            && (error.shouldSwitchCredential === true
+                || isAntigravityTransientCapacity
+                || (isTransientJitter && toProvider !== MODEL_PROVIDER.ANTIGRAVITY));
         if (isTerminalAntigravityUnavailable) {
             providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
         }
@@ -2638,7 +2640,9 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             || isTransientJitter;
         // 检查是否应该切换凭证（用于 429/5xx/402/403 等情况）
         const shouldSwitchCredential = !isTerminalAntigravityUnavailable
-            && (error.shouldSwitchCredential === true || isAntigravityTransientCapacity || isTransientJitter);
+            && (error.shouldSwitchCredential === true
+                || isAntigravityTransientCapacity
+                || (isTransientJitter && toProvider !== MODEL_PROVIDER.ANTIGRAVITY));
         if (isTerminalAntigravityUnavailable) {
             providerPoolManager?.recordAntigravityRoutingEvent?.('retrySuppressed');
         }
