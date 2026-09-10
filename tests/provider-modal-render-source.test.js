@@ -74,4 +74,31 @@ describe('provider modal source regressions', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/modal.js'), 'utf8').replace(/\r\n/g, '\n');
         expect(source).toContain('provider.lastSuccessTime || provider.lastUsed');
     });
+
+    test('provider detail list renders metadata as a wrapping chip row', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/modal.js'), 'utf8').replace(/\r\n/g, '\n');
+        const detailStart = source.indexOf('function renderProviderDetailList(providers)');
+        const detailEnd = source.indexOf('function renderProviderCardList(providers)', detailStart);
+        const detailList = source.slice(detailStart, detailEnd);
+
+        expect(detailList).toContain('provider-meta-chips');
+        expect(detailList).toContain('provider-meta-chip');
+        expect(detailList).toContain('modal.provider.chip.lastUsed');
+        expect(detailList).toContain('modal.provider.chip.lastCheck');
+        expect(detailList).toContain('getProviderProxyBadgeHtml');
+        expect(detailList).toContain('provider-error-info');
+        expect(detailList).not.toContain('provider-health-meta');
+        expect(detailList).not.toMatch(/\s\|\s/);
+
+        const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-providers.css'), 'utf8');
+        expect(css).toContain('.provider-meta-chips');
+        expect(css).toContain('align-items: flex-start');
+        expect(css).toContain('[data-theme="dark"] .provider-meta-chip');
+
+        const i18n = fs.readFileSync(path.join(process.cwd(), 'static/app/i18n.js'), 'utf8');
+        expect(i18n).toContain("'modal.provider.chip.lastUsed': '使用'");
+        expect(i18n).toContain("'modal.provider.chip.lastUsed': 'Used'");
+        expect(i18n).toContain("'modal.provider.chip.lastCheck': '检测'");
+        expect(i18n).toContain("'modal.provider.chip.lastCheck': 'Checked'");
+    });
 });

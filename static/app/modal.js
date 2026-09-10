@@ -1296,21 +1296,24 @@ function renderProviderDetailList(providers) {
                         <div class="provider-name">
                             ${provider.customName || provider.uuid}
                         </div>
-                        <div class="provider-meta">
-                            <span class="health-status">
+                        <div class="provider-meta-chips">
+                            <span class="provider-meta-chip health-status" title="${t('modal.provider.healthCheckLabel')}: ${healthText}">
                                 <i class="${healthIcon}"></i>
-                                <span data-i18n="modal.provider.healthCheckLabel">健康状态</span>: <span data-i18n="${healthI18nKey}">${healthText}</span>
-                            </span> |
-                            <span data-i18n="modal.provider.lastUsed">最后使用</span>: ${lastUsed}
-                        </div>
-                        <div class="provider-health-meta">
-                            <span class="health-check-time">
+                                <span data-i18n="${healthI18nKey}">${healthText}</span>
+                            </span>
+                            <span class="provider-meta-chip" title="${t('modal.provider.lastUsed')} ${lastUsed}">
                                 <i class="fas fa-clock"></i>
-                                <span data-i18n="modal.provider.lastCheck">最后检测</span>: ${lastHealthCheckTime}
-                            </span> |
-                            <span class="health-check-model">
+                                <span data-i18n="modal.provider.chip.lastUsed">${t('modal.provider.chip.lastUsed')}</span>
+                                <span>${lastUsed}</span>
+                            </span>
+                            <span class="provider-meta-chip" title="${t('modal.provider.lastCheck')} ${lastHealthCheckTime}">
+                                <i class="fas fa-stethoscope"></i>
+                                <span data-i18n="modal.provider.chip.lastCheck">${t('modal.provider.chip.lastCheck')}</span>
+                                <span>${lastHealthCheckTime}</span>
+                            </span>
+                            <span class="provider-meta-chip" title="${t('modal.provider.checkModel')} ${lastHealthCheckModel}">
                                 <i class="fas fa-cube"></i>
-                                <span data-i18n="modal.provider.checkModel">检测模型</span>: ${lastHealthCheckModel}
+                                <span>${lastHealthCheckModel}</span>
                             </span>
                             ${proxyBadgeHtml}
                         </div>
