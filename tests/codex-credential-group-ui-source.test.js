@@ -149,6 +149,22 @@ describe('Codex credential-group UI source', () => {
         expect(providerManager).toContain("const primaryGroup = !isAuto");
     });
 
+    test('resolves fixed credential identity in the credential-group key table', () => {
+        const helperStart = providerManager.indexOf('function renderCredentialGroupKeyTable');
+        const helperEnd = providerManager.indexOf('function renderCredentialGroupRevisionsTable', helperStart);
+        expect(helperStart).toBeGreaterThanOrEqual(0);
+        expect(helperEnd).toBeGreaterThan(helperStart);
+
+        const helper = providerManager.slice(helperStart, helperEnd);
+        expect(helper).toContain('resolveCredentialGroupMemberLabel');
+        expect(helper).toContain('key?.fixedCredential?.credentialRef');
+        expect(helper).toContain('credentialGroupView?.credentials');
+        expect(helper).toContain('label.primary');
+        expect(helper).toContain('label.secondary');
+        expect(helper).toContain("t('providers.credentialGroups.notAvailable')");
+        expect(helper).not.toContain('fixedCredential.uuid');
+    });
+
     test('lets administrators switch a Key between pool, auto, and fixed routing', () => {
         expect(potluckHtml).toContain('id="editRoutingModal"');
         expect(potluckHtml).toContain('id="routingMode"');

@@ -446,7 +446,6 @@ function renderCredentialGroupKeyTable(keys, emptyKey = 'providers.credentialGro
                 <th>${escapeHtml(t('providers.credentialGroups.label.status'))}</th>
             </tr></thead>
             <tbody>${visibleKeys.map(key => {
-                const fixed = key?.fixedCredential?.credentialRef || t('providers.credentialGroups.unknown');
                 const routingMode = typeof key?.routingMode === 'string'
                     ? key.routingMode.trim().toLowerCase()
                     : 'pool';
@@ -475,11 +474,21 @@ function renderCredentialGroupKeyTable(keys, emptyKey = 'providers.credentialGro
                 const primaryGroup = !isAuto
                     ? t('providers.credentialGroups.notAvailable')
                     : (key?.primaryGroupId || t('providers.credentialGroups.route.noPrimary'));
+                const fixedRef = key?.fixedCredential?.credentialRef || '';
+                const label = resolveCredentialGroupMemberLabel(
+                    fixedRef,
+                    Array.isArray(credentialGroupView?.credentials) ? credentialGroupView.credentials : []
+                );
+                const fixedCell = !isFixed
+                    ? escapeHtml(t('providers.credentialGroups.notAvailable'))
+                    : (fixedRef
+                        ? `<div class="credential-groups-table-primary"><strong>${escapeHtml(label.primary || t('providers.credentialGroups.unknown'))}</strong>${label.secondary ? `<small title="${escapeHtml(label.secondary)}">${escapeHtml(label.secondary)}</small>` : ''}</div>`
+                        : escapeHtml(t('providers.credentialGroups.unknown')));
                 return `<tr>
                     <td><div class="credential-groups-table-primary"><code>${escapeHtml(key?.maskedKey || key?.keyRef || t('providers.credentialGroups.unknown'))}</code><small>${escapeHtml(key?.name || t('providers.credentialGroups.unknown'))}</small></div></td>
                     <td><div class="credential-groups-table-badges">${routeBadge}${spillover}</div></td>
                     <td>${escapeHtml(primaryGroup)}</td>
-                    <td>${escapeHtml(isFixed ? fixed : t('providers.credentialGroups.notAvailable'))}</td>
+                    <td>${fixedCell}</td>
                     <td>${escapeHtml(formatCredentialGroupDemand(key?.demand))}</td>
                     <td><div class="credential-groups-table-badges">${enabledBadge}${lockBadge}${highUsageBadge}</div></td>
                 </tr>`;
