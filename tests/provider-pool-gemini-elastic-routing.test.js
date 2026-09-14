@@ -17,8 +17,8 @@ const sourceModel = 'gemini-2.5-flash-lite';
 const firstFallback = 'gemini-2.5-flash';
 const secondFallback = 'gemini-3.1-flash-lite';
 const thirdFallback = 'gemini-3-flash';
-const fourthFallback = 'gemini-3.6-flash-medium';
-const fifthFallback = 'gemini-3.7-flash-medium';
+const fourthFallback = 'gemini-3.8-flash-low';
+const fifthFallback = 'gemini-3.8-flash-medium';
 
 function coolingUntil(delayMs) {
     return {
@@ -91,19 +91,13 @@ describe('Antigravity elastic queue and model fallback', () => {
             'gemini-2.5-flash',
             'gemini-3.1-flash-lite',
             'gemini-3-flash',
-            'gemini-3.6-flash-low',
-            'gemini-3.6-flash-medium',
-            'gemini-3.6-flash-high',
-            'gemini-3.7-flash-low',
-            'gemini-3.7-flash-medium',
-            'gemini-3.7-flash-high',
             'gemini-3.8-flash-low',
             'gemini-3.8-flash-medium',
             'gemini-3.8-flash-high'
         ]);
     });
 
-    test('gemini-3-flash falls forward through 3.6/3.7/3.8 effort tiers', () => {
+    test('gemini-3-flash falls forward through 3.8 effort tiers and skips 3.6/3.7', () => {
         const configured = [
             'gemini-2.5-flash-lite',
             'gemini-2.5-flash',
@@ -120,20 +114,12 @@ describe('Antigravity elastic queue and model fallback', () => {
             'gemini-3.8-flash-high'
         ];
         expect(getAntigravityElasticFallbackModels('gemini-3-flash', configured)).toEqual([
-            'gemini-3.6-flash-low',
-            'gemini-3.6-flash-medium',
-            'gemini-3.6-flash-high',
-            'gemini-3.7-flash-low',
-            'gemini-3.7-flash-medium',
-            'gemini-3.7-flash-high',
             'gemini-3.8-flash-low',
             'gemini-3.8-flash-medium',
             'gemini-3.8-flash-high'
         ]);
-        expect(getAntigravityElasticFallbackModels('gemini-3.7-flash-medium', configured)).toEqual([
-            'gemini-3.7-flash-high',
-            'gemini-3.8-flash-low',
-            'gemini-3.8-flash-medium',
+        expect(getAntigravityElasticFallbackModels('gemini-3.7-flash-medium', configured)).toEqual([]);
+        expect(getAntigravityElasticFallbackModels('gemini-3.8-flash-medium', configured)).toEqual([
             'gemini-3.8-flash-high'
         ]);
         expect(getAntigravityElasticFallbackModels('gemini-3.8-flash-high', configured)).toEqual([]);
