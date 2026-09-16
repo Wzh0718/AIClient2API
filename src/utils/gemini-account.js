@@ -18,6 +18,26 @@ export function extractGeminiIdTokenEmail(idToken) {
     }
 }
 
+export function extractGeminiIdTokenClaims(idToken) {
+    if (typeof idToken !== 'string') return { sub: '', email: '' };
+    const parts = idToken.split('.');
+    if (parts.length < 2) return { sub: '', email: '' };
+
+    try {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+        return {
+            sub: typeof payload.sub === 'string' ? payload.sub.trim() : '',
+            email: payload.email_verified === false ? '' : normalizeEmail(payload.email)
+        };
+    } catch {
+        return { sub: '', email: '' };
+    }
+}
+
+export function extractGeminiCredentialSub(credentials = {}) {
+    return extractGeminiIdTokenClaims(credentials.id_token).sub;
+}
+
 export function extractGeminiCredentialEmail(credentials = {}) {
     return normalizeEmail(credentials.email) || extractGeminiIdTokenEmail(credentials.id_token);
 }

@@ -201,7 +201,7 @@ describe('Gemini OAuth session completion', () => {
         }));
     });
 
-    test('continues authorization when no account email can be resolved', async () => {
+    test('aborts authorization when no account email can be resolved', async () => {
         jest.spyOn(http, 'createServer').mockImplementation(handler => {
             callbackHandler = handler;
             return mockServer();
@@ -219,11 +219,12 @@ describe('Gemini OAuth session completion', () => {
         await callbackHandler({ url: `/?code=code-no-email&state=${auth.authInfo.sessionId}` }, response);
         await done;
 
-        expect(autoLinkProviderConfigs).toHaveBeenCalled();
-        expect(broadcastEvent).toHaveBeenCalledWith('oauth_success', expect.objectContaining({
-            accountEmail: '',
-            customName: ''
+        expect(autoLinkProviderConfigs).not.toHaveBeenCalled();
+        expect(broadcastEvent).toHaveBeenCalledWith('oauth_error', expect.objectContaining({
+            provider: 'gemini-antigravity',
+            error: expect.stringContaining('无法解析 Google 账号邮箱')
         }));
+        expect(broadcastEvent).not.toHaveBeenCalledWith('oauth_success', expect.anything());
     });
 
     test('ends the session immediately when Google token exchange fails', async () => {

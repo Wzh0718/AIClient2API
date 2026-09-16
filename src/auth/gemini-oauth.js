@@ -10,7 +10,7 @@ import { autoLinkProviderConfigs, replaceProviderCredentialPath } from '../servi
 import { CONFIG } from '../core/config-manager.js';
 import { getGoogleAuthProxyConfig, parseProxyUrl } from '../utils/proxy-utils.js';
 import { resolveProxyPoolEntry } from '../utils/proxy-pool-store.js';
-import { extractGeminiCredentialEmail } from '../utils/gemini-account.js';
+import { extractGeminiCredentialEmail, extractGeminiCredentialSub, extractGeminiIdTokenClaims } from '../utils/gemini-account.js';
 
 /**
  * OAuth 提供商配置
@@ -296,6 +296,84 @@ async function resolveGeminiOAuthAccountEmail(session, tokens) {
     return extractGeminiCredentialEmail(tokens);
 }
 
+function getGeminiTokenIdentity(tokens = {}) {
+    const claims = extractGeminiIdTokenClaims(tokens.id_token);
+    return {
+        sub: claims.sub || extractGeminiCredentialSub(tokens),
+        email: claims.email || (typeof tokens.email === 'string' ? tokens.email.trim() : '')
+    };
+}
+
+function matchGeminiIdentity(a = {}, b = {}) {
+    if (a.sub && b.sub) return a.sub === b.sub;
+    if (a.email && b.email) return a.email.toLowerCase() === b.email.toLowerCase();
+    return false;
+}
+
+/**
+ * 按账号唯一标识（id_token sub，fallback email）检查同账号凭据是否已存在。
+ * @returns {Promise<{isDuplicate: boolean, existingPath?: string, existingEmail?: string, poolUuid?: string, customName?: string}>}
+ */
+export async function findGeminiAccountDuplicate(providerType, tokens) {
+    const config = OAUTH_PROVIDERS[providerType];
+    if (!config) return { isDuplicate: false };
+
+    const identity = getGeminiTokenIdentity(tokens);
+    if (!identity.sub && !identity.email) return { isDuplicate: false };
+
+    const providerDir = config.credentialsDir.replace('.', '');
+    const targetDir = path.join(process.cwd(), 'configs', providerDir);
+    let existingPath = '';
+    let existingEmail = '';
+
+    try {
+        if (fs.existsSync(targetDir)) {
+            const files = await fs.promises.readdir(targetDir);
+            for (const file of files) {
+                if (!file.endsWith('.json')) continue;
+                const fullPath = path.join(targetDir, file);
+                try {
+                    const credentials = JSON.parse(await fs.promises.readFile(fullPath, 'utf8'));
+                    const candidate = {
+                        sub: extractGeminiCredentialSub(credentials),
+                        email: extractGeminiCredentialEmail(credentials)
+                    };
+                    if (matchGeminiIdentity(identity, candidate)) {
+                        existingPath = path.relative(process.cwd(), fullPath);
+                        existingEmail = candidate.email || identity.email;
+                        break;
+                    }
+                } catch {
+                    // 忽略无法解析的凭据文件
+                }
+            }
+        }
+    } catch (error) {
+        logger.warn(`[Gemini Auth] Error finding account duplicate for ${providerType}:`, error.message);
+        return { isDuplicate: false };
+    }
+
+    if (!existingPath) return { isDuplicate: false };
+
+    let poolUuid = '';
+    let customName = '';
+    try {
+        const providers = CONFIG.providerPools?.[providerType] || [];
+        const matched = providers.find(provider => {
+            const credPath = provider?.ANTIGRAVITY_OAUTH_CREDS_FILE_PATH || provider?.GEMINI_OAUTH_CREDS_FILE_PATH || '';
+            return credPath && path.resolve(credPath) === path.resolve(existingPath);
+        });
+        if (matched) {
+            poolUuid = matched.uuid || '';
+            customName = matched.customName || '';
+        }
+    } catch (error) {
+        logger.warn(`[Gemini Auth] Failed to locate pool entry for duplicate credential: ${error.message}`);
+    }
+
+    return { isDuplicate: true, existingPath, existingEmail, poolUuid, customName };
+}
+
 async function persistGeminiCredentials(session, tokens, accountEmail = '') {
     const providerDir = session.options.providerDir || session.config.credentialsDir.replace('.', '');
     const finalCredPath = session.options.saveToConfigs
@@ -361,9 +439,21 @@ async function completeGeminiOAuthSession(session, code) {
             redirect_uri: session.redirectUri
         });
         const accountEmail = await resolveGeminiOAuthAccountEmail(session, tokens);
+        if (!accountEmail) {
+            throw new Error('无法解析 Google 账号邮箱（tokenInfo 与 id_token 均失败），已取消保存。请重新授权或检查网络/代理后重试。');
+        }
         await withProviderTransitionLock(session.provider, async () => {
             if (latestSessions.get(session.provider) !== session.sessionId) {
                 throw new Error('OAuth authorization was replaced by a newer request');
+            }
+            if (!session.targetProviderUuid) {
+                const duplicate = await findGeminiAccountDuplicate(session.provider, tokens);
+                if (duplicate.isDuplicate) {
+                    const target = duplicate.poolUuid
+                        ? `现有条目 uuid=${duplicate.poolUuid}${duplicate.customName ? `（${duplicate.customName}）` : ''}`
+                        : `现有凭据 ${duplicate.existingPath}`;
+                    throw new Error(`该账号（${duplicate.existingEmail || accountEmail}）已存在：${target}。请对现有条目使用刷新/替换功能，而非重新授权。`);
+                }
             }
             const credentials = await persistGeminiCredentials(session, tokens, accountEmail);
             broadcastEvent('oauth_success', {
@@ -506,7 +596,7 @@ export async function handleGeminiAntigravityOAuth(currentConfig, options = {}) 
  * @param {string} refreshToken - 要检查的 refreshToken
  * @returns {Promise<{isDuplicate: boolean, existingPath?: string}>} 检查结果
  */
-export async function checkGeminiCredentialsDuplicate(providerType, refreshToken) {
+export async function checkGeminiCredentialsDuplicate(providerType, refreshToken, tokens = null) {
     const config = OAUTH_PROVIDERS[providerType];
     if (!config) return { isDuplicate: false };
 
@@ -514,10 +604,11 @@ export async function checkGeminiCredentialsDuplicate(providerType, refreshToken
     const targetDir = path.join(process.cwd(), 'configs', providerDir);
     
     try {
+        const identity = tokens ? getGeminiTokenIdentity(tokens) : null;
         if (!fs.existsSync(targetDir)) {
             return { isDuplicate: false };
         }
-        
+
         const files = await fs.promises.readdir(targetDir);
         for (const file of files) {
             if (file.endsWith('.json')) {
@@ -525,13 +616,26 @@ export async function checkGeminiCredentialsDuplicate(providerType, refreshToken
                     const fullPath = path.join(targetDir, file);
                     const content = await fs.promises.readFile(fullPath, 'utf8');
                     const credentials = JSON.parse(content);
-                    
+
                     if (credentials.refresh_token === refreshToken) {
                         const relativePath = path.relative(process.cwd(), fullPath);
                         return {
                             isDuplicate: true,
                             existingPath: relativePath
                         };
+                    }
+                    if (identity) {
+                        const candidate = {
+                            sub: extractGeminiCredentialSub(credentials),
+                            email: extractGeminiCredentialEmail(credentials)
+                        };
+                        if (matchGeminiIdentity(identity, candidate)) {
+                            const relativePath = path.relative(process.cwd(), fullPath);
+                            return {
+                                isDuplicate: true,
+                                existingPath: relativePath
+                            };
+                        }
                     }
                 } catch (e) {
                     // 忽略解析错误
@@ -582,7 +686,7 @@ export async function batchImportGeminiTokensStream(providerType, tokens, onProg
 
             // 检查重复
             if (!skipDuplicateCheck) {
-                const duplicateCheck = await checkGeminiCredentialsDuplicate(providerType, token.refresh_token);
+                const duplicateCheck = await checkGeminiCredentialsDuplicate(providerType, token.refresh_token, token);
                 if (duplicateCheck.isDuplicate) {
                     progressData.current = {
                         index: i + 1,
