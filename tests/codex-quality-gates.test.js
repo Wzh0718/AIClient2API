@@ -115,6 +115,76 @@ describe('Codex proxy quality gates', () => {
         }
     });
 
+    test('normalizes Responses Lite request fields for streaming and non-streaming calls', async () => {
+        const service = createService();
+        const completedEvent = 'data: {"type":"response.completed","response":{"id":"r1","status":"completed","model":"gpt-5.4-mini","output":[]}}\n\n';
+        const makeStream = () => (async function* () {
+            yield Buffer.from(completedEvent);
+        })();
+        const makeRequest = (overrides = {}) => ({
+            model: 'gpt-5.4-mini',
+            input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
+            ...overrides,
+            [CODEX_FINGERPRINT_CONTEXT_KEY]: {
+                inboundCodexHeaders: { 'x-openai-internal-codex-responses-lite': 'true' }
+            }
+        });
+        axios.request
+            .mockResolvedValueOnce({ status: 200, headers: {}, data: completedEvent })
+            .mockResolvedValueOnce({ status: 200, headers: {}, data: makeStream() });
+
+        try {
+            await service.generateContent('gpt-5.4-mini', makeRequest());
+            for await (const _event of service.generateContentStream('gpt-5.4-mini', makeRequest({
+                parallel_tool_calls: true,
+                reasoning: {
+                    effort: 'high',
+                    summary: 'detailed',
+                    context: 'current_turn',
+                    custom: 'preserve-me'
+                }
+            }))) {
+                // Consume the stream to exercise the request path.
+            }
+
+            const [nonStreamingConfig, streamingConfig] = axios.request.mock.calls.map(([config]) => config);
+            expect(getHeader(nonStreamingConfig.headers, 'x-openai-internal-codex-responses-lite')).toBe('true');
+            expect(getHeader(streamingConfig.headers, 'x-openai-internal-codex-responses-lite')).toBe('true');
+            expect(nonStreamingConfig.data.reasoning.context).toBe('all_turns');
+            expect(nonStreamingConfig.data.parallel_tool_calls).toBe(false);
+            expect(streamingConfig.data.reasoning).toMatchObject({
+                effort: 'high',
+                summary: 'detailed',
+                context: 'all_turns',
+                custom: 'preserve-me'
+            });
+            expect(streamingConfig.data.parallel_tool_calls).toBe(false);
+        } finally {
+            service.stopCacheCleanup();
+        }
+    });
+
+    test('leaves ordinary Responses request context and parallel tool setting unchanged', async () => {
+        const service = createService();
+
+        try {
+            const prepared = await service.prepareRequestBody('gpt-5.4-mini', {
+                input: [{ role: 'user', content: 'hello' }],
+                parallel_tool_calls: true,
+                reasoning: { effort: 'high', summary: 'detailed', context: 'current_turn' }
+            }, true);
+
+            expect(prepared.parallel_tool_calls).toBe(true);
+            expect(prepared.reasoning).toMatchObject({
+                effort: 'high',
+                summary: 'detailed',
+                context: 'current_turn'
+            });
+        } finally {
+            service.stopCacheCleanup();
+        }
+    });
+
     test('captures the allowlisted Codex routing headers before provider selection', () => {
         const context = extractInboundCodexFingerprintContext({
             headers: {
