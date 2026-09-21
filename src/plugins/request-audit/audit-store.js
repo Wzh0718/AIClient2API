@@ -2,6 +2,8 @@ import fs from 'fs';
 import { promises as fsp } from 'fs';
 import path from 'path';
 import readline from 'readline';
+import { finished, pipeline } from 'stream/promises';
+import { constants as zlibConstants, createGunzip, createGzip } from 'zlib';
 
 function toDate(value) {
     const date = value instanceof Date ? value : new Date(value);
@@ -13,14 +15,26 @@ function dateKeyFromTimestamp(value) {
     return date.toISOString().slice(0, 10);
 }
 
+const AUDIT_FILE_PATTERN = /^audit-(\d{4}-\d{2}-\d{2})\.jsonl(?:\.(\d{8}T\d{9}Z)(?:\.(\d+))?)?(\.gz)?$/;
+
+function parseAuditFileName(name) {
+    const match = String(name || '').match(AUDIT_FILE_PATTERN);
+    if (!match) return null;
+    return {
+        dateKey: match[1],
+        archived: Boolean(match[2]),
+        compressed: Boolean(match[4])
+    };
+}
+
 function isAuditFile(name) {
-    return /^audit-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name);
+    return Boolean(parseAuditFileName(name));
 }
 
 function auditFileTimeRange(filePath) {
-    const match = path.basename(filePath).match(/^audit-(\d{4}-\d{2}-\d{2})\.jsonl$/);
-    if (!match) return null;
-    const start = Date.parse(`${match[1]}T00:00:00.000Z`);
+    const parsed = parseAuditFileName(path.basename(filePath));
+    if (!parsed) return null;
+    const start = Date.parse(`${parsed.dateKey}T00:00:00.000Z`);
     if (!Number.isFinite(start)) return null;
     return { start, end: start + 24 * 60 * 60 * 1000 };
 }
@@ -39,7 +53,9 @@ export class RequestAuditStore {
         retentionHours = 24,
         maxFileBytes = 100 * 1024 * 1024,
         recentEventIdLimit = DEFAULT_RECENT_EVENT_ID_LIMIT,
-        eventIdTailBytes = DEFAULT_EVENT_ID_TAIL_BYTES
+        eventIdTailBytes = DEFAULT_EVENT_ID_TAIL_BYTES,
+        archiveCompressionAgeHours = 24,
+        pipelineImpl = pipeline
     } = {}) {
         this.dir = dir;
         this.archiveDir = archiveDir || path.join(this.dir, 'archived-large');
@@ -47,6 +63,8 @@ export class RequestAuditStore {
         this.maxFileBytes = Number(maxFileBytes) || 100 * 1024 * 1024;
         this.recentEventIdLimit = Math.max(1, Number(recentEventIdLimit) || DEFAULT_RECENT_EVENT_ID_LIMIT);
         this.eventIdTailBytes = Math.max(1024, Number(eventIdTailBytes) || DEFAULT_EVENT_ID_TAIL_BYTES);
+        this.archiveCompressionAgeHours = Math.max(1, Number(archiveCompressionAgeHours) || 24);
+        this.pipelineImpl = pipelineImpl;
         this.eventIdsByFile = new Map();
         this.lastQueryStats = { scannedFiles: 0, scannedBytes: 0 };
     }
@@ -140,6 +158,7 @@ export class RequestAuditStore {
         const until = toDate(filters.until);
         const files = await this.listFiles({ since, until });
         const rows = [];
+        const seenEventIds = new Set();
         const limit = Math.min(Math.max(Number(filters.limit) || 2000, 0), 2000);
         let scannedBytes = 0;
 
@@ -148,6 +167,8 @@ export class RequestAuditStore {
                 scannedBytes += Number((await fsp.stat(filePath)).size || 0);
                 for await (const event of this.readEvents(filePath)) {
                     if (!this.matches(event, { ...filters, since, until })) continue;
+                    if (event?.eventId && seenEventIds.has(event.eventId)) continue;
+                    if (event?.eventId) seenEventIds.add(event.eventId);
                     rows.push(event);
                     if (limit && rows.length >= limit) break;
                 }
@@ -195,8 +216,10 @@ export class RequestAuditStore {
     }
 
     async *readEvents(filePath) {
-        const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
-        const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+        const source = fs.createReadStream(filePath);
+        const input = filePath.endsWith('.gz') ? source.pipe(createGunzip()) : source;
+        input.setEncoding('utf8');
+        const lines = readline.createInterface({ input, crlfDelay: Infinity });
         try {
             for await (const line of lines) {
                 if (!line.trim()) continue;
@@ -208,7 +231,8 @@ export class RequestAuditStore {
             }
         } finally {
             lines.close();
-            stream.destroy();
+            input.destroy();
+            source.destroy();
         }
     }
 
@@ -229,10 +253,17 @@ export class RequestAuditStore {
 
     async listFiles({ since = null, until = null } = {}) {
         if (!fs.existsSync(this.dir)) return [];
-        const entries = await fsp.readdir(this.dir, { withFileTypes: true });
-        return entries
-            .filter(entry => entry.isFile() && isAuditFile(entry.name))
-            .map(entry => path.join(this.dir, entry.name))
+        const files = [];
+        for (const directory of [...new Set([this.dir, this.archiveDir])]) {
+            const entries = await fsp.readdir(directory, { withFileTypes: true }).catch(error => {
+                if (error?.code === 'ENOENT') return [];
+                throw error;
+            });
+            files.push(...entries
+                .filter(entry => entry.isFile() && isAuditFile(entry.name))
+                .map(entry => path.join(directory, entry.name)));
+        }
+        return files
             .filter(filePath => {
                 const range = auditFileTimeRange(filePath);
                 if (!range) return true;
@@ -240,20 +271,73 @@ export class RequestAuditStore {
                 if (until && range.start >= until.getTime()) return false;
                 return true;
             })
-            .sort();
+            .sort((left, right) => {
+                const leftDate = parseAuditFileName(path.basename(left))?.dateKey || '';
+                const rightDate = parseAuditFileName(path.basename(right))?.dateKey || '';
+                return leftDate.localeCompare(rightDate) || left.localeCompare(right);
+            });
     }
 
     async cleanup(now = new Date()) {
         if (!fs.existsSync(this.dir)) return;
         const cutoff = toDate(now).getTime() - this.retentionHours * 60 * 60 * 1000;
         const files = await this.listFiles();
+        let removed = 0;
         for (const filePath of files) {
-            const match = path.basename(filePath).match(/^audit-(\d{4}-\d{2}-\d{2})\.jsonl$/);
-            const fileDate = match ? new Date(`${match[1]}T23:59:59.999Z`) : null;
+            const parsed = parseAuditFileName(path.basename(filePath));
+            const fileDate = parsed ? new Date(`${parsed.dateKey}T23:59:59.999Z`) : null;
             if (fileDate && fileDate.getTime() < cutoff) {
                 await fsp.unlink(filePath).catch(() => {});
                 this.eventIdsByFile.delete(filePath);
+                removed += 1;
             }
+        }
+        const compressed = await this.compressClosedArchives(now);
+        return { removed, compressed };
+    }
+
+    async compressClosedArchives(now = new Date()) {
+        if (!fs.existsSync(this.archiveDir)) return 0;
+        const cutoff = toDate(now).getTime() - this.archiveCompressionAgeHours * 60 * 60 * 1000;
+        const entries = await fsp.readdir(this.archiveDir, { withFileTypes: true });
+        let compressed = 0;
+        for (const entry of entries) {
+            const parsed = entry.isFile() ? parseAuditFileName(entry.name) : null;
+            if (!parsed?.archived || parsed.compressed) continue;
+            const sourcePath = path.join(this.archiveDir, entry.name);
+            const stat = await fsp.stat(sourcePath).catch(() => null);
+            if (!stat?.isFile() || stat.mtimeMs > cutoff) continue;
+            if (await this.compressArchiveFile(sourcePath)) compressed += 1;
+        }
+        return compressed;
+    }
+
+    async compressArchiveFile(sourcePath) {
+        const destination = `${sourcePath}.gz`;
+        if (fs.existsSync(destination)) return false;
+        const temporary = `${destination}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const source = fs.createReadStream(sourcePath);
+        const compressor = createGzip({ level: zlibConstants.Z_BEST_SPEED });
+        const output = fs.createWriteStream(temporary, { flags: 'wx', mode: 0o600 });
+        try {
+            await this.pipelineImpl(source, compressor, output);
+            const handle = await fsp.open(temporary, 'r+');
+            try {
+                await handle.sync();
+            } finally {
+                await handle.close();
+            }
+            await fsp.rename(temporary, destination);
+            await fsp.unlink(sourcePath);
+            this.eventIdsByFile.delete(sourcePath);
+            return true;
+        } catch (error) {
+            source.destroy();
+            compressor.destroy();
+            output.destroy();
+            await finished(output).catch(() => {});
+            await fsp.unlink(temporary).catch(() => {});
+            throw error;
         }
     }
 }

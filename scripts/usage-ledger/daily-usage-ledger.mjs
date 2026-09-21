@@ -5,6 +5,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import zlib from 'node:zlib';
 import Database from 'better-sqlite3';
 
 // Single pricing source shared with src/plugins/api-potluck/cost-estimator.js.
@@ -30,6 +31,13 @@ function resolvePricingFile() {
 }
 
 const PRICING = JSON.parse(fs.readFileSync(resolvePricingFile(), 'utf8'));
+
+function createTextInput(filePath) {
+  const source = fs.createReadStream(filePath);
+  const input = filePath.endsWith('.gz') ? source.pipe(zlib.createGunzip()) : source;
+  input.setEncoding('utf8');
+  return input;
+}
 
 export const PRICING_VERSION = PRICING.pricingVersion;
 
@@ -873,7 +881,7 @@ async function readJsonlFiles(files) {
   const rows = [];
   for (const file of files) {
     if (!fs.existsSync(file)) continue;
-    const input = fs.createReadStream(file, { encoding: 'utf8' });
+    const input = createTextInput(file);
     const lines = readline.createInterface({ input, crlfDelay: Infinity });
     try {
       for await (const line of lines) {
@@ -1076,7 +1084,7 @@ export async function scanRepairAuditFiles({ files = [], from, to, collectEvents
       matchedLines: 0,
       parseErrorCount: 0,
     };
-    const input = fs.createReadStream(filePath, { encoding: 'utf8' });
+    const input = createTextInput(filePath);
     const lines = readline.createInterface({ input, crlfDelay: Infinity });
     let lineNumber = 0;
     try {
@@ -1137,7 +1145,7 @@ export async function scanRepairAuditFiles({ files = [], from, to, collectEvents
   let includedEventCount = 0;
   let zeroTokenSuccessCount = 0;
   for (const [fileIndex, filePath] of files.entries()) {
-    const input = fs.createReadStream(filePath, { encoding: 'utf8' });
+    const input = createTextInput(filePath);
     const lines = readline.createInterface({ input, crlfDelay: Infinity });
     let lineNumber = 0;
     try {

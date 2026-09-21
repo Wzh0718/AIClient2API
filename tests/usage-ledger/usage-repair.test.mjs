@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import zlib from 'node:zlib';
 
 import {
   applyRepairBundle,
@@ -125,6 +126,7 @@ test('discoverRepairAuditFiles includes active and archived UTC boundary files b
   ];
   for (const name of names) fs.writeFileSync(path.join(auditDir, name), '');
   fs.writeFileSync(path.join(archiveDir, 'audit-2026-07-21.jsonl.20260721T120000000Z'), '');
+  fs.writeFileSync(path.join(archiveDir, 'audit-2026-07-21.jsonl.20260721T130000000Z.gz'), zlib.gzipSync(''));
   fs.writeFileSync(path.join(archiveDir, 'audit-2026-07-22.jsonl.20260722T120000000Z.tmp'), '');
 
   const files = await discoverRepairAuditFiles({
@@ -138,9 +140,37 @@ test('discoverRepairAuditFiles includes active and archived UTC boundary files b
     'audit-2026-07-20.jsonl',
     'audit-2026-07-21.jsonl',
     'archived-large/audit-2026-07-21.jsonl.20260721T120000000Z',
+    'archived-large/audit-2026-07-21.jsonl.20260721T130000000Z.gz',
     'audit-2026-07-22.jsonl',
     'audit-2026-07-23.jsonl',
   ]);
+});
+
+test('scanRepairAuditFiles reads gzip audit archives', async () => {
+  const root = makeTempDir();
+  const compressed = path.join(root, 'audit-2026-07-20.jsonl.20260720T120000000Z.gz');
+  const event = {
+    eventId: 'gzip-event',
+    timestamp: '2026-07-20T16:10:00.000Z',
+    beijingDate: '2026-07-21',
+    requestId: 'gzip-request',
+    request: { toProvider: 'openai-codex-oauth', actualModel: 'gpt-5.6' },
+    potluckKey: { present: true, hash: 'sha256:gzip' },
+    account: { providerUuid: 'provider-gzip' },
+    status: { outcome: 'success' },
+    usage: { totalTokens: 42 },
+  };
+  fs.writeFileSync(compressed, zlib.gzipSync(`${JSON.stringify(event)}\n`));
+
+  const result = await scanRepairAuditFiles({
+    files: [compressed],
+    from: '2026-07-21',
+    to: '2026-07-21',
+  });
+
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].requestId, 'gzip-request');
+  assert.equal(result.events[0].usage.totalTokens, 42);
 });
 
 test('scanRepairAuditFiles streams, deduplicates by quality, counts zero-token successes, and reports corrupt lines', async () => {

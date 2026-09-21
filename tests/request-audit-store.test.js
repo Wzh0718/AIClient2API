@@ -1,6 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import zlib from 'zlib';
 import { RequestAuditStore } from '../src/plugins/request-audit/audit-store.js';
 
 describe('request audit store', () => {
@@ -116,21 +117,82 @@ describe('request audit store', () => {
     await expect(store.query({ requestId: 'req-v1' })).resolves.toHaveLength(1);
   });
 
-  test('cleanup removes only expired audit jsonl files', async () => {
+  test('cleanup removes expired active, archived, and compressed audit files', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-cleanup-'));
+    const archiveDir = path.join(dir, 'archived-large');
+    fs.mkdirSync(archiveDir, { recursive: true });
     const oldPath = path.join(dir, 'audit-2026-06-20.jsonl');
     const keepPath = path.join(dir, 'audit-2026-06-23.jsonl');
+    const oldArchivePath = path.join(archiveDir, 'audit-2026-06-20.jsonl.20260620T120000000Z');
+    const oldGzipPath = `${oldArchivePath}.1.gz`;
+    const keepArchivePath = path.join(archiveDir, 'audit-2026-06-23.jsonl.20260623T120000000Z');
     const otherPath = path.join(dir, 'notes.txt');
     fs.writeFileSync(oldPath, '{}\n');
     fs.writeFileSync(keepPath, '{}\n');
+    fs.writeFileSync(oldArchivePath, '{}\n');
+    fs.writeFileSync(oldGzipPath, zlib.gzipSync('{}\n'));
+    fs.writeFileSync(keepArchivePath, '{}\n');
     fs.writeFileSync(otherPath, 'keep');
 
     const store = new RequestAuditStore({ dir, retentionHours: 24 });
     await store.cleanup(new Date('2026-06-24T00:00:00.000Z'));
 
     expect(fs.existsSync(oldPath)).toBe(false);
+    expect(fs.existsSync(oldArchivePath)).toBe(false);
+    expect(fs.existsSync(oldGzipPath)).toBe(false);
     expect(fs.existsSync(keepPath)).toBe(true);
+    expect(fs.existsSync(keepArchivePath)).toBe(true);
     expect(fs.existsSync(otherPath)).toBe(true);
+  });
+
+  test('queries active, archived, and gzip files without duplicate event ids', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-gzip-query-'));
+    const archiveDir = path.join(dir, 'archived-large');
+    fs.mkdirSync(archiveDir, { recursive: true });
+    const shared = { eventId: 'shared', timestamp: '2026-07-02T09:00:00.000Z', requestId: 'shared' };
+    fs.writeFileSync(path.join(dir, 'audit-2026-07-02.jsonl'), `${JSON.stringify(shared)}\n`);
+    fs.writeFileSync(
+      path.join(archiveDir, 'audit-2026-07-02.jsonl.20260702T100000000Z'),
+      `${JSON.stringify({ eventId: 'archive', timestamp: '2026-07-02T08:00:00.000Z', requestId: 'archive' })}\n`
+    );
+    fs.writeFileSync(
+      path.join(archiveDir, 'audit-2026-07-02.jsonl.20260702T110000000Z.gz'),
+      zlib.gzipSync(`${JSON.stringify(shared)}\n${JSON.stringify({ eventId: 'gzip', timestamp: '2026-07-02T07:00:00.000Z', requestId: 'gzip' })}\n`)
+    );
+
+    const store = new RequestAuditStore({ dir });
+    const rows = await store.query({ since: '2026-07-02T00:00:00.000Z', until: '2026-07-03T00:00:00.000Z' });
+
+    expect(rows.map(row => row.eventId)).toEqual(['gzip', 'archive', 'shared']);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('compresses closed archives atomically and preserves the source on pipeline failure', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'request-audit-compress-'));
+    const archiveDir = path.join(dir, 'archived-large');
+    fs.mkdirSync(archiveDir, { recursive: true });
+    const archivePath = path.join(archiveDir, 'audit-2026-07-02.jsonl.20260702T100000000Z');
+    fs.writeFileSync(archivePath, `${JSON.stringify({ eventId: 'compressed', timestamp: '2026-07-02T09:00:00.000Z' })}\n`);
+    fs.utimesSync(archivePath, new Date('2026-07-02T10:00:00.000Z'), new Date('2026-07-02T10:00:00.000Z'));
+
+    const store = new RequestAuditStore({ dir, retentionHours: 840 });
+    await store.cleanup(new Date('2026-07-04T12:00:00.000Z'));
+
+    expect(fs.existsSync(archivePath)).toBe(false);
+    expect(zlib.gunzipSync(fs.readFileSync(`${archivePath}.gz`)).toString()).toContain('compressed');
+
+    const failedPath = path.join(archiveDir, 'audit-2026-07-03.jsonl.20260703T100000000Z');
+    fs.writeFileSync(failedPath, '{}\n');
+    fs.utimesSync(failedPath, new Date('2026-07-03T10:00:00.000Z'), new Date('2026-07-03T10:00:00.000Z'));
+    const failingStore = new RequestAuditStore({
+      dir,
+      retentionHours: 840,
+      pipelineImpl: async () => { throw new Error('simulated compression failure'); }
+    });
+    await expect(failingStore.cleanup(new Date('2026-07-05T12:00:00.000Z'))).rejects.toThrow('simulated compression failure');
+    expect(fs.existsSync(failedPath)).toBe(true);
+    expect(fs.readdirSync(archiveDir).some(name => name.includes('.tmp-'))).toBe(false);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   test('rotates oversized active audit file before appending new events', async () => {
