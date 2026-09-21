@@ -1,89 +1,73 @@
 import { readFileSync } from 'fs';
 
-describe('request audit ui source', () => {
-  test('static report references summary api and context usage rows', () => {
-    const html = readFileSync('static/request-audit.html', 'utf8');
-    expect(html).toContain('/api/request-audit/summary');
-    expect(html).toContain('/api/potluck/keys');
-    expect(html).toContain('keySelect');
-    expect(html).toContain('选择 Potluck Key');
-    expect(html).toContain('手动输入完整 key');
-    expect(html).toContain('本地计算 hash');
-    expect(html).toContain('crypto.subtle.digest');
-    expect(html).toContain("localStorage.getItem('authToken')");
-    expect(html).toContain('Authorization');
-    expect(html).toContain('keyRelatedNames');
-    expect(html).toContain('关联：');
-    expect(html).toContain('context-stack');
-    expect(html).toContain('按密钥和时间窗复盘请求缓存率');
-    expect(html).toContain('缓存命中率 =');
-    expect(html).toContain('逐请求明细');
-    expect(html).toContain('输入 / R缓存');
-    expect(html).toContain('总成本');
-    expect(html).toContain('用时 / 首字');
-    expect(html).toContain('clientFirstOutputMs');
-    expect(html).toContain('costDisplay');
-    expect(html).toContain('缺少价格');
-    expect(html).toContain('计费模型');
-    expect(html).toContain('价格版本');
-    expect(html).toContain('id="credential"');
-    expect(html).toContain('id="modelFilter"');
-    expect(html).toContain('id="providerFilter"');
-    expect(html).toContain('id="outcome"');
-    expect(html).toContain('id="modelMismatch"');
-    expect(html).toContain('id="loadMore"');
+describe('request audit workspace source', () => {
+  const html = readFileSync('static/request-audit.html', 'utf8');
+
+  test('uses the Potluck design system and compact admin workspace layout', () => {
+    expect(html).toContain('href="app/base.css"');
+    expect(html).toContain('class="audit-navbar"');
+    expect(html).toContain('class="workspace"');
+    expect(html).toContain('class="stats-grid"');
+    expect(html).toContain('id="themeToggle"');
+    expect(html).toContain('id="advancedFilters"');
+    expect(html).toContain('无需开启原始请求采集');
+    expect(html).toContain('最近 20 分钟 · 全部 Key');
+    expect(html).toContain('value="100"');
+  });
+
+  test('keeps filters compact and moves request details into an accessible drawer', () => {
+    for (const id of ['keySelect', 'modelFilter', 'outcome', 'since', 'until', 'clientIp', 'requestPath', 'credential', 'providerFilter', 'modelMismatch']) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    expect(html).toContain('class="request-table"');
+    expect(html).toContain('Provider / 账号');
+    expect(html).toContain('id="detailDrawer"');
+    expect(html).toContain('role="dialog"');
+    expect(html).toContain('aria-modal="true"');
+    expect(html).toContain('function openRequestDetail');
     expect(html).toContain('上游调用时间线');
-    expect(html).toContain("['出站', request.outboundModel");
-    expect(html).toContain("['上游自报', request.upstreamResponseModel]");
-    expect(html).toContain('function modelEvidence');
-    expect(html).toContain('模型链（存在差异）');
-    expect(html).toContain('四阶段一致');
-    expect(html).toContain('model-chain-box');
-    expect(html).toContain('gpt-diagnostics.html');
-    expect(html).toContain('id="clientIp"');
-    expect(html).toContain('id="requestPath"');
-    expect(html).toContain('客户端 IP');
-    expect(html).toContain('原始 Path');
-    expect(html).toContain('标准化 Path');
-    expect(html).toContain('Peer IP');
-    expect(html).toContain('IP 来源');
-    expect(html).toContain('响应字节');
-    expect(html).toContain('图片结果');
-    expect(html).toContain('单次请求 token 分类');
-    expect(html).toContain('type="datetime-local"');
-    expect(html).toContain('默认最近 20 分钟');
-    expect(html).toContain('data-range-minutes="20"');
-    expect(html).toContain('data-range-minutes="60"');
-    expect(html).toContain('data-range-today="true"');
-    expect(html).toContain('value="200"');
-    expect(html).toContain('localDatetimeToIso');
-    expect(html).toContain('分析延迟');
-    expect(html).toContain('可能原因');
-    expect(html).toContain('prefix_changed');
-    expect(html).toContain('tools_changed');
-    expect(html).toContain('account_changed');
-    expect(html).toContain('analysisFreshness');
-    expect(html).toContain('诊断结果仅供排查');
-    expect(html).toContain('role="tablist"');
-    expect(html).toContain('data-view="audit"');
-    expect(html).toContain('data-view="capture"');
-    expect(html).toContain('auditPanel');
-    expect(html).toContain('capturePanel');
-    expect(html).toContain('showView');
-    expect(html).toContain('aria-selected');
-    expect(html).toContain('缓存审计');
-    expect(html).toContain('原始请求采集');
+    expect(html).toContain('Turn-State');
+    expect(html).toContain('路由、计费与安全元数据');
+    expect(html).not.toContain('colspan="13"');
+  });
+
+  test('isolates raw capture in advanced tools and preserves the legacy hash', () => {
+    expect(html).toContain('id="openTools"');
+    expect(html).toContain('id="toolsDrawer"');
+    expect(html).toContain('高风险操作与日常审计隔离');
     expect(html).toContain('/api/request-audit/raw-capture');
     expect(html).toContain('rawCaptureKeySelect');
     expect(html).toContain('rawCaptureKeyInput');
     expect(html).toContain('resolveRawCaptureKeyHash');
-    expect(html).toContain('rawCaptureManualHelp');
-    expect(html).toContain('手动输入完整采集 key');
-    expect(html).toContain('保存采集设置');
+    expect(html).toContain("view === 'capture'");
+    expect(html).toContain("'#capture'");
     expect(html).toContain('会保存原始 prompt');
-    expect(html).toContain('REQUEST_AUDIT_RAW_CAPTURE');
-    for (const id of ['instructions', 'tools', 'conversation', 'attachments', 'cached_input', 'output', 'reasoning']) {
-      expect(html).toContain(id);
-    }
+  });
+
+  test('authenticates every audit request, auto-loads, and supports responsive keyboard interaction', () => {
+    expect(html).toContain('const { auth = true');
+    expect(html).toContain("localStorage.getItem('authToken')");
+    expect(html).toContain('response.status === 401');
+    expect(html).toContain('/login.html?returnUrl=');
+    expect(html).toContain('Promise.allSettled([loadKeyOptions(), loadRawCaptureStatus()]).then(() => loadAudit())');
+    expect(html).toContain("event.key === 'Escape'");
+    expect(html).toContain("event.key === 'Tab'");
+    expect(html).toContain('@media (max-width: 860px)');
+    expect(html).toContain('@media (prefers-reduced-motion: reduce)');
+    expect(html).toContain('mobile-request-list');
+  });
+
+  test('renders complete-window source metadata and existing audit evidence', () => {
+    expect(html).toContain('/api/request-audit/summary');
+    expect(html).toContain('/api/request-audit/requests');
+    expect(html).toContain('SQLite 完整汇总');
+    expect(html).toContain('降级汇总');
+    expect(html).toContain('outcomeCounts');
+    expect(html).toContain('cacheHitRatio');
+    expect(html).toContain('averageLatency');
+    expect(html).toContain('context-stack');
+    expect(html).toContain('clientFirstOutputMs');
+    expect(html).toContain('costDisplay');
+    expect(html).toContain('modelEvidence');
   });
 });

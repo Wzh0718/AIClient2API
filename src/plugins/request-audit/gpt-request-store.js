@@ -110,7 +110,7 @@ export class GptRequestStore {
     append(event) { if (!this.db) return false; this.writeTransaction([event]); return true; }
     appendBatch(events = []) { if (!this.db || events.length === 0) return false; this.writeTransaction(events); return true; }
 
-    query(filters = {}) {
+    buildFilter(filters = {}, { includeCursor = true } = {}) {
         const clauses = [];
         const params = {};
         const bind = (name, value, sql) => {
@@ -124,18 +124,33 @@ export class GptRequestStore {
         bind('provider', filters.provider, 'provider = @provider');
         bind('model', filters.model, '(requested_model = @model OR planned_model = @model OR outbound_model = @model OR upstream_response_model = @model)');
         bind('outcome', filters.outcome, 'outcome = @outcome');
+        bind('requestId', filters.requestId, 'request_id = @requestId');
+        bind('clientIp', filters.clientIp, "json_extract(payload_json, '$.network.clientIp') = @clientIp");
+        bind('path', filters.path, "json_extract(payload_json, '$.request.path') = @path");
+        bind('keyPrefix', filters.keyPrefix, "json_extract(payload_json, '$.potluckKey.prefix') = @keyPrefix");
         if (['true', '1', true].includes(filters.modelMismatch)) clauses.push('model_mismatch = 1');
-        const cursor = decodeCursor(filters.cursor);
-        if (cursor) {
+        const cursor = includeCursor ? decodeCursor(filters.cursor) : null;
+        if (includeCursor && cursor) {
             clauses.push('(timestamp < @cursorTime OR (timestamp = @cursorTime AND request_id < @cursorRequestId))');
             params.cursorTime = cursor[0]; params.cursorRequestId = cursor[1];
         }
+        return { clauses, params };
+    }
+
+    query(filters = {}) {
+        const { clauses, params } = this.buildFilter(filters);
         const limit = Math.min(Math.max(Number(filters.limit) || 100, 1), 500);
         const sql = `SELECT payload_json FROM gpt_requests${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY timestamp DESC, request_id DESC LIMIT @limit`;
         const rows = this.db.prepare(sql).all({ ...params, limit: limit + 1 });
         const hasMore = rows.length > limit;
         const requests = rows.slice(0, limit).map(row => JSON.parse(row.payload_json));
         return { requests, nextCursor: hasMore && requests.length ? encodeCursor(requests.at(-1)) : null };
+    }
+
+    queryAll(filters = {}) {
+        const { clauses, params } = this.buildFilter(filters, { includeCursor: false });
+        const sql = `SELECT payload_json FROM gpt_requests${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY timestamp ASC, request_id ASC`;
+        return this.db.prepare(sql).all(params).map(row => JSON.parse(row.payload_json));
     }
 
     get(requestId) {

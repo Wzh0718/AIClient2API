@@ -29,6 +29,53 @@ describe('request audit api aggregation', () => {
     expect(summary.models['gpt-5.5'].requestCount).toBe(1);
     expect(summary.accounts.A.promptTokens).toBe(1000);
     expect(summary.contextSections.conversation.tokens).toBe(1250);
+    expect(summary.outcomeCounts.unknown).toBe(2);
+  });
+
+  test('SQLite summary covers the full filtered window without inheriting list limit', async () => {
+    const projected = [
+      { requestId: 'req-1', status: { outcome: 'success' }, usage: { promptTokens: 100, cachedTokens: 50 } },
+      { requestId: 'req-2', status: { outcome: 'http_error' }, usage: { promptTokens: 200, cachedTokens: 0 } }
+    ];
+    const queryAll = jest.fn(() => projected);
+    setGptRequestStore({ queryAll });
+    const config = {
+      _requestAuditSkipAuth: true,
+      GPT_REQUEST_AUDIT_RETENTION_DAYS: 7,
+      _requestAuditStore: { query: jest.fn(async () => []) },
+      _requestAuditAnalysisStore: {
+        readFreshness: jest.fn(async () => ({ status: 'fresh' })),
+        readDiagnostics: jest.fn(async () => ({}))
+      }
+    };
+    try {
+      const payload = await callRoute('/api/request-audit/summary?since=2026-09-20T00%3A00%3A00.000Z&until=2026-09-21T00%3A00%3A00.000Z&limit=1', config);
+      expect(queryAll).toHaveBeenCalledWith(expect.objectContaining({
+        since: '2026-09-20T00:00:00.000Z',
+        until: '2026-09-21T00:00:00.000Z'
+      }));
+      expect(queryAll.mock.calls[0][0]).not.toHaveProperty('limit');
+      expect(payload.data.summary).toMatchObject({ requestCount: 2, promptTokens: 300, cachedTokens: 50 });
+      expect(payload.data.outcomeCounts).toEqual({ success: 1, http_error: 1 });
+      expect(payload.data.meta).toEqual({ source: 'gpt_requests_sqlite', retentionDays: 7, complete: true });
+    } finally {
+      setGptRequestStore(null);
+    }
+  });
+
+  test('summary reports an incomplete JSONL fallback when SQLite is unavailable', async () => {
+    setGptRequestStore(null);
+    const query = jest.fn(async () => []);
+    const payload = await callRoute('/api/request-audit/summary?limit=1', {
+      _requestAuditSkipAuth: true,
+      _requestAuditStore: { query },
+      _requestAuditAnalysisStore: {
+        readFreshness: jest.fn(async () => ({ status: 'missing' })),
+        readDiagnostics: jest.fn(async () => ({}))
+      }
+    });
+    expect(query).toHaveBeenCalledWith(expect.objectContaining({ limit: 2000 }));
+    expect(payload.data.meta).toMatchObject({ source: 'jsonl_fallback', complete: false });
   });
 
   test('summarizes priced estimated and missing request costs without repricing legacy events', () => {

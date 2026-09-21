@@ -119,6 +119,7 @@ export function buildAuditSummary(events = []) {
             totalTokens: 0,
             cacheHitRatio: 0
         },
+        outcomeCounts: {},
         models: {},
         accounts: {},
         contextSections: {},
@@ -137,6 +138,8 @@ export function buildAuditSummary(events = []) {
 
     for (const event of events) {
         const usage = event.usage || {};
+        const outcome = event.status?.outcome || 'unknown';
+        result.outcomeCounts[outcome] = (result.outcomeCounts[outcome] || 0) + 1;
         addUsage(result.summary, usage);
         addUsage(ensureBucket(result.models, event.request?.model), usage);
         addUsage(ensureBucket(result.accounts, event.account?.accountEmail || event.account?.providerNameDisplay || event.account?.providerUuidHash || event.account?.providerUuid), usage);
@@ -381,7 +384,13 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
     const filters = parseQuery(requestUrl);
 
     if (path === '/api/request-audit/summary') {
-        const events = await store.query(filters);
+        const summaryFilters = { ...filters };
+        delete summaryFilters.cursor;
+        delete summaryFilters.limit;
+        const sqliteAvailable = Boolean(gptRequestStore?.queryAll);
+        const events = sqliteAvailable
+            ? gptRequestStore.queryAll(summaryFilters)
+            : await store.query({ ...summaryFilters, limit: 2000 });
         const diagnostics = await materialized.readDiagnostics({ requestIds: requestIds(events) });
         const freshness = await materialized.readFreshness();
         sendJson(res, 200, {
@@ -389,6 +398,11 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
             data: {
                 window: { since: filters.since || null, until: filters.until || null },
                 ...buildAuditSummary(events),
+                meta: {
+                    source: sqliteAvailable ? 'gpt_requests_sqlite' : 'jsonl_fallback',
+                    retentionDays: Number(config.GPT_REQUEST_AUDIT_RETENTION_DAYS || 7),
+                    complete: sqliteAvailable
+                },
                 analysisFreshness: freshness,
                 diagnosticsSummary: summarizeDiagnostics(diagnostics)
             }
