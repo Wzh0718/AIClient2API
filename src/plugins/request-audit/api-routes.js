@@ -7,6 +7,8 @@ import { atomicWriteFile, withFileLock } from '../../utils/file-lock.js';
 let auditStore = null;
 let analysisStore = null;
 let rawCaptureController = null;
+let gptRequestStore = null;
+let gptDiagnosticsRunner = null;
 
 function toNumber(value) {
     const number = Number(value);
@@ -75,6 +77,14 @@ export function setRawCaptureController(controller) {
     rawCaptureController = controller;
 }
 
+export function setGptRequestStore(store) {
+    gptRequestStore = store;
+}
+
+export function setGptDiagnosticsRunner(runner) {
+    gptDiagnosticsRunner = runner;
+}
+
 export function getAuditStore(config = {}) {
     if (config._requestAuditStore) return config._requestAuditStore;
     if (!auditStore) {
@@ -112,7 +122,17 @@ export function buildAuditSummary(events = []) {
         models: {},
         accounts: {},
         contextSections: {},
-        timing: summarizeDurations(events)
+        timing: summarizeDurations(events),
+        cost: {
+            usd: 0,
+            actualUsd: 0,
+            estimatedUsd: 0,
+            pricedRequestCount: 0,
+            estimatedRequestCount: 0,
+            missingPriceRequestCount: 0,
+            estimatedPriceTokens: 0,
+            missingPriceTokens: 0
+        }
     };
 
     for (const event of events) {
@@ -120,6 +140,20 @@ export function buildAuditSummary(events = []) {
         addUsage(result.summary, usage);
         addUsage(ensureBucket(result.models, event.request?.model), usage);
         addUsage(ensureBucket(result.accounts, event.account?.accountEmail || event.account?.providerNameDisplay || event.account?.providerUuidHash || event.account?.providerUuid), usage);
+        if (event.cost && typeof event.cost === 'object') {
+            result.cost.usd += toNumber(event.cost.usd);
+            result.cost.actualUsd += toNumber(event.cost.actualUsd);
+            result.cost.estimatedUsd += toNumber(event.cost.estimatedUsd);
+            result.cost.estimatedPriceTokens += toNumber(event.cost.estimatedPriceTokens);
+            result.cost.missingPriceTokens += toNumber(event.cost.missingPriceTokens);
+            if (event.cost.pricingSource === 'missing' || toNumber(event.cost.missingPriceTokens) > 0) {
+                result.cost.missingPriceRequestCount += 1;
+            } else if (toNumber(event.cost.estimatedUsd) > 0) {
+                result.cost.estimatedRequestCount += 1;
+            } else {
+                result.cost.pricedRequestCount += 1;
+            }
+        }
 
         for (const section of event.contextBreakdown?.sections || []) {
             const id = section.id || 'unknown';
@@ -256,13 +290,60 @@ function parseQuery(requestUrl) {
         model: requestUrl.searchParams.get('model') || undefined,
         provider: requestUrl.searchParams.get('provider') || undefined,
         outcome: requestUrl.searchParams.get('outcome') || undefined,
+        credential: requestUrl.searchParams.get('credential') || undefined,
+        modelMismatch: requestUrl.searchParams.get('modelMismatch') || undefined,
+        cursor: requestUrl.searchParams.get('cursor') || undefined,
         limit: requestUrl.searchParams.get('limit') || undefined
     };
 }
 
 export async function handleRequestAuditRoutes(method, path, req, res, config = {}) {
-    if (!path.startsWith('/api/request-audit')) return false;
+    if (!path.startsWith('/api/request-audit') && !path.startsWith('/api/gpt-diagnostics')) return false;
     if (!await ensureRequestAuditAuth(req, res, config)) return true;
+    if (path.startsWith('/api/gpt-diagnostics')) {
+        if (!gptDiagnosticsRunner) {
+            sendJson(res, 503, { success: false, error: { message: 'GPT diagnostics runner is not ready' } });
+            return true;
+        }
+        try {
+            if (path === '/api/gpt-diagnostics/runs' && method === 'POST') {
+                const body = await getRequestBody(req, { maxBytes: 64 * 1024 });
+                const run = await gptDiagnosticsRunner.create(body);
+                sendJson(res, 202, { success: true, data: { run } });
+                return true;
+            }
+            if (path === '/api/gpt-diagnostics/runs' && method === 'GET') {
+                sendJson(res, 200, { success: true, data: { runs: gptDiagnosticsRunner.list() } });
+                return true;
+            }
+            const cancelMatch = path.match(/^\/api\/gpt-diagnostics\/runs\/([^/]+)\/cancel$/);
+            if (cancelMatch && method === 'POST') {
+                const run = await gptDiagnosticsRunner.cancel(decodeURIComponent(cancelMatch[1]));
+                if (!run) sendJson(res, 404, { success: false, error: { message: 'Diagnostic run not found' } });
+                else sendJson(res, 200, { success: true, data: { run } });
+                return true;
+            }
+            const scoreMatch = path.match(/^\/api\/gpt-diagnostics\/runs\/([^/]+)\/score$/);
+            if (scoreMatch && method === 'POST') {
+                const body = await getRequestBody(req, { maxBytes: 16 * 1024 });
+                const run = await gptDiagnosticsRunner.score(decodeURIComponent(scoreMatch[1]), body);
+                if (!run) sendJson(res, 404, { success: false, error: { message: 'Diagnostic run not found' } });
+                else sendJson(res, 200, { success: true, data: { run } });
+                return true;
+            }
+            const runMatch = path.match(/^\/api\/gpt-diagnostics\/runs\/([^/]+)$/);
+            if (runMatch && method === 'GET') {
+                const run = gptDiagnosticsRunner.get(decodeURIComponent(runMatch[1]));
+                if (!run) sendJson(res, 404, { success: false, error: { message: 'Diagnostic run not found' } });
+                else sendJson(res, 200, { success: true, data: { run } });
+                return true;
+            }
+            sendJson(res, 405, { success: false, error: { message: 'Method not allowed' } });
+        } catch (error) {
+            sendJson(res, error.statusCode || 500, { success: false, error: { message: error.message } });
+        }
+        return true;
+    }
     if (path === '/api/request-audit/raw-capture') {
         if (!rawCaptureController) {
             sendJson(res, 503, { success: false, error: { message: 'Raw capture controller is not ready' } });
@@ -316,6 +397,18 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
     }
 
     if (path === '/api/request-audit/requests') {
+        if (gptRequestStore) {
+            const result = gptRequestStore.query(filters);
+            const diagnostics = await materialized.readDiagnostics({ requestIds: requestIds(result.requests) });
+            sendJson(res, 200, {
+                success: true,
+                data: {
+                    requests: result.requests.map(event => ({ ...event, diagnosis: diagnostics[event.requestId] || null })),
+                    nextCursor: result.nextCursor
+                }
+            });
+            return true;
+        }
         const events = await store.query(filters);
         const diagnostics = await materialized.readDiagnostics({ requestIds: requestIds(events) });
         sendJson(res, 200, {
@@ -327,6 +420,21 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
                 }))
             }
         });
+        return true;
+    }
+
+    const detailMatch = path.match(/^\/api\/request-audit\/requests\/([^/]+)$/);
+    if (detailMatch) {
+        const requestId = decodeURIComponent(detailMatch[1]);
+        const request = gptRequestStore?.get(requestId)
+            || (await store.query({ requestId, limit: 1 }))[0]
+            || null;
+        if (!request) {
+            sendJson(res, 404, { success: false, error: { message: 'Request not found' } });
+            return true;
+        }
+        const diagnostics = await materialized.readDiagnostics({ requestIds: [requestId] });
+        sendJson(res, 200, { success: true, data: { request: { ...request, diagnosis: diagnostics[requestId] || null } } });
         return true;
     }
 

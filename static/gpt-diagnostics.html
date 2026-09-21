@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GPT 质量检测</title>
+  <style>
+    :root{color-scheme:dark;--bg:#09111f;--card:#111d31;--line:#29405f;--text:#e9f1ff;--muted:#93a8c5;--accent:#68d5c8;--warn:#ffca6a;--bad:#ff8585}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#14284a,var(--bg) 45%);color:var(--text);font:14px/1.5 system-ui,sans-serif}main{max-width:1180px;margin:auto;padding:32px 20px}h1,h2{margin:.2em 0}.lead,.muted{color:var(--muted)}.panel{background:rgba(17,29,49,.96);border:1px solid var(--line);border-radius:16px;padding:20px;margin:18px 0}.form{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:end}label{display:grid;gap:6px}input,textarea,button{border:1px solid var(--line);background:#0b1628;color:var(--text);border-radius:9px;padding:10px}textarea{min-height:100px;resize:vertical}button{background:var(--accent);color:#071313;font-weight:700;cursor:pointer}.estimate{margin:12px 0;color:var(--warn)}.run{border-top:1px solid var(--line);padding:16px 0}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#213855}.target{margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:10px}.signals{color:var(--warn)}pre{white-space:pre-wrap;max-height:240px;overflow:auto;background:#07111f;padding:10px;border-radius:8px}iframe{width:100%;height:360px;background:white;border:0;border-radius:8px}a{color:var(--accent)}@media(max-width:760px){.form{grid-template-columns:1fr}}
+  </style>
+</head>
+<body><main>
+  <p><a href="request-audit.html">← 请求记录</a></p>
+  <h1>GPT 质量检测</h1>
+  <p class="lead">固定凭据和模型执行鹈鹕 SVG、知识时间与 ModelTrace 指纹。结果是诊断证据，不会自动停用凭据，也不把闭集归因当成模型身份证明。</p>
+  <section class="panel">
+    <div class="form">
+      <label>检测目标（每行：凭据 UUID,模型）<textarea id="targets" autocomplete="off" placeholder="provider-uuid-1,gpt-5.5&#10;provider-uuid-2,gpt-5.6-sol"></textarea></label>
+      <button id="start">开始检测</button>
+    </div>
+    <div class="estimate">每个目标执行 5 个真实请求，最大输出预算约 26,192 tokens。检测串行执行。</div>
+    <p id="status" class="muted"></p>
+  </section>
+  <section class="panel"><h2>历史与趋势</h2><div id="runs">加载中…</div></section>
+</main>
+<script>
+const auth=()=>{const token=localStorage.getItem('authToken');return token?{Authorization:`Bearer ${token}`}:{}};
+const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(url,options={}){const response=await fetch(url,{...options,headers:{...auth(),...(options.headers||{})}});const body=await response.json().catch(()=>({}));if(!response.ok||body.success===false)throw new Error(body.error?.message||`HTTP ${response.status}`);return body.data;}
+function targetHtml(target,runId,index){const trace=target.modelTrace;const pelican=target.pelican;const signals=(target.passiveSignals||[]).map(x=>esc(x.code)).join('、')||'无';return `<div class="target"><strong>${esc(target.providerType||'')} / ${esc(target.model)}</strong><p>状态：${esc(target.status)}　被动信号：<span class="signals">${signals}</span></p>${pelican?`<p>鹈鹕 SVG：${pelican.valid?'格式有效':`无效 ${esc(pelican.reason)}`}　人工评分：${pelican.manualScore??'未评分'} ${pelican.valid?`<input data-score-input="${esc(runId)}:${index}" type="number" min="0" max="5" step="0.5" style="width:70px"><button data-score="${esc(runId)}:${index}">保存评分</button>`:''}</p>${pelican.previewSvg?`<details><summary>安全预览</summary><iframe sandbox data-svg="${esc(runId)}:${index}"></iframe></details>`:''}`:''}${trace?`<p>ModelTrace：${trace.valid?`${esc(trace.predictionName)}，闭集概率 ${(Number(trace.closedSetProbability)*100).toFixed(2)}%`:`无有效输出 ${esc(trace.reason)}`}<br><span class="muted">候选库 ${esc(trace.bankVersion)}；仅表示当前候选库内的相似归因。</span></p>`:''}${target.knowledge?`<details><summary>知识时间输出</summary><pre>${esc(target.knowledge.raw)}</pre></details>`:''}</div>`}
+function render(runs){document.getElementById('runs').innerHTML=runs.length?runs.map(run=>`<article class="run"><span class="badge">${esc(run.status)}</span> <strong>${esc(run.testVersion)}</strong> <span class="muted">${new Date(run.createdAt).toLocaleString()}</span><p>${run.estimate.requestCount} 请求 / 最大 ${Number(run.estimate.maxOutputTokens).toLocaleString()} 输出 tokens ${['queued','running'].includes(run.status)?`<button data-cancel="${esc(run.runId)}">取消</button>`:''}</p>${(run.results||[]).map((target,index)=>targetHtml(target,run.runId,index)).join('')}</article>`).join(''):'暂无检测记录。';document.querySelectorAll('[data-cancel]').forEach(button=>button.onclick=async()=>{await api(`/api/gpt-diagnostics/runs/${button.dataset.cancel}/cancel`,{method:'POST'});await load();});document.querySelectorAll('[data-svg]').forEach(frame=>{const [runId,index]=frame.dataset.svg.split(':');const target=runs.find(run=>run.runId===runId)?.results?.[Number(index)];if(target?.pelican?.previewSvg)frame.srcdoc=target.pelican.previewSvg});document.querySelectorAll('[data-score]').forEach(button=>button.onclick=async()=>{const [runId,index]=button.dataset.score.split(':');const run=runs.find(item=>item.runId===runId);const target=run?.results?.[Number(index)];const input=document.querySelector(`[data-score-input="${button.dataset.score}"]`);await api(`/api/gpt-diagnostics/runs/${runId}/score`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({providerUuid:target.providerUuid,model:target.model,score:Number(input.value)})});await load()});}
+async function load(){try{render((await api('/api/gpt-diagnostics/runs')).runs||[])}catch(error){document.getElementById('runs').textContent=error.message}}
+document.getElementById('start').onclick=async()=>{const targets=document.getElementById('targets').value.split(/\r?\n/).map(line=>line.split(',').map(value=>value.trim())).filter(parts=>parts[0]&&parts[1]).map(([providerUuid,model])=>({providerUuid,model}));if(!targets.length){document.getElementById('status').textContent='请按“凭据 UUID,模型”每行输入一个目标。';return}try{const data=await api('/api/gpt-diagnostics/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({targets})});document.getElementById('status').textContent=`已创建 ${data.run.runId}`;await load()}catch(error){document.getElementById('status').textContent=error.message}};
+load();setInterval(load,5000);
+</script></body></html>

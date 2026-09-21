@@ -223,6 +223,10 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         TRUST_PROXY: false, // 是否信任反向代理传入的 x-forwarded-for
         TRUSTED_PROXY_IPS: ['127.0.0.1', '::1'], // 允许提供 x-forwarded-for 的反向代理 IP 列表
         REQUEST_AUDIT_NETWORK_METADATA_ENABLED: false, // 是否将请求网络元数据写入审计事件
+        GPT_REQUEST_AUDIT_DB_PATH: 'configs/request-audit/gpt-requests.sqlite',
+        GPT_REQUEST_AUDIT_RETENTION_DAYS: 7,
+        GPT_DIAGNOSTICS_DIR: 'configs/gpt-diagnostics',
+        GPT_DIAGNOSTICS_RETENTION_DAYS: 35,
         PROVIDER_POOLS_FILE_PATH: null, // 新增号池配置文件路径
         PROXY_POOLS_FILE_PATH: null, // 集中代理池配置文件路径
         MAX_ERROR_COUNT: 10, // 提供商最大错误次数

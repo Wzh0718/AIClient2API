@@ -4,6 +4,7 @@ import { fork } from 'child_process';
 import { fileURLToPath } from 'url';
 import { createRuntimeProxyHandler } from './runtime-proxy.js';
 import { resolveWorkerTopology } from './worker-topology.js';
+import { handleCodexTurnStateIpcMessage } from '../providers/openai/codex-turn-state.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workerScript = path.join(__dirname, '../services/api-server.js');
@@ -711,6 +712,11 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
         workers.set(id, { id, role, port, child });
         child.on('message', message => {
             if (!isCurrentWorkerInstance(workers, id, child)) return;
+            if (message?.type === 'codex_turn_state_request') {
+                const result = handleCodexTurnStateIpcMessage(message) || {};
+                if (child.connected) child.send({ type: 'codex_turn_state_response', requestId: message.requestId, ...result });
+                return;
+            }
             if (message?.type === 'ready') {
                 ready.add(id);
                 if (role === 'execution') {

@@ -476,6 +476,17 @@ function getProviderTypeFields(providerType) {
         ],
         'openai-codex-oauth': [
             {
+                id: 'codexTurnStateReuseEnabled',
+                label: t('modal.provider.codexTurnStateReuseEnabled'),
+                type: 'select',
+                value: 'false',
+                options: [
+                    { value: 'false', label: t('modal.provider.disabled') },
+                    { value: 'true', label: t('modal.provider.enabled') }
+                ],
+                help: t('modal.provider.codexTurnStateReuseHelp')
+            },
+            {
                 id: 'codexFingerprintMode',
                 label: t('modal.provider.codexFingerprintMode'),
                 type: 'select',

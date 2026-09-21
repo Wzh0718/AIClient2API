@@ -1,9 +1,11 @@
 import logger from '../../utils/logger.js';
 import { buildRequestAuditEvent, hashSecret, maskPotluckKey, normalizeUsage } from './audit-event.js';
 import { extractUsage as extractNormalizedUsage, mergeUsage as mergeNormalizedUsage } from '../../utils/usage-normalizer.js';
-import { getAnalysisStore, getAuditStore, handleRequestAuditRoutes, persistRawCaptureConfig, setAnalysisStore, setAuditStore, setRawCaptureController } from './api-routes.js';
+import { getAnalysisStore, getAuditStore, handleRequestAuditRoutes, persistRawCaptureConfig, setAnalysisStore, setAuditStore, setGptDiagnosticsRunner, setGptRequestStore, setRawCaptureController } from './api-routes.js';
 import { createRequestAuditAnalyzerRunner } from './analyzer-runner.js';
 import { buildBoundedRawCaptureEvent, RequestAuditRawCaptureStore, shouldCaptureRawRequest } from './raw-capture-store.js';
+import { GptRequestStore } from './gpt-request-store.js';
+import { GptDiagnosticsRunner } from './gpt-diagnostics.js';
 
 const pendingUsage = new Map();
 const pendingAuditContexts = new Map();
@@ -33,6 +35,8 @@ let destroyPromise = null;
 let auditLossCounts = new Map();
 let backgroundFailureCounts = new Map();
 let runtimeProjectionBatch = null;
+let gptRequestStore = null;
+let gptDiagnosticsRunner = null;
 
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_AUDIT_QUEUE_EVENTS = 1000;
@@ -203,6 +207,7 @@ async function enqueueFinalAudit(context = {}) {
             return;
         }
         await store.append(event);
+        gptRequestStore?.append(event);
         if (rawCaptureEvent && rawCaptureStore) {
             const result = await rawCaptureStore.capture(rawCaptureEvent);
             if (result?.stopReason) await disableRawCapture(result.stopReason);
@@ -276,6 +281,7 @@ async function flushAuditQueue() {
             try {
                 const { event, rawCaptureEvent } = work;
                 await store.append(event);
+                gptRequestStore?.append(event);
             } catch (error) {
                 recordAuditLoss('persistence failure');
                 logger.warn(`[Request Audit] Failed to write audit event (${error?.code || error?.name || 'Error'})`);
@@ -392,6 +398,7 @@ function scheduleAuditCleanup() {
     lastCleanupAt = now;
     return runCleanupTasks([
         () => store.cleanup(),
+        () => gptRequestStore?.cleanup?.(),
         async () => {
             await rawCaptureStore?.cleanup?.();
             await createRawCaptureController().getStatus();
@@ -507,6 +514,7 @@ const requestAuditPlugin = {
         runtimeProjectionBatch = null;
         if (batch.length === 0) return;
         await store.appendBatch(batch.map(item => item.event));
+        gptRequestStore?.appendBatch(batch.map(item => item.event));
         for (const item of batch) {
             if (item.rawCaptureEvent && rawCaptureStore) {
                 const result = await rawCaptureStore.capture(item.rawCaptureEvent);
@@ -526,12 +534,18 @@ const requestAuditPlugin = {
             pendingAuditContexts.delete(item.requestId);
         }
     },
-    staticPaths: ['request-audit.html'],
+    staticPaths: ['request-audit.html', 'gpt-diagnostics.html'],
     routes: [
         {
             method: '*',
             path: '/api/request-audit',
             handler: handleRequestAuditRoutes
+        },
+        {
+            method: '*',
+            path: '/api/gpt-diagnostics',
+            handler: handleRequestAuditRoutes,
+            operationTimeoutMs: 30_000
         }
     ],
 
@@ -566,6 +580,36 @@ const requestAuditPlugin = {
         }
         store = config._requestAuditStore || getAuditStore(config);
         setAuditStore(store);
+        if (config._gptRequestStore) {
+            gptRequestStore = config._gptRequestStore;
+        } else {
+            try {
+                gptRequestStore = await new GptRequestStore({
+                    dbPath: config.GPT_REQUEST_AUDIT_DB_PATH,
+                    retentionDays: config.GPT_REQUEST_AUDIT_RETENTION_DAYS || 7
+                }).init();
+            } catch (error) {
+                gptRequestStore = null;
+                logger.warn(`[Request Audit] SQLite GPT projection unavailable; JSONL fallback remains active (${error.code || error.name})`);
+            }
+        }
+        setGptRequestStore(gptRequestStore);
+        gptDiagnosticsRunner = config._gptDiagnosticsRunner || await new GptDiagnosticsRunner({
+            dir: config.GPT_DIAGNOSTICS_DIR,
+            retentionDays: config.GPT_DIAGNOSTICS_RETENTION_DAYS || 35,
+            providerManager: config._gptDiagnosticsProviderManager || null,
+            adapterFactory: config._gptDiagnosticsAdapterFactory,
+            recordProbe: async context => {
+                try {
+                    const event = buildRequestAuditEvent(context);
+                    await store.append(event);
+                    gptRequestStore?.append(event);
+                } catch (error) {
+                    logger.warn(`[GPT Diagnostics] Failed to persist linked request record (${error.code || error.name})`);
+                }
+            }
+        }).init();
+        setGptDiagnosticsRunner(gptDiagnosticsRunner);
         const materializedStore = config._requestAuditAnalysisStore || getAnalysisStore(config);
         setAnalysisStore(materializedStore);
         lastCleanupAt = 0;
@@ -631,6 +675,11 @@ const requestAuditPlugin = {
             rawCaptureStopReason = null;
             executionRawCaptureQueue.length = 0;
             executionRawCaptureFlushPromise = null;
+            gptRequestStore?.close?.();
+            gptRequestStore = null;
+            setGptRequestStore(null);
+            gptDiagnosticsRunner = null;
+            setGptDiagnosticsRunner(null);
             store = null;
 
             const shutdownError = buildShutdownError();

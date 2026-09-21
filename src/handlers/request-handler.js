@@ -236,6 +236,7 @@ export function createRequestHandler(config, providerPoolManager) {
                         ...network,
                         response,
                         runtime: runtimeCompletion || finalizeRuntime(response.httpStatus ?? 499),
+                        requestAttempts: requestContext.get('requestAudit')?.attempts || [],
                         errorClass
                     });
                 }, { autoFinalize: false });

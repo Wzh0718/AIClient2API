@@ -70,7 +70,8 @@ export function extractOriginalCodexSessionId(headers = {}, requestBody = {}) {
 export function resolveCodexFingerprintIds({
     providerConfig = {},
     globalConfig = providerConfig,
-    originalClientSessionId = ''
+    originalClientSessionId = '',
+    originalTurnId = ''
 } = {}) {
     const mode = resolveCodexFingerprintMode(providerConfig, globalConfig);
     if (mode === 'off') return null;
@@ -87,7 +88,10 @@ export function resolveCodexFingerprintIds({
     const threadId = mode === 'full' || !clientSessionSeed
         ? sessionId
         : stableUuid(`aiclient2api:codex-thread:v${CODEX_FINGERPRINT_VERSION}:${seed}:${clientSessionSeed}`);
-    const turnId = crypto.randomUUID();
+    const sourceTurnId = String(originalTurnId || '').trim();
+    const turnId = sourceTurnId
+        ? stableUuid(`aiclient2api:codex-turn:v${CODEX_FINGERPRINT_VERSION}:${seed}:${sourceTurnId}`)
+        : crypto.randomUUID();
     return {
         mode,
         version: CODEX_FINGERPRINT_VERSION,

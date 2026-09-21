@@ -32,10 +32,20 @@ import { performance } from 'node:perf_hooks';
 import { getCodexOverloadRetryDelayMs, getCodexOverloadRetryMaxAttempts, getCodexRetryDelayMs, shouldRetryCodex429 } from './codex-retry-policy.js';
 import { extractPersistedCodexSubscriptionWindow, mergeCodexSubscriptionWindow } from '../../utils/codex-utils.js';
 import { getCodexModelIds, sanitizeCodexModelParameters, normalizeCodexReasoningEffort } from './codex-model-capabilities.js';
+import {
+    CODEX_TURN_STATE_HEADER,
+    REUSABLE_CODEX_TURN_STATE_BYTES,
+    captureCodexTurnState,
+    captureCodexTurnStateAsync,
+    normalizeCodexTurnState,
+    resolveCodexTurnStateForRequest,
+    resolveCodexTurnStateForRequestAsync
+} from './codex-turn-state.js';
+import { beginRequestAttempt, finishRequestAttempt } from '../../utils/request-attempts.js';
 
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
 const CODEX_MODELS = getCodexModelIds(baseModels);
-const CODEX_VERSION = '0.153.4';
+const CODEX_VERSION = '0.154.0';
 export const IMAGE_MODELS = new Set(['gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst']);
 const IMAGE_GENERATION_FUNCTION_NAMES = new Set(['image_gen.imagegen', 'image_gen__imagegen']);
 const IMAGE_TOOL_STRING_FIELDS = ['size', 'quality', 'background', 'output_format', 'input_fidelity', 'moderation'];
@@ -317,10 +327,12 @@ export class CodexApiService {
         ).trim();
         const state = {
             inboundHeaders,
+            context: context || {},
             ids: resolveCodexFingerprintIds({
                 providerConfig: this.config,
                 globalConfig: this.config,
-                originalClientSessionId
+                originalClientSessionId,
+                originalTurnId: context?.originalTurnId || ''
             })
         };
         recordCodexFingerprintAudit(this.config, state.ids, state.ids?.mode || 'off');
@@ -491,12 +503,28 @@ export class CodexApiService {
             providerType: this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API,
             promptCacheOptions: body.prompt_cache_options
         });
-        const headers = this.buildHeaders(body.prompt_cache_key, true, fingerprintState);
+        fingerprintState.turnState = await resolveCodexTurnStateForRequestAsync({
+            config: this.config, context: fingerprintState.context, model: body.model || selectedModel
+        });
+        const headers = this.buildHeaders(body.prompt_cache_key, true, fingerprintState, body.model || selectedModel);
 
         let overloadRetryCount = 0;
         let rateLimitRetryCount = 0;
         let rejectedFieldRetryCount = 0;
         while (true) {
+            const attempt = beginRequestAttempt(requestBody, {
+                providerType: this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API,
+                providerUuid: this.config.uuid || null,
+                plannedModel: selectedModel,
+                outboundModel: body.model || selectedModel,
+                reasoningEffort: body.reasoning?.effort || null,
+                serviceTier: body.service_tier || null,
+                turnStateEnabled: fingerprintState.turnState?.enabled === true,
+                turnStateSource: fingerprintState.turnState?.source || 'none',
+                turnStateRequestLength: fingerprintState.turnState?.length || 0,
+                turnStateSkipReason: fingerprintState.turnState?.skipReason || null,
+                stream: false
+            });
             try {
                 const config = {
                     headers,
@@ -514,13 +542,30 @@ export class CodexApiService {
 
                 const upstreamStartedAt = performance.now();
                 const response = await axios.request(axiosRequestConfig);
+                this.observeTurnStateFromResponse(response?.headers, fingerprintState);
                 const upstreamReceivedAt = performance.now();
                 const runtimeRequest = requestContext.get('runtimeRequest');
                 runtimeRequest?.recordStage?.('upstreamFirstByteMs', upstreamReceivedAt - upstreamStartedAt);
                 const parsed = this.parseNonStreamResponse(response.data);
+                this.captureObservedTurnState(fingerprintState, body.model || selectedModel);
+                const upstreamResponseModel = parsed?.model || parsed?.response?.model || null;
+                if (upstreamResponseModel) {
+                    requestContext.get('runtimeRequest')?.setMetadata?.({ upstreamResponseModel });
+                    fingerprintState.context.upstreamResponseModel = upstreamResponseModel;
+                }
                 runtimeRequest?.recordStage?.('upstreamCompleteMs', performance.now() - upstreamStartedAt);
+                finishRequestAttempt(attempt, {
+                    status: 'success',
+                    httpStatus: Number(response?.status || 200),
+                    upstreamResponseModel
+                });
                 return parsed;
             } catch (error) {
+                finishRequestAttempt(attempt, {
+                    status: 'error',
+                    httpStatus: Number(error?.response?.status || 0) || null,
+                    errorCode: error?.response?.data?.error?.code || error?.code || null
+                });
                 error.origin = error.origin || 'upstream_codex';
                 codexPromptCacheObservability.recordUpstreamError({
                     providerType: this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API,
@@ -620,16 +665,33 @@ export class CodexApiService {
             providerType: this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API,
             promptCacheOptions: body.prompt_cache_options
         });
-        const headers = this.buildHeaders(body.prompt_cache_key, true, fingerprintState);
+        fingerprintState.turnState = await resolveCodexTurnStateForRequestAsync({
+            config: this.config, context: fingerprintState.context, model: body.model || selectedModel
+        });
+        const headers = this.buildHeaders(body.prompt_cache_key, true, fingerprintState, body.model || selectedModel);
 
         let overloadRetryCount = 0;
         let rateLimitRetryCount = 0;
         let rejectedFieldRetryCount = 0;
         while (true) {
+            const attempt = beginRequestAttempt(requestBody, {
+                providerType: this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API,
+                providerUuid: this.config.uuid || null,
+                plannedModel: selectedModel,
+                outboundModel: body.model || selectedModel,
+                reasoningEffort: body.reasoning?.effort || null,
+                serviceTier: body.service_tier || null,
+                turnStateEnabled: fingerprintState.turnState?.enabled === true,
+                turnStateSource: fingerprintState.turnState?.source || 'none',
+                turnStateRequestLength: fingerprintState.turnState?.length || 0,
+                turnStateSkipReason: fingerprintState.turnState?.skipReason || null,
+                stream: true
+            });
             const bufferedPrelude = [];
             let responseId = null;
             let responseSnapshot = null;
             let hasVisibleOutput = false;
+            let sawCompleted = false;
             try {
                 const config = {
                     headers,
@@ -647,6 +709,7 @@ export class CodexApiService {
 
                 const upstreamStartedAt = performance.now();
                 const response = await axios.request(axiosRequestConfig);
+                this.observeTurnStateFromResponse(response?.headers, fingerprintState);
                 const runtimeRequest = requestContext.get('runtimeRequest');
                 runtimeRequest?.recordStage?.('upstreamFirstByteMs', performance.now() - upstreamStartedAt);
 
@@ -656,7 +719,12 @@ export class CodexApiService {
                     }
                     if (event?.response && typeof event.response === 'object') {
                         responseSnapshot = { ...event.response };
+                        if (event.response.model) {
+                            requestContext.get('runtimeRequest')?.setMetadata?.({ upstreamResponseModel: event.response.model });
+                            fingerprintState.context.upstreamResponseModel = event.response.model;
+                        }
                     }
+                    if (event?.type === 'response.completed') sawCompleted = true;
                     if (isCodexPreludeEvent(event)) {
                         bufferedPrelude.push(event);
                         continue;
@@ -672,9 +740,21 @@ export class CodexApiService {
                 while (bufferedPrelude.length > 0) {
                     yield bufferedPrelude.shift();
                 }
+                if (sawCompleted) this.captureObservedTurnState(fingerprintState, body.model || selectedModel);
                 runtimeRequest?.recordStage?.('upstreamCompleteMs', performance.now() - upstreamStartedAt);
+                finishRequestAttempt(attempt, {
+                    status: 'success',
+                    httpStatus: Number(response?.status || 200),
+                    upstreamResponseModel: responseSnapshot?.model || null
+                });
                 return;
             } catch (error) {
+                finishRequestAttempt(attempt, {
+                    status: 'error',
+                    httpStatus: Number(error?.response?.status || 0) || null,
+                    errorCode: error?.response?.data?.error?.code || error?.code || null,
+                    upstreamResponseModel: responseSnapshot?.model || null
+                });
                 error.origin = error.origin || 'upstream_codex';
                 codexPromptCacheObservability.recordUpstreamError({
                     providerType: this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API,
@@ -752,26 +832,30 @@ export class CodexApiService {
     /**
      * 构建请求头
      */
-    buildHeaders(cacheId, stream = true, fingerprintState = null) {
+    buildHeaders(cacheId, stream = true, fingerprintState = null, model = '') {
+        const inboundHeaders = fingerprintState?.inboundHeaders || {};
+        const getInboundHeader = (name) => Object.entries(inboundHeaders)
+            .find(([key, value]) => key.toLowerCase() === name.toLowerCase() && value !== undefined && value !== null && String(value).trim())?.[1];
+        const configuredVersion = String(this.config.CODEX_VERSION || '').trim();
+        const configuredBeta = String(this.config.CODEX_BETA_FEATURES || '').trim();
+        const configuredUserAgent = String(this.config.CODEX_USER_AGENT || '').trim();
+        const configuredOriginator = String(this.config.CODEX_ORIGINATOR || '').trim();
         const headers = {
-            'version': CODEX_VERSION,
-            'x-codex-beta-features': 'powershell_utf8',
+            'version': configuredVersion || getInboundHeader('version') || CODEX_VERSION,
+            'x-codex-beta-features': configuredBeta || getInboundHeader('x-codex-beta-features') || 'powershell_utf8',
             'x-oai-web-search-eligible': 'true',
             'authorization': `Bearer ${this.accessToken}`,
             'chatgpt-account-id': this.accountId,
             'content-type': 'application/json',
-            'user-agent': `codex-tui/${CODEX_VERSION} (Windows 10.0.26100; x86_64) WindowsTerminal (codex-tui; ${CODEX_VERSION})`,
-            'originator': 'codex-tui',
+            'user-agent': configuredUserAgent || getInboundHeader('user-agent') || `codex-tui/${CODEX_VERSION} (Windows 10.0.26100; x86_64) WindowsTerminal (codex-tui; ${CODEX_VERSION})`,
+            'originator': configuredOriginator || getInboundHeader('originator') || 'codex-tui',
             'host': 'chatgpt.com',
             'Connection': 'Keep-Alive'
         };
 
-        const inboundHeaders = fingerprintState?.inboundHeaders || {};
-        const getInboundHeader = (name) => Object.entries(inboundHeaders)
-            .find(([key, value]) => key.toLowerCase() === name.toLowerCase() && value !== undefined && value !== null && String(value).trim())?.[1];
         for (const name of [
             'x-codex-turn-metadata', 'x-codex-window-id', 'x-codex-installation-id',
-            'x-client-request-id', 'thread-id'
+            'x-client-request-id', 'thread-id', 'x-openai-internal-codex-responses-lite'
         ]) {
             const value = getInboundHeader(name);
             if (value !== undefined && value !== null && String(value).trim()) {
@@ -797,6 +881,20 @@ export class CodexApiService {
             applyCodexFingerprintHeaders(headers, fingerprintState.ids);
         }
 
+        const turnState = fingerprintState?.turnState || resolveCodexTurnStateForRequest({
+            config: this.config,
+            context: fingerprintState?.context || {},
+            model
+        });
+        if (fingerprintState) fingerprintState.turnState = turnState;
+        if (turnState.value) headers[CODEX_TURN_STATE_HEADER] = turnState.value;
+        requestContext.get('runtimeRequest')?.setMetadata?.({
+            codexTurnStateEnabled: turnState.enabled,
+            codexTurnStateSource: turnState.source,
+            codexTurnStateLength: turnState.length,
+            codexTurnStateSkipReason: turnState.skipReason || null
+        });
+
         // 根据是否流式设置 Accept 头
         if (stream) {
             headers['accept'] = 'text/event-stream';
@@ -805,6 +903,43 @@ export class CodexApiService {
         }
 
         return headers;
+    }
+
+    observeTurnStateFromResponse(responseHeaders, fingerprintState) {
+        const getHeader = name => {
+            if (typeof responseHeaders?.get === 'function') return responseHeaders.get(name);
+            return Object.entries(responseHeaders || {})
+                .find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
+        };
+        const value = normalizeCodexTurnState(getHeader(CODEX_TURN_STATE_HEADER));
+        if (!value) return null;
+        const context = fingerprintState?.context || {};
+        context.downstreamCodexTurnState = value;
+        const length = Buffer.byteLength(value, 'utf8');
+        requestContext.get('runtimeRequest')?.setMetadata?.({ codexTurnStateResponseLength: length });
+        return { observed: true, length, reusable: length === REUSABLE_CODEX_TURN_STATE_BYTES };
+    }
+
+    captureObservedTurnState(fingerprintState, model) {
+        const context = fingerprintState?.context || {};
+        const value = normalizeCodexTurnState(context.downstreamCodexTurnState);
+        if (!value) return null;
+        const captureOptions = {
+            config: this.config,
+            context,
+            model,
+            headers: { [CODEX_TURN_STATE_HEADER]: value }
+        };
+        const result = captureCodexTurnState(captureOptions);
+        context.turnStateCacheOutcome = result.reason;
+        context.turnStateCacheCaptured = result.captured === true;
+        const resultPromise = captureCodexTurnStateAsync({ ...captureOptions, skipLocal: true });
+        void resultPromise.catch(() => {});
+        requestContext.get('runtimeRequest')?.setMetadata?.({
+            codexTurnStateCaptured: result.captured,
+            codexTurnStateResponseLength: result.length || Buffer.byteLength(value, 'utf8')
+        });
+        return result;
     }
 
     /**

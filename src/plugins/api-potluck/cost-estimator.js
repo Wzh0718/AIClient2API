@@ -205,10 +205,12 @@ export function estimateUsageCost(usage = {}, model = DEFAULT_CONVERSION_MODEL, 
         const average = estimateFromAverageProfile(usage, options.averageProfile);
         if (average) {
             const averageScope = options.averageScope || 'global-day';
-            pricingDiagnostics.estimatedAverageCount += 1;
-            pricingDiagnostics.estimatedAverageTokens += average.totalTokens;
-            pricingDiagnostics.estimatedAverageUsd += average.usd;
-            pricingDiagnostics.lastEstimatedAt = new Date().toISOString();
+            if (options.trackDiagnostics !== false) {
+                pricingDiagnostics.estimatedAverageCount += 1;
+                pricingDiagnostics.estimatedAverageTokens += average.totalTokens;
+                pricingDiagnostics.estimatedAverageUsd += average.usd;
+                pricingDiagnostics.lastEstimatedAt = new Date().toISOString();
+            }
             return {
                 usd: average.usd,
                 actualUsd: 0,
@@ -224,9 +226,11 @@ export function estimateUsageCost(usage = {}, model = DEFAULT_CONVERSION_MODEL, 
                 averageSampleModelCount: toNumber(options.averageProfile?.sampleModelCount)
             };
         }
-        pricingDiagnostics.missingPriceCount += 1;
-        pricingDiagnostics.missingPriceTokens += parts.totalTokens;
-        pricingDiagnostics.lastMissingAt = new Date().toISOString();
+        if (options.trackDiagnostics !== false) {
+            pricingDiagnostics.missingPriceCount += 1;
+            pricingDiagnostics.missingPriceTokens += parts.totalTokens;
+            pricingDiagnostics.lastMissingAt = new Date().toISOString();
+        }
         return {
             usd: 0,
             actualUsd: 0,

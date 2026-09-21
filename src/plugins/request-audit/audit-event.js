@@ -1,6 +1,9 @@
 import crypto from 'crypto';
 import { normalizeUsageCandidate } from '../../utils/usage-normalizer.js';
 import { compactAntigravitySourceAvailability } from '../../utils/gemini-diagnostics.js';
+import { getRequestAttempts } from '../../utils/request-attempts.js';
+import { CODEX_FINGERPRINT_CONTEXT_KEY } from '../../providers/openai/codex-fingerprint.js';
+import { estimateUsageCost } from '../api-potluck/cost-estimator.js';
 
 function toNumber(value) {
     const number = Number(value);
@@ -124,6 +127,34 @@ function normalizeRuntime(runtime = {}) {
     return { workerId, requestKind, outputBytes, backpressureMs, stages };
 }
 
+function normalizeAttempts(context = {}) {
+    const source = Array.isArray(context.requestAttempts)
+        ? context.requestAttempts
+        : getRequestAttempts(context.processedRequestBody);
+    return source.slice(0, 50).map((attempt, index) => ({
+        attemptId: String(attempt.attemptId || `${context.requestId || 'request'}:${index + 1}`),
+        sequence: index + 1,
+        startedAt: attempt.startedAt || null,
+        completedAt: attempt.completedAt || null,
+        durationMs: Number.isFinite(Number(attempt.durationMs)) ? Number(attempt.durationMs) : null,
+        providerType: attempt.providerType || null,
+        providerUuidHash: hashSecret(attempt.providerUuid),
+        plannedModel: attempt.plannedModel || null,
+        outboundModel: attempt.outboundModel || null,
+        upstreamResponseModel: attempt.upstreamResponseModel || null,
+        reasoningEffort: attempt.reasoningEffort || null,
+        serviceTier: attempt.serviceTier || null,
+        turnStateEnabled: attempt.turnStateEnabled === true,
+        turnStateSource: attempt.turnStateSource || null,
+        turnStateRequestLength: toNumber(attempt.turnStateRequestLength),
+        turnStateSkipReason: attempt.turnStateSkipReason || null,
+        stream: attempt.stream === true,
+        status: attempt.status || 'unknown',
+        httpStatus: Number.isFinite(Number(attempt.httpStatus)) ? Number(attempt.httpStatus) : null,
+        errorCode: sanitizeDiagnosticCode(attempt.errorCode)
+    }));
+}
+
 function deriveStatus(context, response) {
     if (context.outcome) {
         return {
@@ -166,13 +197,26 @@ export function buildRequestAuditEvent(context = {}) {
         ? selectedProviderUuid === actualProviderUuid ? 'consistent' : 'mismatch'
         : 'unverifiable';
     const routing = context._codexRouting || {};
+    const attempts = normalizeAttempts(context);
+    const lastAttempt = attempts.at(-1) || null;
+    const codexContext = context.processedRequestBody?.[CODEX_FINGERPRINT_CONTEXT_KEY] || {};
+    const upstreamResponseModel = context.codexEvidence?.upstreamResponseModel
+        || codexContext.upstreamResponseModel
+        || lastAttempt?.upstreamResponseModel
+        || null;
+    const plannedModel = context._modelRouting?.actualModel
+        || context._temporaryKeyModelRouteResult?.targetModel
+        || requestedModel;
+    const outboundModel = lastAttempt?.outboundModel || actualModel;
+    const billingModel = actualModel;
+    const estimatedCost = estimateUsageCost(usage, billingModel, { trackDiagnostics: false });
     const hasExtendedRouting = [
         'spilloverCause', 'groupWaitMs', 'groupRetryCount', 'fallbackAttemptCount',
         'availabilityReason', 'candidateGroupId', 'candidateProviderCount', 'unavailableProviderCount'
     ].some(field => Object.prototype.hasOwnProperty.call(routing, field));
 
     return {
-        schemaVersion: 4,
+        schemaVersion: 6,
         eventId: context._runtimeEventId || context.eventId || null,
         timestamp,
         beijingDate: beijing.date,
@@ -190,6 +234,11 @@ export function buildRequestAuditEvent(context = {}) {
             model: actualModel,
             requestedModel,
             actualModel,
+            plannedModel,
+            outboundModel,
+            upstreamResponseModel,
+            modelMismatch: Boolean(upstreamResponseModel && outboundModel && upstreamResponseModel !== outboundModel),
+            billingModel,
             stream: Boolean(context.isStream)
         },
         network: {
@@ -281,6 +330,36 @@ export function buildRequestAuditEvent(context = {}) {
             metadataHash: context.cache?.metadataHash || null,
             workerId: context.cache?.workerId || null
         },
+        turnState: {
+            enabled: lastAttempt?.turnStateEnabled === true,
+            source: lastAttempt?.turnStateSource || null,
+            requestLength: toNumber(lastAttempt?.turnStateRequestLength),
+            responseLength: toNumber(
+                context.codexEvidence?.turnStateResponseLength
+                || (codexContext.downstreamCodexTurnState ? Buffer.byteLength(codexContext.downstreamCodexTurnState, 'utf8') : 0)
+                || context.runtime?.metadata?.codexTurnStateResponseLength
+            ),
+            skipReason: lastAttempt?.turnStateSkipReason || null,
+            cacheOutcome: context.codexEvidence?.turnStateCacheOutcome || codexContext.turnStateCacheOutcome || null,
+            captured: context.codexEvidence?.turnStateCacheCaptured === true || codexContext.turnStateCacheCaptured === true
+        },
+        parameters: {
+            requestedReasoningEffort: context.originalRequestBody?.reasoning?.effort || context.originalRequestBody?.reasoning_effort || null,
+            effectiveReasoningEffort: lastAttempt?.reasoningEffort || null,
+            requestedServiceTier: context.originalRequestBody?.service_tier || null,
+            effectiveServiceTier: lastAttempt?.serviceTier || null
+        },
+        cost: {
+            usd: toNumber(estimatedCost.usd),
+            actualUsd: toNumber(estimatedCost.actualUsd),
+            estimatedUsd: toNumber(estimatedCost.estimatedUsd),
+            estimatedPriceTokens: toNumber(estimatedCost.estimatedPriceTokens),
+            missingPriceTokens: toNumber(estimatedCost.missingPriceTokens),
+            pricingVersion: estimatedCost.pricingVersion || null,
+            pricingSource: estimatedCost.pricingSource || null,
+            priceMultiplier: Number.isFinite(Number(estimatedCost.priceMultiplier)) ? Number(estimatedCost.priceMultiplier) : 1
+        },
+        attempts,
         status: {
             ...derivedStatus,
             retryCount: toNumber(context.retryCount),

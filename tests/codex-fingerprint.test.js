@@ -58,6 +58,17 @@ describe('Codex OAuth fingerprint convergence', () => {
         expect(first.sessionId).not.toBe(otherAccount.sessionId);
     });
 
+    test('keeps a rewritten turn ID stable when the client supplies the same original turn', () => {
+        const options = {
+            providerConfig: provider({ codexFingerprintMode: 'session' }),
+            globalConfig: { CODEX_FINGERPRINT_ENABLED: true },
+            originalClientSessionId: 'client-session-a',
+            originalTurnId: 'client-turn-a'
+        };
+        expect(resolveCodexFingerprintIds(options).turnId).toBe(resolveCodexFingerprintIds(options).turnId);
+        expect(resolveCodexFingerprintIds(options).turnId).not.toBe(resolveCodexFingerprintIds({ ...options, originalTurnId: 'client-turn-b' }).turnId);
+    });
+
     test('full mode converges threads while device mode only changes installation identity', () => {
         const fullA = resolveCodexFingerprintIds({
             providerConfig: provider({ codexFingerprintMode: 'full' }),

@@ -14,6 +14,7 @@ jest.mock('../src/utils/logger.js', () => ({
 
 import { handleStreamRequest, handleUnaryRequest } from '../src/utils/common.js';
 import { codexOverloadFailoverStore } from '../src/providers/openai/codex-overload-failover.js';
+import requestContext from '../src/utils/context.js';
 
 class FakeResponse extends EventEmitter {
     constructor() {
@@ -106,6 +107,34 @@ function createProviderPoolManager() {
 }
 
 describe('provider auth failure health marking', () => {
+    test('records client first output once for a multi-chunk stream', async () => {
+        const mark = jest.fn();
+        const service = {
+            async *generateContentStream() {
+                yield { choices: [{ delta: { content: 'one' }, finish_reason: null }] };
+                yield { choices: [{ delta: { content: 'two' }, finish_reason: 'stop' }] };
+            }
+        };
+        const res = new FakeResponse();
+        await requestContext.run({ runtimeRequest: { mark }, requestAudit: {} }, () => handleStreamRequest(
+            res, service, 'gpt-5.4-mini', { messages: [{ role: 'user', content: 'ping' }] },
+            'openai', 'openai', 'none', null, createProviderPoolManager(), 'openai-provider-ttft', 'OpenAI Provider'
+        ));
+        expect(mark.mock.calls.filter(([name]) => name === 'clientFirstOutputMs')).toHaveLength(1);
+    });
+
+    test('records client first output before a unary response is written', async () => {
+        const mark = jest.fn();
+        const service = { generateContent: jest.fn(async () => ({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] })) };
+        const res = new FakeResponse();
+        await requestContext.run({ runtimeRequest: { mark }, requestAudit: {} }, () => handleUnaryRequest(
+            res, service, 'gpt-5.4-mini', { messages: [{ role: 'user', content: 'ping' }] },
+            'openai', 'openai', 'none', null, createProviderPoolManager(), 'openai-provider-unary-ttft', 'OpenAI Provider'
+        ));
+        expect(mark.mock.calls.filter(([name]) => name === 'clientFirstOutputMs')).toHaveLength(1);
+        expect(res.writableEnded).toBe(true);
+    });
+
     test('always terminates a normal OpenAI stream with one DONE marker', async () => {
         const service = {
             async *generateContentStream() {

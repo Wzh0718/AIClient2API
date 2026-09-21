@@ -1,4 +1,4 @@
-import { buildAuditSummary, handleRequestAuditRoutes, setRawCaptureController } from '../src/plugins/request-audit/api-routes.js';
+import { buildAuditSummary, handleRequestAuditRoutes, setGptDiagnosticsRunner, setGptRequestStore, setRawCaptureController } from '../src/plugins/request-audit/api-routes.js';
 
 describe('request audit api aggregation', () => {
   test('summarizes usage models accounts and context sections', () => {
@@ -29,6 +29,20 @@ describe('request audit api aggregation', () => {
     expect(summary.models['gpt-5.5'].requestCount).toBe(1);
     expect(summary.accounts.A.promptTokens).toBe(1000);
     expect(summary.contextSections.conversation.tokens).toBe(1250);
+  });
+
+  test('summarizes priced estimated and missing request costs without repricing legacy events', () => {
+    const summary = buildAuditSummary([
+      { request: { model: 'gpt-5.5' }, usage: {}, cost: { usd: 0.01, actualUsd: 0.01, estimatedUsd: 0, missingPriceTokens: 0, pricingSource: 'official' } },
+      { request: { model: 'gpt-private' }, usage: {}, cost: { usd: 0.02, actualUsd: 0, estimatedUsd: 0.02, estimatedPriceTokens: 500, missingPriceTokens: 0, pricingSource: 'estimated-average' } },
+      { request: { model: 'gpt-missing' }, usage: {}, cost: { usd: 0, actualUsd: 0, estimatedUsd: 0, missingPriceTokens: 700, pricingSource: 'missing' } },
+      { request: { model: 'legacy' }, usage: {} }
+    ]);
+    expect(summary.cost).toEqual({
+      usd: 0.03, actualUsd: 0.01, estimatedUsd: 0.02,
+      pricedRequestCount: 1, estimatedRequestCount: 1, missingPriceRequestCount: 1,
+      estimatedPriceTokens: 500, missingPriceTokens: 700
+    });
   });
 
   test('summarizes request durations while ignoring legacy records without timing', () => {
@@ -82,6 +96,49 @@ describe('request audit api aggregation', () => {
     });
 
     expect(payload.data.requests[0].diagnosis.primaryReason).toBe('tools_changed');
+  });
+
+  test('SQLite projection response exposes cursor and request detail with attempts', async () => {
+    const projected = {
+      requestId: 'req-sqlite', timestamp: '2026-09-20T00:00:00.000Z',
+      request: { requestedModel: 'gpt-5.5', outboundModel: 'gpt-5.5', upstreamResponseModel: 'gpt-5.4', modelMismatch: true },
+      attempts: [{ attemptId: 'attempt-1', sequence: 1 }]
+    };
+    setGptRequestStore({
+      query: jest.fn(() => ({ requests: [projected], nextCursor: 'next-page' })),
+      get: jest.fn(() => projected)
+    });
+    const config = {
+      _requestAuditSkipAuth: true,
+      _requestAuditStore: { query: jest.fn(async () => []) },
+      _requestAuditAnalysisStore: { readDiagnostics: jest.fn(async () => ({})) }
+    };
+    try {
+      const list = await callRoute('/api/request-audit/requests?modelMismatch=true&credential=sha256%3Aabc', config);
+      expect(list.data.nextCursor).toBe('next-page');
+      expect(list.data.requests[0].request.modelMismatch).toBe(true);
+      const detail = await callRoute('/api/request-audit/requests/req-sqlite', config);
+      expect(detail.data.request.attempts[0].attemptId).toBe('attempt-1');
+    } finally {
+      setGptRequestStore(null);
+    }
+  });
+
+  test('diagnostic routes create list inspect and cancel runs', async () => {
+    const run = { runId: 'run-1', status: 'queued' };
+    setGptDiagnosticsRunner({
+      create: jest.fn(async () => run), list: jest.fn(() => [run]), get: jest.fn(() => run), cancel: jest.fn(async () => ({ ...run, status: 'cancelled' }))
+    });
+    const config = { _requestAuditSkipAuth: true };
+    try {
+      const created = await callRoute('/api/gpt-diagnostics/runs', config, 'POST', { targets: [{ providerUuid: 'p1', model: 'gpt-5.5' }] }, 202);
+      expect(created.data.run.runId).toBe('run-1');
+      expect((await callRoute('/api/gpt-diagnostics/runs', config)).data.runs).toHaveLength(1);
+      expect((await callRoute('/api/gpt-diagnostics/runs/run-1', config)).data.run.status).toBe('queued');
+      expect((await callRoute('/api/gpt-diagnostics/runs/run-1/cancel', config, 'POST', {})).data.run.status).toBe('cancelled');
+    } finally {
+      setGptDiagnosticsRunner(null);
+    }
   });
 
   test('passes client ip and original path filters to the audit store', async () => {

@@ -20,6 +20,8 @@ import {
     CODEX_FINGERPRINT_CONTEXT_KEY,
     extractOriginalCodexSessionId
 } from '../providers/openai/codex-fingerprint.js';
+import { resolveOriginalCodexTurnId } from '../providers/openai/codex-turn-state.js';
+import { beginRequestAttempt, finishRequestAttempt } from './request-attempts.js';
 import { matchesModelFamily } from '../providers/openai/codex-model-routing.js';
 import requestContext from './context.js';
 import { assertCodexRoutingIntegrity } from '../services/codex-routing-integrity.js';
@@ -157,7 +159,8 @@ const CODEX_FINGERPRINT_HEADER_NAMES = Object.freeze([
     'session-id',
     'session_id',
     'thread-id',
-    'x-openai-internal-codex-responses-lite'
+    'x-openai-internal-codex-responses-lite',
+    'x-codex-turn-state'
 ]);
 
 export function extractInboundCodexFingerprintContext(req, requestBody = {}) {
@@ -169,7 +172,8 @@ export function extractInboundCodexFingerprintContext(req, requestBody = {}) {
     }
     return {
         inboundCodexHeaders,
-        originalClientSessionId: extractOriginalCodexSessionId(inboundCodexHeaders, requestBody)
+        originalClientSessionId: extractOriginalCodexSessionId(inboundCodexHeaders, requestBody),
+        originalTurnId: resolveOriginalCodexTurnId(inboundCodexHeaders, requestBody)
     };
 }
 
@@ -1835,7 +1839,17 @@ export function isAuthorized(req, requestUrl, REQUIRED_API_KEY) {
  * @param {Object} responsePayload - The actual response payload (string for unary, object for stream chunks).
  * @param {boolean} isStream - Whether the response is a stream.
  */
+function markClientFirstOutput() {
+    const store = requestContext.getStore();
+    const runtimeRequest = store?.runtimeRequest;
+    if (!runtimeRequest || store.clientFirstOutputRecorded === true) return false;
+    store.clientFirstOutputRecorded = true;
+    runtimeRequest.mark?.('clientFirstOutputMs');
+    return true;
+}
+
 export async function handleUnifiedResponse(res, responsePayload, isStream, statusCode = 200, headers = {}) {
+    if (!isStream) markClientFirstOutput();
     const validatedStatusCode = ensureValidStatusCode(statusCode);
     if (isStream) {
         res.writeHead(200, { ...headers, "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "Transfer-Encoding": "chunked" });
@@ -1894,7 +1908,14 @@ export async function handleStreamRequest(res, service, model, requestBody, from
     let fullResponseJson = '';
     let fullOldResponseJson = '';
     let responseClosed = false;
+    let genericAttempt = null;
     let anyDataSent = retryContext?.anyDataSent || false; // 跟踪是否已向客户端发送过任何数据
+    const ensureStreamResponseHeaders = async () => {
+        if (res.headersSent) return;
+        const turnState = requestBody?.[CODEX_FINGERPRINT_CONTEXT_KEY]?.downstreamCodexTurnState;
+        if (isCodexProvider(toProvider) && turnState) res.setHeader('X-Codex-Turn-State', turnState);
+        await handleUnifiedResponse(res, '', true);
+    };
     
     // 重试上下文：包含 CONFIG 和重试计数
     // maxRetries: 凭证切换最大次数（跨凭证），默认 5 次
@@ -1935,11 +1956,6 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         res.on('error', onClientError);
     }
 
-    // 只在首次请求时发送响应头，重试时跳过（响应头已发送）
-    if (!isRetry) {
-        await handleUnifiedResponse(res, '', true);
-    }
-
     let hasToolCall = false;
     let hasMessageStop = false; // 跟踪是否已经发送过结束标志（message_stop / done）
 
@@ -1957,6 +1973,19 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             stream: true
         });
         recordUpstreamAttempt();
+        if (isCodexProvider(toProvider) && requestBody?.[CODEX_FINGERPRINT_CONTEXT_KEY]) {
+            delete requestBody[CODEX_FINGERPRINT_CONTEXT_KEY].downstreamCodexTurnState;
+            delete requestBody[CODEX_FINGERPRINT_CONTEXT_KEY].upstreamResponseModel;
+        }
+        genericAttempt = !isCodexProvider(toProvider) ? beginRequestAttempt(requestBody, {
+            providerType: toProvider,
+            providerUuid: pooluuid || null,
+            plannedModel: retryContext?.clientRequestedModel || model,
+            outboundModel: model,
+            reasoningEffort: requestBody?.reasoning?.effort || requestBody?.reasoning_effort || null,
+            serviceTier: requestBody?.service_tier || null,
+            stream: true
+        }) : null;
         const nativeStream = await service.generateContentStream(model, requestBody);
         
         // 如果提供者内部发生了模型回退（如 Antigravity 自动降级），同步更新本地 model 变量
@@ -1980,6 +2009,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 logger.info('[Stream] Stopping iteration due to client disconnect');
                 break;
             }
+            await ensureStreamResponseHeaders();
             
             // Extract text for logging purposes
             const chunkText = extractResponseText(nativeChunk, toProvider);
@@ -2074,6 +2104,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                     // fullResponseJson += chunk.type+"\n";
                     if (!clientDisconnected.value && !res.writableEnded) {
                         try {
+                            markClientFirstOutput();
                             await writeWithBackpressure(res, `event: ${chunk.type}\n`);
                             anyDataSent = true;
                         } catch (writeErr) {
@@ -2089,6 +2120,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 // fullResponseJson += JSON.stringify(chunk)+"\n\n";
                 if (!clientDisconnected.value && !res.writableEnded) {
                     try {
+                        markClientFirstOutput();
                         await writeWithBackpressure(res, `data: ${JSON.stringify(chunk)}\n\n`);
                         anyDataSent = true;
                     } catch (writeErr) {
@@ -2106,8 +2138,10 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         // 同时避免把实际没有产出的凭证标记为健康。
         // 客户端主动断开属于正常情况，不在此列。
         if (!anyDataSent && !clientDisconnected.value) {
+            finishRequestAttempt(genericAttempt, { status: 'empty', errorCode: 'empty_response' });
             throw createEmptyUpstreamResponseError(customName ? `${toProvider}/${customName}` : toProvider);
         }
+        finishRequestAttempt(genericAttempt, { status: 'success', httpStatus: 200 });
 
         // 流式请求成功完成，统计使用次数，错误次数重置为0
         if (providerPoolManager && pooluuid) {
@@ -2126,6 +2160,11 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         });
 
     }  catch (error) {
+        finishRequestAttempt(genericAttempt, {
+            status: 'error',
+            httpStatus: Number(error?.response?.status || 0) || null,
+            errorCode: error?.response?.data?.error?.code || error?.code || null
+        });
         const upstreamLogDecision = getUpstreamErrorLogDecision(error, 'Server', toProvider, model);
         if (upstreamLogDecision.log) logger.error('\n[Server] Error during stream processing:', error.stack);
         logUpstreamResponse(error, 'Server', toProvider, model, upstreamLogDecision);
@@ -2150,6 +2189,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             const errorPayload = createStreamErrorResponse(error, fromProvider);
             if (!res.writableEnded) {
                 try {
+                    markClientFirstOutput();
                     await writeWithBackpressure(res, errorPayload);
                     res.end();
                 } catch (writeErr) {
@@ -2455,6 +2495,8 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         const errorPayload = createStreamErrorResponse(error, fromProvider);
         if (!clientDisconnected.value && !res.writableEnded) {
             try {
+                await ensureStreamResponseHeaders();
+                markClientFirstOutput();
                 await writeWithBackpressure(res, errorPayload);
                 res.end();
             } catch (writeErr) {
@@ -2524,6 +2566,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
     const currentRetry = retryContext?.currentRetry ?? 0;
     const CONFIG = retryContext?.CONFIG;
     const cleanupStartedAt = performance.now();
+    let genericAttempt = null;
     recordTemporaryRouteResult(retryContext, {
         actualProviderType: toProvider,
         actualModel: model,
@@ -2547,7 +2590,29 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             stream: false
         });
         recordUpstreamAttempt();
+        if (isCodexProvider(toProvider) && requestBody?.[CODEX_FINGERPRINT_CONTEXT_KEY]) {
+            delete requestBody[CODEX_FINGERPRINT_CONTEXT_KEY].downstreamCodexTurnState;
+            delete requestBody[CODEX_FINGERPRINT_CONTEXT_KEY].upstreamResponseModel;
+        }
+        genericAttempt = !isCodexProvider(toProvider) ? beginRequestAttempt(requestBody, {
+            providerType: toProvider,
+            providerUuid: pooluuid || null,
+            plannedModel: retryContext?.clientRequestedModel || model,
+            outboundModel: model,
+            reasoningEffort: requestBody?.reasoning?.effort || requestBody?.reasoning_effort || null,
+            serviceTier: requestBody?.service_tier || null,
+            stream: false
+        }) : null;
         const nativeResponse = await service.generateContent(model, requestBody);
+        finishRequestAttempt(genericAttempt, {
+            status: 'success',
+            httpStatus: 200,
+            upstreamResponseModel: nativeResponse?.model || nativeResponse?.response?.model || null
+        });
+        const turnState = requestBody?.[CODEX_FINGERPRINT_CONTEXT_KEY]?.downstreamCodexTurnState;
+        if (isCodexProvider(toProvider) && turnState && !res.headersSent) {
+            res.setHeader('X-Codex-Turn-State', turnState);
+        }
         
         // 如果提供者内部发生了模型回退（如 Antigravity 自动降级），同步更新本地 model 变量
         // 这确保了后续的监控钩子和统计插件记录的是实际使用的模型
@@ -2612,6 +2677,11 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             accountEmail
         });
     } catch (error) {
+        finishRequestAttempt(genericAttempt, {
+            status: 'error',
+            httpStatus: Number(error?.response?.status || 0) || null,
+            errorCode: error?.response?.data?.error?.code || error?.code || null
+        });
         const upstreamLogDecision = getUpstreamErrorLogDecision(error, 'Server', toProvider, model);
         if (upstreamLogDecision.log) logger.error('\n[Server] Error during unary processing:', error.stack);
         logUpstreamResponse(error, 'Server', toProvider, model, upstreamLogDecision);
@@ -3125,6 +3195,9 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     CONFIG._codexCacheAffinityScope = extractCodexCacheAffinityScope(originalRequestBody);
     CONFIG._codexOverloadFailoverKey = resolveCodexOverloadFailoverKey(CONFIG._codexCacheAffinityScope);
     const inboundCodexFingerprintContext = extractInboundCodexFingerprintContext(req, originalRequestBody);
+    inboundCodexFingerprintContext.callerKeyHash = CONFIG.potluckApiKey
+        ? crypto.createHash('sha256').update(String(CONFIG.potluckApiKey)).digest('hex')
+        : (CONFIG.potluckKeyHash || CONFIG.potluckKeyData?.id || 'anonymous');
 
     const clientProviderMap = {
         [ENDPOINT_TYPE.OPENAI_CHAT]: MODEL_PROTOCOL_PREFIX.OPENAI,

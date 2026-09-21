@@ -643,6 +643,37 @@
       font-weight: 700;
     }
 
+    .model-chain-box {
+      grid-column: span 2;
+    }
+
+    .model-chain {
+      display: grid;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .model-chain-row {
+      display: grid;
+      grid-template-columns: minmax(92px, auto) 1fr;
+      gap: 10px;
+      align-items: baseline;
+    }
+
+    .model-chain-row small {
+      color: var(--muted);
+    }
+
+    .stacked-value {
+      display: grid;
+      gap: 2px;
+      white-space: nowrap;
+    }
+
+    .stacked-value small {
+      color: var(--muted);
+    }
+
     .empty {
       padding: 30px 18px;
       text-align: center;
@@ -713,14 +744,15 @@
     <section class="panel" aria-label="请求审计工作台">
       <nav class="view-tabs" role="tablist" aria-label="请求审计功能">
         <button id="auditTab" class="view-tab" type="button" role="tab" aria-selected="true" aria-controls="auditPanel" data-view="audit">
-          <strong>缓存审计</strong>
-          <span>按 key 和时间窗查看请求、缓存命中率、上下文分类和诊断。</span>
+          <strong>GPT 请求 / 缓存审计</strong>
+          <span>查看 key、凭据、计划/出站/响应模型、attempt 时间线、缓存命中率和诊断。</span>
         </button>
         <button id="captureTab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="capturePanel" data-view="capture">
           <strong>原始采集</strong>
           <span>短时开启 raw capture，用于验证公共前缀、截断和结构变化。</span>
         </button>
       </nav>
+      <p class="muted mini"><a href="gpt-diagnostics.html">打开 GPT 质量检测与趋势 →</a></p>
 
       <section id="auditPanel" class="view-panel" role="tabpanel" aria-labelledby="auditTab">
         <div class="toolbar">
@@ -743,11 +775,27 @@
         <label>原始 Path
           <input id="requestPath" autocomplete="off" spellcheck="false" placeholder="例如 /openai-codex-oauth/v1/chat/completions">
         </label>
+        <label>凭据 Hash
+          <input id="credential" autocomplete="off" spellcheck="false" placeholder="sha256:...">
+        </label>
+        <label>模型
+          <input id="modelFilter" autocomplete="off" spellcheck="false" placeholder="请求/计划/出站/响应模型">
+        </label>
+        <label>Provider
+          <input id="providerFilter" autocomplete="off" spellcheck="false" placeholder="例如 openai-codex-oauth">
+        </label>
+        <label>状态
+          <select id="outcome"><option value="">全部</option><option value="success">success</option><option value="http_error">http_error</option><option value="semantic_failure">semantic_failure</option><option value="client_aborted">client_aborted</option></select>
+        </label>
+        <label>模型不一致
+          <select id="modelMismatch"><option value="">全部</option><option value="true">仅不一致</option></select>
+        </label>
         <label>最多请求 limit
           <input id="limit" type="number" min="1" max="2000" step="1" value="200" inputmode="numeric">
           <span class="field-help">默认 200，最高 2000；列表越大查询越慢。</span>
         </label>
         <button id="load" type="button">查询审计</button>
+        <button id="loadMore" type="button" hidden>下一页</button>
         <div class="time-presets" id="timeHelp" aria-label="时间范围快捷选择">
           <span class="preset-label">默认最近 20 分钟</span>
           <button class="preset-btn" type="button" data-range-minutes="20">最近 20 分钟</button>
@@ -773,6 +821,7 @@
           <div class="metric"><span>缓存命中率</span><strong id="cacheHitRatio">0.00%</strong><small>cached / prompt</small></div>
           <div class="metric"><span>输出 Tokens</span><strong id="completionTokens">0</strong><small>含 reasoning</small></div>
           <div class="metric"><span>Total Tokens</span><strong id="totalTokens">0</strong><small>上游 total usage</small></div>
+          <div class="metric"><span>总成本</span><strong id="totalCost">—</strong><small>当前过滤窗口，USD</small></div>
         </div>
 
         <section class="diagnostics-panel" aria-label="缓存诊断">
@@ -847,11 +896,11 @@
                   <th>原始 Path</th>
                   <th>模型</th>
                   <th>账号</th>
-                  <th>Prompt</th>
-                  <th>Cached</th>
+                  <th>输入 / R缓存</th>
+                  <th>输出</th>
                   <th>缓存率</th>
-                  <th>Total</th>
-                  <th>耗时</th>
+                  <th>总成本</th>
+                  <th>用时 / 首字</th>
                   <th>状态</th>
                   <th>详情</th>
                 </tr>
@@ -962,6 +1011,22 @@
       return Number.isFinite(number) && number >= 0 ? `${number.toFixed(number < 100 ? 1 : 0)} ms` : '—';
     };
     const fmtPct = value => `${(Number(value || 0) * 100).toFixed(2)}%`;
+    const fmtUsd = value => {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number < 0) return '—';
+      if (number > 0 && number < 0.0001) return '<$0.0001';
+      return `$${number.toFixed(4)}`;
+    };
+    const costDisplay = cost => {
+      if (!cost || cost.pricingSource === 'missing' || Number(cost.missingPriceTokens || 0) > 0) {
+        return { main: '—', sub: '缺少价格', missing: true };
+      }
+      return {
+        main: fmtUsd(cost.usd),
+        sub: Number(cost.estimatedUsd || 0) > 0 ? '估算' : (cost.pricingSource || cost.pricingVersion || '已定价'),
+        missing: false
+      };
+    };
     const clamp01 = value => Math.max(0, Math.min(1, Number(value || 0)));
     const pad2 = value => String(value).padStart(2, '0');
     const shortTime = value => {
@@ -1038,6 +1103,16 @@
       const requestPath = document.getElementById('requestPath').value.trim();
       if (clientIp) params.set('clientIp', clientIp);
       if (requestPath) params.set('path', requestPath.split('?')[0]);
+      const credential = document.getElementById('credential').value.trim();
+      const modelMismatch = document.getElementById('modelMismatch').value;
+      if (credential) params.set('credential', credential);
+      if (modelMismatch) params.set('modelMismatch', modelMismatch);
+      const model = document.getElementById('modelFilter').value.trim();
+      const provider = document.getElementById('providerFilter').value.trim();
+      const outcome = document.getElementById('outcome').value;
+      if (model) params.set('model', model);
+      if (provider) params.set('provider', provider);
+      if (outcome) params.set('outcome', outcome);
       const limit = document.getElementById('limit').value.trim() || '200';
       if (limit) {
         const normalizedLimit = Math.min(Math.max(Number(limit) || 200, 1), 2000);
@@ -1245,6 +1320,9 @@
       fillMetric('cachedTokens', summary.cachedTokens);
       fillMetric('completionTokens', summary.completionTokens);
       fillMetric('totalTokens', summary.totalTokens);
+      const windowCost = data.cost || {};
+      const hasWindowCost = Number(windowCost.pricedRequestCount || 0) + Number(windowCost.estimatedRequestCount || 0) > 0;
+      document.getElementById('totalCost').textContent = hasWindowCost ? fmtUsd(windowCost.usd) : '—';
       fillMetric('cacheHitRatio', summary.cacheHitRatio, fmtPct);
       fillMetric('cacheGaugeText', summary.cacheHitRatio, fmtPct);
       document.getElementById('cacheGauge').style.setProperty('--rate', clamp01(summary.cacheHitRatio));
@@ -1301,10 +1379,54 @@
       return `<span class="pill bad">${escapeHtml(outcome)} ${escapeHtml(httpStatus)}</span>`;
     }
 
+    function modelEvidence(event) {
+      const request = event.request || {};
+      const fields = [
+        ['客户端', request.requestedModel || request.model],
+        ['计划', request.plannedModel],
+        ['出站', request.outboundModel || request.actualModel || request.model],
+        ['上游自报', request.upstreamResponseModel]
+      ];
+      const groups = new Map();
+      for (const [label, rawValue] of fields) {
+        const value = String(rawValue || '').trim();
+        if (!value) continue;
+        if (!groups.has(value)) groups.set(value, []);
+        groups.get(value).push(label);
+      }
+      const entries = [...groups.entries()];
+      const fallback = request.model || 'unknown';
+      const upstreamReported = Boolean(request.upstreamResponseModel);
+      if (entries.length <= 1) {
+        const value = entries[0]?.[0] || fallback;
+        const note = upstreamReported ? '四阶段一致' : '请求 / 计划 / 出站一致；上游未报告 model';
+        return {
+          compact: `<span class="pill">${escapeHtml(value)}</span>`,
+          detail: `<div class="detail-box model-chain-box"><span>模型</span><strong>${escapeHtml(value)}</strong><small class="muted">${note}</small></div>`
+        };
+      }
+      const rows = entries.map(([value, labels]) => `
+        <div class="model-chain-row">
+          <small>${escapeHtml(labels.join(' / '))}</small>
+          <strong>${escapeHtml(value)}</strong>
+        </div>`).join('');
+      return {
+        compact: `<div class="model-chain">${entries.map(([value, labels]) => `<div><small class="muted">${escapeHtml(labels.join('/'))}</small> <span class="pill warn">${escapeHtml(value)}</span></div>`).join('')}</div>`,
+        detail: `<div class="detail-box model-chain-box"><span>模型链（存在差异）</span><div class="model-chain">${rows}</div></div>`
+      };
+    }
+
     function detailHtml(event) {
       const usage = event.usage || {};
+      const cost = costDisplay(event.cost);
       const sections = normalizeRequestSections(event);
       const reasons = event.diagnosis?.reasons || [];
+      const models = modelEvidence(event);
+      const attempts = (event.attempts || []).map(attempt => `
+        <div class="reason-item">
+          <strong>#${escapeHtml(attempt.sequence)} ${escapeHtml(attempt.status || 'unknown')}</strong><br>
+          <span class="muted">${escapeHtml(attempt.providerType || '-')} · ${escapeHtml(attempt.outboundModel || '-')} → ${escapeHtml(attempt.upstreamResponseModel || '未知')} · HTTP ${escapeHtml(attempt.httpStatus ?? '-')} · ${formatDuration(attempt.durationMs)}</span>
+        </div>`).join('');
       const rows = SECTION_ORDER.map(id => {
         const item = sections[id] || { tokens: 0, percentOfTotalContext: 0 };
         return `
@@ -1326,10 +1448,20 @@
                   <div class="reason-list">
                     ${reasons.length ? reasons.map(reason => `<div class="reason-item"><strong>${escapeHtml(DIAGNOSTIC_LABELS[reason.code] || reason.code)}</strong><br><span class="muted">code=${escapeHtml(reason.code)} · severity=${escapeHtml(reason.severity || '-')}</span></div>`).join('') : '<div class="reason-item muted">暂无离线诊断；等待 analyzer 生成或调整时间窗后重试。</div>'}
                   </div>
+                  <h3>上游调用时间线</h3>
+                  <div class="reason-list">${attempts || '<div class="reason-item muted">旧记录没有 attempt 明细。</div>'}</div>
                 </div>
             <div class="detail-grid">
               <div class="detail-box"><span>来源协议</span><strong>${escapeHtml(event.request?.fromProvider || '-')}</strong></div>
               <div class="detail-box"><span>上游渠道</span><strong>${escapeHtml(event.request?.toProvider || '-')}</strong></div>
+              ${models.detail}
+              <div class="detail-box"><span>计费模型</span><strong>${escapeHtml(event.request?.billingModel || '未知')}</strong></div>
+              <div class="detail-box"><span>总成本</span><strong>${escapeHtml(cost.main)}</strong><small class="muted">${escapeHtml(cost.sub)}</small></div>
+              <div class="detail-box"><span>成本拆分</span><strong>${cost.missing ? '—' : `实际 ${escapeHtml(fmtUsd(event.cost?.actualUsd))} / 估算 ${escapeHtml(fmtUsd(event.cost?.estimatedUsd))}`}</strong></div>
+              <div class="detail-box"><span>价格版本</span><strong>${escapeHtml(event.cost?.pricingVersion || '-')}</strong><small class="muted">${escapeHtml(event.cost?.pricingSource || '-')} · ×${escapeHtml(event.cost?.priceMultiplier ?? 1)}</small></div>
+              <div class="detail-box"><span>Turn-State</span><strong>${escapeHtml(event.turnState?.source || 'none')} / 请求 ${fmt(event.turnState?.requestLength)} B / 响应 ${fmt(event.turnState?.responseLength)} B / ${escapeHtml(event.turnState?.cacheOutcome || '未缓存')}</strong></div>
+              <div class="detail-box"><span>Reasoning 参数</span><strong>${escapeHtml(event.parameters?.requestedReasoningEffort || '-')} → ${escapeHtml(event.parameters?.effectiveReasoningEffort || '-')}</strong></div>
+              <div class="detail-box"><span>Service tier</span><strong>${escapeHtml(event.parameters?.requestedServiceTier || '-')} → ${escapeHtml(event.parameters?.effectiveServiceTier || '-')}</strong></div>
               <div class="detail-box"><span>Reasoning</span><strong>${fmt(usage.reasoningTokens)}</strong></div>
               <div class="detail-box"><span>是否流式</span><strong>${event.request?.stream ? '是' : '否'}</strong></div>
               <div class="detail-box"><span>标准化 Path</span><strong>${escapeHtml(event.request?.normalizedPath || '-')}</strong></div>
@@ -1339,6 +1471,7 @@
               <div class="detail-box"><span>图片结果</span><strong>${event.response?.hasImageResult === true ? '有' : event.response?.hasImageResult === false ? '无' : '不适用'}</strong></div>
               <div class="detail-box"><span>HTTP 状态</span><strong>${escapeHtml(event.response?.httpStatus ?? event.status?.httpStatus ?? '-')}</strong></div>
               <div class="detail-box"><span>请求耗时</span><strong>${formatDuration(event.response?.durationMs)}</strong></div>
+              <div class="detail-box"><span>首个下游输出</span><strong>${formatDuration(event.runtime?.stages?.clientFirstOutputMs)}</strong></div>
               <div class="detail-box"><span>Worker</span><strong>${escapeHtml(event.runtime?.workerId || '-')}</strong></div>
               <div class="detail-box"><span>背压耗时</span><strong>${formatDuration(event.runtime?.backpressureMs)}</strong></div>
             </div>
@@ -1358,19 +1491,21 @@
 
       requests.forEach((event, index) => {
         const usage = event.usage || {};
+        const models = modelEvidence(event);
+        const cost = costDisplay(event.cost);
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>${escapeHtml(shortTime(event.timestamp))}</td>
           <td><span class="request-id">${escapeHtml(event.requestId || '-')}</span></td>
           <td>${escapeHtml(event.network?.clientIp || '-')}</td>
           <td><code>${escapeHtml(event.request?.path || '-')}</code></td>
-          <td><span class="pill">${escapeHtml(event.request?.model || 'unknown')}</span></td>
+          <td>${models.compact}</td>
           <td>${escapeHtml(event.account?.providerNameDisplay || event.account?.providerUuid || '-')}</td>
-          <td>${fmt(usage.promptTokens)}</td>
-          <td>${fmt(usage.cachedTokens)}</td>
+          <td><div class="stacked-value"><strong>${fmt(usage.promptTokens)}</strong><small>R${fmt(usage.cachedTokens)}</small></div></td>
+          <td>${fmt(usage.completionTokens)}</td>
           <td><span class="pill ${Number(usage.cacheHitRatio || 0) >= .2 ? 'good' : 'warn'}">${fmtPct(usage.cacheHitRatio)}</span></td>
-          <td>${fmt(usage.totalTokens)}</td>
-          <td>${formatDuration(event.response?.durationMs)}</td>
+          <td><div class="stacked-value"><strong>${escapeHtml(cost.main)}</strong><small>${escapeHtml(cost.sub)}</small></div></td>
+          <td><div class="stacked-value"><strong>${formatDuration(event.response?.durationMs)}</strong><small>${formatDuration(event.runtime?.stages?.clientFirstOutputMs)}</small></div></td>
           <td>${outcomePill(event.status)}</td>
           <td><button class="expand-btn" type="button" data-index="${index}" aria-expanded="false">展开</button></td>
         `;
@@ -1424,18 +1559,25 @@
       }
     }
 
-    async function loadAudit() {
+    let nextCursor = null;
+    async function loadAudit({ append = false } = {}) {
       const button = document.getElementById('load');
       button.disabled = true;
       setStatus('正在查询审计数据...');
       try {
         const params = await buildParams();
+        const requestParams = new URLSearchParams(params);
+        if (append && nextCursor) requestParams.set('cursor', nextCursor);
         const [summaryResponse, requestsResponse] = await Promise.all([
           fetchJson(`/api/request-audit/summary?${params}`),
-          fetchJson(`/api/request-audit/requests?${params}`)
+          fetchJson(`/api/request-audit/requests?${requestParams}`)
         ]);
         renderSummary(summaryResponse.data || {});
-        renderRequests(requestsResponse.data?.requests || []);
+        const requests = requestsResponse.data?.requests || [];
+        renderRequests(append ? [...(window.__auditRequests || []), ...requests] : requests);
+        window.__auditRequests = append ? [...(window.__auditRequests || []), ...requests] : requests;
+        nextCursor = requestsResponse.data?.nextCursor || null;
+        document.getElementById('loadMore').hidden = !nextCursor;
         const windowText = [params.get('since'), params.get('until')].filter(Boolean).join(' 到 ');
         setStatus(`查询完成${windowText ? `：${windowText}` : ''}`);
       } catch (error) {
@@ -1450,7 +1592,8 @@
     });
     window.addEventListener('hashchange', () => showView(location.hash.replace('#', '')));
     showView(location.hash.replace('#', ''));
-    document.getElementById('load').addEventListener('click', loadAudit);
+    document.getElementById('load').addEventListener('click', () => loadAudit());
+    document.getElementById('loadMore').addEventListener('click', () => loadAudit({ append: true }));
     document.getElementById('saveRawCapture').addEventListener('click', saveRawCaptureSettings);
     document.querySelectorAll('.preset-btn').forEach(button => {
       button.addEventListener('click', () => {

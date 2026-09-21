@@ -1,7 +1,60 @@
 import { buildRequestAuditEvent } from '../src/plugins/request-audit/audit-event.js';
 import { buildAuditSummary } from '../src/plugins/request-audit/api-routes.js';
+import { getPricingDiagnostics, resetPricingDiagnostics } from '../src/plugins/api-potluck/cost-estimator.js';
 
 describe('request audit event', () => {
+  test('prices usage with the final billing model instead of the upstream self-reported model', () => {
+    const event = buildRequestAuditEvent({
+      requestId: 'req-cost',
+      model: 'gpt-5.6-sol-fast',
+      originalRequestBody: { model: 'gpt-5.6-sol' },
+      requestAttempts: [{
+        attemptId: 'attempt-cost', outboundModel: 'gpt-5.6-sol',
+        upstreamResponseModel: 'gpt-5.4', serviceTier: 'priority', status: 'success', httpStatus: 200
+      }],
+      usage: { promptTokens: 1000, cachedTokens: 100, completionTokens: 100, totalTokens: 1100 },
+      response: { httpStatus: 200, completed: true }
+    });
+
+    expect(event.schemaVersion).toBe(6);
+    expect(event.request).toMatchObject({ billingModel: 'gpt-5.6-sol-fast', upstreamResponseModel: 'gpt-5.4' });
+    expect(event.cost).toMatchObject({
+      usd: expect.any(Number), actualUsd: expect.any(Number), estimatedUsd: 0,
+      missingPriceTokens: 0, pricingVersion: expect.any(String), priceMultiplier: 2.5
+    });
+    expect(event.cost.usd).toBeCloseTo(0.018875, 8);
+  });
+
+  test('marks unknown billing models as missing instead of reporting zero cost', () => {
+    resetPricingDiagnostics();
+    const event = buildRequestAuditEvent({
+      requestId: 'req-missing-cost', model: 'gpt-unknown-private',
+      usage: { promptTokens: 1000, completionTokens: 100, totalTokens: 1100 },
+      response: { httpStatus: 200, completed: true }
+    });
+    expect(event.cost).toMatchObject({ usd: 0, pricingSource: 'missing', missingPriceTokens: 1100 });
+    expect(getPricingDiagnostics().missingPriceCount).toBe(0);
+  });
+  test('separates requested planned outbound and upstream models with sanitized attempt evidence', () => {
+    const requestBody = { model: 'gpt-5.5', reasoning: { effort: 'high' }, service_tier: 'priority' };
+    Object.defineProperty(requestBody, '_requestAuditAttempts', { value: [{
+      attemptId: 'attempt-1', providerType: 'openai-codex-oauth', providerUuid: 'secret-uuid',
+      plannedModel: 'gpt-5.5', outboundModel: 'gpt-5.5', upstreamResponseModel: 'gpt-5.4',
+      reasoningEffort: 'high', serviceTier: 'priority', status: 'success', httpStatus: 200
+    }], enumerable: false });
+    const event = buildRequestAuditEvent({
+      requestId: 'req-model-evidence', model: 'gpt-5.5',
+      originalRequestBody: { model: 'gpt-5.6-sol', reasoning: { effort: 'medium' } },
+      processedRequestBody: requestBody,
+      response: { httpStatus: 200, completed: true }
+    });
+    expect(event.request).toMatchObject({
+      requestedModel: 'gpt-5.6-sol', plannedModel: 'gpt-5.6-sol', outboundModel: 'gpt-5.5',
+      upstreamResponseModel: 'gpt-5.4', modelMismatch: true
+    });
+    expect(event.attempts[0]).toMatchObject({ attemptId: 'attempt-1', providerUuidHash: expect.stringMatching(/^sha256:/) });
+    expect(JSON.stringify(event)).not.toContain('secret-uuid');
+  });
   test('builds a self-contained v4 event with request network and response facts', () => {
     const event = buildRequestAuditEvent({
       requestId: 'req-v2',
@@ -22,7 +75,7 @@ describe('request audit event', () => {
     });
 
     expect(event).toMatchObject({
-      schemaVersion: 4,
+      schemaVersion: 6,
       request: {
         method: 'POST',
         path: '/openai-codex-oauth/v1/chat/completions',
@@ -70,6 +123,7 @@ describe('request audit event', () => {
         stages: {
           requestConvertMs: 12,
           upstreamFirstByteMs: 410,
+          clientFirstOutputMs: 522,
           upstreamCompleteMs: 825,
           responseFinalizeMs: 4
         },
@@ -86,6 +140,7 @@ describe('request audit event', () => {
       stages: {
         requestConvertMs: 12,
         upstreamFirstByteMs: 410,
+        clientFirstOutputMs: 522,
         upstreamCompleteMs: 825,
         responseFinalizeMs: 4
       }

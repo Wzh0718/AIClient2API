@@ -13,7 +13,9 @@ function safeMetadata(metadata = {}) {
     const allowed = [
         'requestId', 'method', 'path', 'model', 'providerType', 'stream',
         'requestBodyBytes', 'responseStatus',
-        'geminiSelection', 'geminiRetryCount', 'geminiFallbackCount', 'geminiFinalProviderUuidHash', 'clientAborted'
+        'geminiSelection', 'geminiRetryCount', 'geminiFallbackCount', 'geminiFinalProviderUuidHash', 'clientAborted',
+        'codexTurnStateEnabled', 'codexTurnStateSource', 'codexTurnStateLength', 'codexTurnStateSkipReason',
+        'codexTurnStateCaptured', 'codexTurnStateResponseLength', 'upstreamResponseModel'
     ];
     return Object.fromEntries(allowed
         .filter(name => metadata[name] !== undefined && metadata[name] !== null)
@@ -37,6 +39,7 @@ const REQUIRED_STAGE_NAMES = [
     'requestConvertMs',
     'systemPromptPersistMs',
     'upstreamFirstByteMs',
+    'clientFirstOutputMs',
     'upstreamCompleteMs',
     'responseFinalizeMs'
 ];

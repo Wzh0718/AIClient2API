@@ -2,6 +2,8 @@ import { extractUsage, mergeUsage, toWireUsage } from '../utils/usage-normalizer
 import { createHash } from 'crypto';
 import { buildRequestFingerprint } from '../plugins/request-audit/fingerprint.js';
 import { compactAntigravitySourceAvailability } from '../utils/gemini-diagnostics.js';
+import { getRequestAttempts } from '../utils/request-attempts.js';
+import { CODEX_FINGERPRINT_CONTEXT_KEY } from '../providers/openai/codex-fingerprint.js';
 
 function hashSecret(value, length = 32) {
     if (!value) return null;
@@ -98,7 +100,7 @@ function compactMetadata(context = {}) {
         'selectionPlanFilterMs', 'selectionRankMs', 'selectionHydrateMs',
         'identityReadMs', 'identityPersistLockWaitMs',
         'identityPersistIoMs', 'requestConvertMs', 'systemPromptPersistMs',
-        'upstreamFirstByteMs', 'upstreamCompleteMs', 'responseFinalizeMs', 'complete'
+        'upstreamFirstByteMs', 'clientFirstOutputMs', 'upstreamCompleteMs', 'responseFinalizeMs', 'complete'
     ]);
     const runtime = context.runtime && typeof context.runtime === 'object' ? {
         workerId: typeof context.runtime.workerId === 'string' ? context.runtime.workerId : undefined,
@@ -123,11 +125,27 @@ function compactMetadata(context = {}) {
         _modelRouting: compactModelRouting(context._modelRouting),
         _temporaryKeyModelRouteResult: compactTemporaryModelRoute(context._temporaryKeyModelRouteResult),
         originalRequestBody: context.originalRequestBody?.model
-            ? { model: context.originalRequestBody.model }
+            ? {
+                model: context.originalRequestBody.model,
+                reasoning: context.originalRequestBody.reasoning,
+                reasoning_effort: context.originalRequestBody.reasoning_effort,
+                service_tier: context.originalRequestBody.service_tier
+            }
             : undefined,
         processedRequestBody: context.processedRequestBody?.model
             ? { model: context.processedRequestBody.model }
             : undefined,
+        requestAttempts: Array.isArray(context.requestAttempts)
+            ? context.requestAttempts
+            : getRequestAttempts(context.processedRequestBody),
+        codexEvidence: context.processedRequestBody?.[CODEX_FINGERPRINT_CONTEXT_KEY] ? {
+            upstreamResponseModel: context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].upstreamResponseModel || null,
+            turnStateCacheOutcome: context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].turnStateCacheOutcome || null,
+            turnStateCacheCaptured: context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].turnStateCacheCaptured === true,
+            turnStateResponseLength: context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].downstreamCodexTurnState
+                ? Buffer.byteLength(context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].downstreamCodexTurnState, 'utf8')
+                : 0
+        } : undefined,
         isStream: typeof context.isStream === 'boolean' ? context.isStream : undefined,
         method: context.method || null,
         path: context.path || null,
