@@ -53,13 +53,24 @@ describe('production image provenance and blue-green preflight', () => {
         expect(script).toContain('pendingWorkerCount');
     });
 
+    test('candidate containers enforce bounded json-file logging', () => {
+        const script = read('scripts/ops/blue-green-deploy.sh');
+        expect(script).toContain('--log-driver json-file');
+        expect(script).toContain('--log-opt "max-size=$CANDIDATE_LOG_MAX_SIZE"');
+        expect(script).toContain('--log-opt "max-file=$CANDIDATE_LOG_MAX_FILE"');
+        expect(script).toContain('CANDIDATE_LOG_MAX_SIZE=${CANDIDATE_LOG_MAX_SIZE:-50m}');
+        expect(script).toContain('CANDIDATE_LOG_MAX_FILE=${CANDIDATE_LOG_MAX_FILE:-5}');
+        expect(script).toContain('candidate log configuration mismatch');
+        expect(script).toContain('.HostConfig.LogConfig.Config');
+    });
+
     test('candidate snapshot stays bounded and joins the Redis network', () => {
         const script = read('scripts/ops/blue-green-deploy.sh');
 
         expect(script).toContain('CANDIDATE_NETWORK');
         expect(script).toContain('--network "$CANDIDATE_NETWORK"');
-        expect(script).toContain("--exclude='request-audit'");
-        expect(script).toContain("--exclude='app-logs'");
+        expect(script).toContain('--exclude=request-audit');
+        expect(script).toContain('--exclude=app-logs');
         expect(script).toContain('SNAPSHOT_REQUIRED_BYTES');
         expect(script).toContain('insufficient disk space for candidate snapshot');
         expect(script).toContain('CANDIDATE_MEMORY');

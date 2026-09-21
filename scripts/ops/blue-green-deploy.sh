@@ -113,6 +113,15 @@ wait_for_health() {
   return 1
 }
 
+verify_candidate_log_config() {
+  actual=$(docker inspect --format '{{index .HostConfig.LogConfig.Config "max-size"}} {{index .HostConfig.LogConfig.Config "max-file"}}' "$CANDIDATE_CONTAINER")
+  expected="$CANDIDATE_LOG_MAX_SIZE $CANDIDATE_LOG_MAX_FILE"
+  [ "$actual" = "$expected" ] || {
+    echo "candidate log configuration mismatch: expected=$expected actual=$actual" >&2
+    return 1
+  }
+}
+
 prepare_candidate() {
   verify_image_revision
   verify_safe_paths
@@ -174,6 +183,7 @@ prepare_candidate() {
 
   if [ "$APPLY" = "1" ]; then
     wait_for_health || { docker logs --tail 100 "$CANDIDATE_CONTAINER" >&2; exit 1; }
+    verify_candidate_log_config || exit 1
     # The container healthcheck flips before the HTTP surface is warm, so a
     # single 5s probe here reported a false failure on a candidate that was fine.
     probe=0
