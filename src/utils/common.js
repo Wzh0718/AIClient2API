@@ -1872,6 +1872,51 @@ function isCodexProvider(provider) {
     return provider === MODEL_PROVIDER.CODEX_API || provider?.startsWith(`${MODEL_PROVIDER.CODEX_API}-`);
 }
 
+function isAntigravityProvider(provider) {
+    return provider === MODEL_PROVIDER.ANTIGRAVITY || provider?.startsWith(`${MODEL_PROVIDER.ANTIGRAVITY}-`);
+}
+
+function normalizeResponseModelValue(value) {
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function extractAntigravityResponseModel(value) {
+    if (!value || typeof value !== 'object') return null;
+    if (Array.isArray(value)) {
+        for (let index = value.length - 1; index >= 0; index -= 1) {
+            const model = extractAntigravityResponseModel(value[index]);
+            if (model) return model;
+        }
+        return null;
+    }
+    return normalizeResponseModelValue(value.modelVersion);
+}
+
+function addAntigravityModelMetadata(value, requestModel, responseModel, { pendingResponseModel = false } = {}) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const normalizedRequestModel = normalizeResponseModelValue(requestModel);
+    if (!normalizedRequestModel) return value;
+
+    value.request_model = normalizedRequestModel;
+    const normalizedResponseModel = normalizeResponseModelValue(responseModel);
+    if (normalizedResponseModel) {
+        value.response_model = normalizedResponseModel;
+    } else if (pendingResponseModel) {
+        value.response_model = null;
+    } else {
+        delete value.response_model;
+    }
+    return value;
+}
+
+function isTerminalTextResponseChunk(chunk) {
+    if (!chunk || typeof chunk !== 'object') return false;
+    if (chunk.type === 'message_stop') return true;
+    if (chunk.type === 'response.completed' || chunk.type === 'response.incomplete') return true;
+    if (chunk.choices?.some(choice => choice?.finish_reason)) return true;
+    return Boolean(chunk.candidates?.some(candidate => candidate?.finishReason));
+}
+
 function shouldForceCodexFamilyFallback(error, provider, model) {
     return isCodexProvider(provider)
         && getErrorStatusCode(error) === 429
@@ -1910,6 +1955,10 @@ export async function handleStreamRequest(res, service, model, requestBody, from
     let responseClosed = false;
     let genericAttempt = null;
     let anyDataSent = retryContext?.anyDataSent || false; // 跟踪是否已向客户端发送过任何数据
+    const includeAntigravityModelMetadata = isAntigravityProvider(toProvider);
+    let antigravityRequestModel = null;
+    let antigravityResponseModel = null;
+    let antigravityFirstMetadataSent = false;
     const ensureStreamResponseHeaders = async () => {
         if (res.headersSent) return;
         const turnState = requestBody?.[CODEX_FINGERPRINT_CONTEXT_KEY]?.downstreamCodexTurnState;
@@ -2009,6 +2058,13 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 logger.info('[Stream] Stopping iteration due to client disconnect');
                 break;
             }
+            if (includeAntigravityModelMetadata) {
+                antigravityRequestModel = normalizeResponseModelValue(requestBody?.model)
+                    || antigravityRequestModel
+                    || normalizeResponseModelValue(model);
+                antigravityResponseModel = extractAntigravityResponseModel(nativeChunk)
+                    || antigravityResponseModel;
+            }
             await ensureStreamResponseHeaders();
             
             // Extract text for logging purposes
@@ -2054,6 +2110,19 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 // 再次检查客户端连接状态
                 if (clientDisconnected.value) {
                     break;
+                }
+
+                if (includeAntigravityModelMetadata) {
+                    const terminalChunk = isTerminalTextResponseChunk(chunk);
+                    if (!antigravityFirstMetadataSent || terminalChunk) {
+                        addAntigravityModelMetadata(
+                            chunk,
+                            antigravityRequestModel,
+                            antigravityResponseModel,
+                            { pendingResponseModel: !terminalChunk && !antigravityResponseModel }
+                        );
+                        antigravityFirstMetadataSent = true;
+                    }
                 }
                 
                 // [FIX] 跟踪工具调用并在结束时修正 finish_reason
@@ -2532,13 +2601,29 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                         // 连接关闭即表示流结束；不要再追加 `event: done` + `data: {}`，否则会触发下游类型校验失败（AI_TypeValidationError）。
                     } else if (clientProtocol === MODEL_PROTOCOL_PREFIX.CLAUDE) {
                         if (!hasMessageStop) {
+                            const messageStop = { type: 'message_stop' };
+                            if (includeAntigravityModelMetadata) {
+                                addAntigravityModelMetadata(
+                                    messageStop,
+                                    antigravityRequestModel,
+                                    antigravityResponseModel
+                                );
+                            }
                             await writeWithBackpressure(res, 'event: message_stop\n');
-                            await writeWithBackpressure(res, 'data: {"type":"message_stop"}\n\n');
+                            await writeWithBackpressure(res, `data: ${JSON.stringify(messageStop)}\n\n`);
                             hasMessageStop = true;
                         }
                     } else if (clientProtocol === MODEL_PROTOCOL_PREFIX.GEMINI) {
                         if (!hasMessageStop) {
-                            await writeWithBackpressure(res, 'data: {"candidates":[{"finishReason":"STOP"}]}\n\n');
+                            const terminalChunk = { candidates: [{ finishReason: 'STOP' }] };
+                            if (includeAntigravityModelMetadata) {
+                                addAntigravityModelMetadata(
+                                    terminalChunk,
+                                    antigravityRequestModel,
+                                    antigravityResponseModel
+                                );
+                            }
+                            await writeWithBackpressure(res, `data: ${JSON.stringify(terminalChunk)}\n\n`);
                             hasMessageStop = true;
                         }
                     }
@@ -2604,6 +2689,12 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             stream: false
         }) : null;
         const nativeResponse = await service.generateContent(model, requestBody);
+        const antigravityRequestModel = isAntigravityProvider(toProvider)
+            ? normalizeResponseModelValue(requestBody?.model) || normalizeResponseModelValue(model)
+            : null;
+        const antigravityResponseModel = isAntigravityProvider(toProvider)
+            ? extractAntigravityResponseModel(nativeResponse)
+            : null;
         finishRequestAttempt(genericAttempt, {
             status: 'success',
             httpStatus: 200,
@@ -2635,6 +2726,13 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             clientResponse = convertData(nativeResponse, 'response', toProvider, fromProvider, model);
         }
         clientResponse = preserveClientResponseModel(clientResponse, retryContext);
+        if (isAntigravityProvider(toProvider)) {
+            clientResponse = addAntigravityModelMetadata(
+                clientResponse,
+                antigravityRequestModel,
+                antigravityResponseModel
+            );
+        }
 
         // 监控钩子：非流式响应
         const hookRequestId = getPluginHookRequestId(CONFIG);

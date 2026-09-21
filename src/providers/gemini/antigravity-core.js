@@ -853,6 +853,10 @@ function toGeminiApiResponse(antigravityResponse) {
         compliantResponse.automaticFunctionCallingHistory = antigravityResponse.automaticFunctionCallingHistory;
     }
 
+    if (antigravityResponse.modelVersion) {
+        compliantResponse.modelVersion = antigravityResponse.modelVersion;
+    }
+
     return compliantResponse;
 }
 

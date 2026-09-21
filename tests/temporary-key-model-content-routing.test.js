@@ -302,7 +302,8 @@ describe('temporary key model content routing', () => {
         expect(response.body).toContain('event: response.completed');
         expect(response.body).toContain('streamed through flash');
         expect(response.body).toContain('gpt-5.3-codex-spark');
-        expect(response.body).not.toContain('gemini-2.5-flash');
+        expect(response.body).toContain('"model":"gpt-5.3-codex-spark"');
+        expect(response.body).toContain('"request_model":"gemini-2.5-flash"');
         expect(config._temporaryKeyModelRouteResult).toMatchObject({
             requestedModel: 'gpt-5.3-codex-spark',
             actualProviderType: 'gemini-antigravity',

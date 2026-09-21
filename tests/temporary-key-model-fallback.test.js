@@ -201,7 +201,8 @@ describe('temporary model route fallback', () => {
 
         expect(fallback).not.toHaveBeenCalled();
         expect(res.body).toContain('gpt-5.4-mini');
-        expect(res.body).not.toContain('gemini-2.5-flash');
+        expect(res.body).toContain('"model":"gpt-5.4-mini"');
+        expect(res.body).toContain('"request_model":"gemini-2.5-flash"');
         expect(res.body).toContain('"error"');
         expect(config._temporaryKeyModelRouteResult).toMatchObject({
             actualProviderType: 'gemini-antigravity',
