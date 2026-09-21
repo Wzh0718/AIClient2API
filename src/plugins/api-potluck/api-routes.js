@@ -41,6 +41,7 @@ import {
 } from '../../services/codex-credential-group-service.js';
 import { readFreshUsageCacheSync, getCachedCodexUsageInstance } from '../../utils/codex-plan.js';
 import { normalizeCodexRateLimitWindows } from '../../utils/codex-rate-limit.js';
+import { getProviderUiAvailability } from '../../utils/provider-ui-availability.js';
 import { hashSecret, sanitizeProviderName } from '../request-audit/audit-event.js';
 import { randomUUID } from 'crypto';
 import logger from '../../utils/logger.js';
@@ -598,6 +599,7 @@ function buildCredentialIndexes(credentials) {
 
 function buildPublicCredential(credential, providerEmailIndex = new Map()) {
     const capacity = calculateCredentialCapacity(credential);
+    const uiAvailability = getProviderUiAvailability(credential);
     return {
         credentialRef: getCredentialRef(credential.providerType, credential.uuid),
         providerType: credential.providerType,
@@ -608,6 +610,7 @@ function buildPublicCredential(credential, providerEmailIndex = new Map()) {
         isDisabled: credential.isDisabled === true,
         needsRefresh: credential.needsRefresh === true,
         available: isCredentialAvailable(credential),
+        ...uiAvailability,
         capacity: capacity.capacity,
         confidence: capacity.confidence,
         fiveHourRemainingRatio: capacity.fiveHourRemainingRatio,
@@ -794,7 +797,8 @@ function buildCredentialGroupRoutingOptions(currentConfig, credentials) {
         credentials: (credentials || []).map(credential => ({
             credentialRef: getCredentialRef(credential.providerType, credential.uuid),
             accountEmail: providerEmailIndex.get(`${credential.providerType}:${credential.uuid}`) || '',
-            customName: sanitizeProviderName(credential.customName)
+            customName: sanitizeProviderName(credential.customName),
+            ...getProviderUiAvailability(credential)
         }))
     };
 }

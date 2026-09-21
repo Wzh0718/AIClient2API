@@ -1348,6 +1348,47 @@
     gap: 0.75rem;
 }
 
+.provider-availability-filter {
+    display: flex;
+    flex: 0 0 auto;
+    padding: 4px;
+    gap: 4px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+
+.provider-availability-btn {
+    border: 0;
+    border-radius: 6px;
+    padding: 7px 12px;
+    color: var(--text-secondary);
+    background: transparent;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.provider-availability-btn.active {
+    color: #fff;
+    background: var(--primary-color);
+}
+
+.provider-availability-btn:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+}
+
+@media (max-width: 720px) {
+    .provider-nodes-toolbar {
+        align-items: stretch !important;
+        flex-wrap: wrap;
+    }
+
+    .provider-nodes-toolbar .search-input-wrapper {
+        flex-basis: 100% !important;
+    }
+}
+
 .provider-actions {
     margin-bottom: 24px;
 }

@@ -12,6 +12,7 @@ let currentPage = 1;
 let currentProviders = [];
 let currentProviderType = '';
 let nodeSearchTerm = '';
+let currentAvailabilityFilter = 'available';
 let currentViewMode = localStorage.getItem('providerViewMode') || 'list';
 let cachedProxyPools = [];
 let proxyPoolAssignments = new Map();
@@ -664,6 +665,7 @@ async function showProviderManagerModal(data, initialSearchTerm = '') {
     currentProviderType = providerType;
     currentPage = 1;
     nodeSearchTerm = initialSearchTerm;
+    currentAvailabilityFilter = 'available';
     cachedModels = [];
     
     // 移除已存在的模态框
@@ -730,6 +732,10 @@ async function showProviderManagerModal(data, initialSearchTerm = '') {
                                placeholder="${t('modal.provider.searchNodesPlaceholder') || '搜索节点名称、UUID 或配置内容...'}" 
                                style="width: 100%; padding: 10px 12px 10px 35px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);">
                     </div>
+                    <div class="provider-availability-filter" role="group" aria-label="凭据显示范围">
+                        <button type="button" class="provider-availability-btn active" data-availability-filter="available" aria-pressed="true">可用（<span data-availability-count="available">0</span>）</button>
+                        <button type="button" class="provider-availability-btn" data-availability-filter="all" aria-pressed="false">全部（<span data-availability-count="all">0</span>）</button>
+                    </div>
                     <div class="view-mode-toggle" style="display: flex; background: var(--bg-secondary); padding: 4px; border-radius: 8px; border: 1px solid var(--border-color);">
                         <button class="view-mode-btn ${currentViewMode === 'list' ? 'active' : ''}" data-mode="list" title="${t('common.view.list') || '列表视图'}" style="border: none; background: ${currentViewMode === 'list' ? 'var(--primary-color)' : 'transparent'}; color: ${currentViewMode === 'list' ? '#fff' : 'var(--text-secondary)'}; padding: 6px 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s;">
                             <i class="fas fa-list"></i>
@@ -752,6 +758,7 @@ async function showProviderManagerModal(data, initialSearchTerm = '') {
     
     // 添加模态框事件监听
     addModalEventListeners(modal);
+    updateProviderAvailabilityControls(modal);
     
     // 初始渲染
     window.goToProviderPage(1);
@@ -958,9 +965,12 @@ function renderPagination(page, totalPages, totalItems, position = 'top') {
  * 获取过滤后的提供商列表
  */
 function getFilteredProviders() {
-    if (!nodeSearchTerm) return currentProviders;
+    const availabilityFiltered = currentAvailabilityFilter === 'available'
+        ? currentProviders.filter(provider => provider.uiAvailable === true)
+        : currentProviders;
+    if (!nodeSearchTerm) return availabilityFiltered;
     const term = nodeSearchTerm.toLowerCase().trim();
-    return currentProviders.filter(p => {
+    return availabilityFiltered.filter(p => {
         // 搜索字段：自定义名称、UUID、API Key、Base URL、OAuth 路径等
         const searchFields = [
             p.customName,
@@ -986,6 +996,27 @@ function getFilteredProviders() {
             field && String(field).toLowerCase().includes(term)
         );
     });
+}
+
+function updateProviderAvailabilityControls(modal = document.querySelector('.provider-modal')) {
+    if (!modal) return;
+    const availableCount = currentProviders.filter(provider => provider.uiAvailable === true).length;
+    const availableCountNode = modal.querySelector('[data-availability-count="available"]');
+    const allCountNode = modal.querySelector('[data-availability-count="all"]');
+    if (availableCountNode) availableCountNode.textContent = String(availableCount);
+    if (allCountNode) allCountNode.textContent = String(currentProviders.length);
+    modal.querySelectorAll('[data-availability-filter]').forEach(button => {
+        const active = button.dataset.availabilityFilter === currentAvailabilityFilter;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+    });
+}
+
+function setProviderAvailabilityFilter(filter) {
+    if (!['available', 'all'].includes(filter) || filter === currentAvailabilityFilter) return;
+    currentAvailabilityFilter = filter;
+    updateProviderAvailabilityControls();
+    window.goToProviderPage(1);
 }
 
 /**
@@ -1049,10 +1080,14 @@ function goToProviderPage(page) {
  */
 function renderProviderListPaginated(providers, page) {
     if (providers.length === 0) {
+        const showAllButton = currentAvailabilityFilter === 'available'
+            ? '<button type="button" class="btn btn-outline" onclick="window.setProviderAvailabilityFilter(\'all\')">查看全部凭据</button>'
+            : '';
         return `
             <div class="no-providers">
                 <i class="fas fa-search" style="font-size: 2rem; opacity: 0.3; display: block; margin-bottom: 1rem;"></i>
                 <p>${t('common.noResults') || '没有找到匹配的节点'}</p>
+                ${showAllButton}
             </div>
         `;
     }
@@ -1182,6 +1217,12 @@ function addModalEventListeners(modal) {
             window.goToProviderPage(1); // 搜索时重置回第一页
         });
     }
+
+    modal.querySelectorAll('[data-availability-filter]').forEach(button => {
+        button.addEventListener('click', () => {
+            setProviderAvailabilityFilter(button.dataset.availabilityFilter);
+        });
+    });
 
     // 视图模式切换事件处理
     const viewModeBtns = modal.querySelectorAll('.view-mode-btn');
@@ -2121,46 +2162,8 @@ async function refreshProviderConfig(providerType) {
                 healthyCountElement.textContent = data.healthyCount;
             }
             
-            const totalPages = Math.ceil(data.providers.length / PROVIDERS_PER_PAGE);
-            
-            // 确保当前页不超过总页数
-            if (currentPage > totalPages) {
-                currentPage = Math.max(1, totalPages);
-            }
-            
-            // 重新渲染提供商列表（分页）
-            const providerList = modal.querySelector('.provider-list');
-            if (providerList) {
-                providerList.innerHTML = renderProviderListPaginated(data.providers, currentPage);
-            }
-            
-            // 更新分页控件
-            const paginationContainers = modal.querySelectorAll('.pagination-container');
-            if (totalPages > 1) {
-                paginationContainers.forEach(container => {
-                    const position = container.getAttribute('data-position');
-                    container.outerHTML = renderPagination(currentPage, totalPages, data.providers.length, position);
-                });
-                
-                // 如果之前没有分页控件，需要添加
-                if (paginationContainers.length === 0) {
-                    const modalBody = modal.querySelector('.provider-modal-body');
-                    const providerListEl = modal.querySelector('.provider-list');
-                    if (modalBody && providerListEl) {
-                        providerListEl.insertAdjacentHTML('beforebegin', renderPagination(currentPage, totalPages, data.providers.length, 'top'));
-                        providerListEl.insertAdjacentHTML('afterend', renderPagination(currentPage, totalPages, data.providers.length, 'bottom'));
-                    }
-                }
-            } else {
-                // 如果只有一页，移除分页控件
-                paginationContainers.forEach(container => container.remove());
-            }
-            
-            // 重新加载当前页的模型列表
-            const startIndex = (currentPage - 1) * PROVIDERS_PER_PAGE;
-            const endIndex = Math.min(startIndex + PROVIDERS_PER_PAGE, data.providers.length);
-            const pageProviders = data.providers.slice(startIndex, endIndex);
-            loadModelsForProviderType(providerType, pageProviders);
+            updateProviderAvailabilityControls(modal);
+            window.goToProviderPage(currentPage);
         }
         
         // 同时更新主界面的提供商统计数据
@@ -2928,7 +2931,8 @@ export {
     reauthorizeProvider,
     showProxyPoolManager,
     addProxyPoolRow,
-    saveProxyPools
+    saveProxyPools,
+    setProviderAvailabilityFilter
 };
 
 // 将函数挂载到window对象
@@ -2955,3 +2959,4 @@ window.reauthorizeProvider = reauthorizeProvider;
 window.showProxyPoolManager = showProxyPoolManager;
 window.addProxyPoolRow = addProxyPoolRow;
 window.saveProxyPools = saveProxyPools;
+window.setProviderAvailabilityFilter = setProviderAvailabilityFilter;

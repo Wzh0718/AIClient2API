@@ -75,6 +75,25 @@ describe('provider modal source regressions', () => {
         expect(source).toContain('provider.lastSuccessTime || provider.lastUsed');
     });
 
+    test('provider manager defaults to available accounts and filters before pagination', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/modal.js'), 'utf8').replace(/\r\n/g, '\n');
+        const providerApi = fs.readFileSync(path.join(process.cwd(), 'src/ui-modules/provider-api.js'), 'utf8').replace(/\r\n/g, '\n');
+        const css = fs.readFileSync(path.join(process.cwd(), 'static/components/section-providers.css'), 'utf8');
+
+        expect(source).toContain("let currentAvailabilityFilter = 'available'");
+        expect(source).toContain('data-availability-filter="available"');
+        expect(source).toContain('data-availability-filter="all"');
+        expect(source).toContain('aria-pressed="true"');
+        expect(source).toContain("currentProviders.filter(provider => provider.uiAvailable === true)");
+        expect(source.indexOf('const filteredProviders = getFilteredProviders()'))
+            .toBeLessThan(source.indexOf('const totalPages = Math.ceil(filteredProviders.length'));
+        expect(source).toContain('window.goToProviderPage(currentPage)');
+        expect(source).toContain('查看全部凭据');
+        expect(providerApi).toContain('getProviderUiAvailability(p)');
+        expect(css).toContain('.provider-availability-btn:focus-visible');
+        expect(css).toContain('@media (max-width: 720px)');
+    });
+
     test('provider detail list renders metadata as a wrapping chip row', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/modal.js'), 'utf8').replace(/\r\n/g, '\n');
         const detailStart = source.indexOf('function renderProviderDetailList(providers)');

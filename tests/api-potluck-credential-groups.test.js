@@ -192,10 +192,41 @@ describe('Potluck Codex credential group management API', () => {
         expect(response.body.data.credentials).toEqual([{
             credentialRef: expect.any(String),
             accountEmail: '',
-            customName: 'Primary'
+            customName: 'Primary',
+            uiAvailable: true,
+            uiUnavailableReason: null
         }]);
         expect(response.body.data).not.toHaveProperty('keys');
         expect(response.body.data).not.toHaveProperty('usageHistory');
+    });
+
+    test('returns stable UI availability without treating transient capacity as unavailable', async () => {
+        setCredentialPool([
+            makeCredential(1),
+            makeCredential(2, { isDisabled: true }),
+            makeCredential(3, { isHealthy: false }),
+            makeCredential(4, { needsRefresh: true }),
+            makeCredential(5, { quotaAvailable: false }),
+            makeCredential(6, { weeklyRemainingRatio: 0 }),
+            makeCredential(7, { weeklyRemainingRatio: null }),
+            makeCredential(8, { isAtCapacity: true, hasCapacity: false })
+        ]);
+
+        const response = await callRoute('GET', '/api/potluck/credential-groups/options');
+        expect(response.body.data.credentials.map(credential => [
+            credential.customName,
+            credential.uiAvailable,
+            credential.uiUnavailableReason
+        ])).toEqual([
+            ['Account 1', true, null],
+            ['Account 2', false, 'disabled'],
+            ['Account 3', false, 'unhealthy'],
+            ['Account 4', false, 'needs_refresh'],
+            ['Account 5', false, 'quota_exhausted'],
+            ['Account 6', false, 'quota_exhausted'],
+            ['Account 7', true, null],
+            ['Account 8', true, null]
+        ]);
     });
 
     test('requires administrator authentication', async () => {

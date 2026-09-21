@@ -185,6 +185,15 @@ describe('Codex credential-group UI source', () => {
         expect(potluckHtml).not.toMatch(/openEditRouting\('\$\{key\.id\}', '\$\{key\.routingMode/u);
     });
 
+    test('shows only available fixed-credential candidates while preserving an unavailable binding', () => {
+        expect(potluckHtml).toContain('credentials.filter(credential => credential.uiAvailable === true)');
+        expect(potluckHtml).toContain('uiUnavailableReason');
+        expect(potluckHtml).toContain('原绑定凭据不存在');
+        expect(potluckHtml).toContain('保留当前绑定，不会自动换绑');
+        expect(potluckHtml).toContain('暂无可用凭据');
+        expect(potluckHtml).toContain('id="routingFixedCredentialHelp"');
+    });
+
     test('shows deterministic routing-save progress and handles request failures without duplicate PUTs', () => {
         expect(potluckHtml).toContain('id="saveRoutingButton"');
         expect(potluckHtml).toContain("saveButton.setAttribute('aria-busy', String(saving))");

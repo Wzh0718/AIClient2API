@@ -1029,6 +1029,13 @@
             box-shadow: 0 0 0 4px var(--primary-10);
         }
         .form-group input::placeholder { color: var(--text-tertiary); }
+        .form-help {
+            min-height: 1.5em;
+            margin-top: 7px;
+            color: var(--text-tertiary);
+            font-size: 12px;
+            line-height: 1.5;
+        }
         .limit-control {
             display: grid;
             grid-template-columns: minmax(0, 1fr);
@@ -1707,6 +1714,7 @@
                 <div class="form-group" id="routingCredentialField" hidden>
                     <label for="routingFixedCredential">固定凭据</label>
                     <select id="routingFixedCredential" class="sort-select" style="width:100%"></select>
+                    <div id="routingFixedCredentialHelp" class="form-help" aria-live="polite"></div>
                 </div>
                 <div class="pool-concurrency-section" id="edgeAdmissionSection">
                     <div class="pool-concurrency-heading">
@@ -4145,8 +4153,38 @@
                 groupSelect.innerHTML = (view.groups || []).map(group => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name || group.id)}</option>`).join('');
                 if (currentGroupId) groupSelect.value = currentGroupId;
                 const credentialSelect = document.getElementById('routingFixedCredential');
-                credentialSelect.innerHTML = (view.credentials || []).map(credential => `<option value="${escapeHtml(credential.credentialRef)}">${escapeHtml(credential.accountEmail || credential.customName || credential.credentialRef)}</option>`).join('');
+                const credentialHelp = document.getElementById('routingFixedCredentialHelp');
+                const credentials = Array.isArray(view.credentials) ? view.credentials : [];
+                const availableCredentials = credentials.filter(credential => credential.uiAvailable === true);
+                const currentCredential = credentials.find(credential => credential.credentialRef === currentFixedCredentialRef);
+                const unavailableReasonLabels = {
+                    disabled: '已禁用',
+                    unhealthy: '状态异常',
+                    needs_refresh: '等待刷新',
+                    quota_exhausted: '额度已耗尽'
+                };
+                const credentialLabel = credential => credential.accountEmail || credential.customName || credential.credentialRef;
+                const options = availableCredentials.map(credential =>
+                    `<option value="${escapeHtml(credential.credentialRef)}">${escapeHtml(credentialLabel(credential))}</option>`
+                );
+
+                let helpText = '';
+                if (currentFixedCredentialRef && currentCredential?.uiAvailable !== true) {
+                    const reason = currentCredential
+                        ? (unavailableReasonLabels[currentCredential.uiUnavailableReason] || '当前不可用')
+                        : '原绑定凭据不存在';
+                    const label = currentCredential ? credentialLabel(currentCredential) : '原绑定凭据';
+                    options.unshift(`<option value="${escapeHtml(currentFixedCredentialRef)}">${escapeHtml(`${label}（${reason}）`)}</option>`);
+                    helpText = `${reason}；保留当前绑定，不会自动换绑。`;
+                }
+                if (options.length === 0) {
+                    options.push('<option value="" selected disabled>暂无可用凭据</option>');
+                    helpText = '暂无可用凭据，请先在提供商管理中恢复或启用凭据。';
+                }
+                credentialSelect.innerHTML = options.join('');
+                credentialSelect.disabled = options.length === 1 && !currentFixedCredentialRef && availableCredentials.length === 0;
                 if (currentFixedCredentialRef) credentialSelect.value = currentFixedCredentialRef;
+                if (credentialHelp) credentialHelp.textContent = helpText;
                 updateRoutingFields();
                 openModal('editRoutingModal');
             } catch (error) {

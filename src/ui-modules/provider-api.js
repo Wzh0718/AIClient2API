@@ -15,6 +15,7 @@ import { withFileLock, atomicWriteFile } from '../utils/file-lock.js';
 import { normalizeProviderConfigFields } from '../utils/provider-config-normalizer.js';
 import { normalizeCodexFingerprintProviderConfig } from '../utils/codex-fingerprint-migration.js';
 import { getCodexFingerprintAudit } from '../providers/openai/codex-fingerprint-audit.js';
+import { getProviderUiAvailability } from '../utils/provider-ui-availability.js';
 
 
 
@@ -307,7 +308,10 @@ export async function handleGetProviderType(req, res, currentConfig, providerPoo
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
         providerType,
-        providers: providers.map(p => sanitizeProviderData(p, true)), // 详情页也进行打码，确保即便点击显示也是脱敏数据
+        providers: providers.map(p => ({
+            ...sanitizeProviderData(p, true),
+            ...getProviderUiAvailability(p)
+        })), // 详情页也进行打码，确保即便点击显示也是脱敏数据
         totalCount: providers.length,
         healthyCount: providers.filter(p => p.isHealthy).length
     }));
