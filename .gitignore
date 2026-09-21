@@ -35,6 +35,7 @@ configs/usage-events/
 configs/usage-display-cache.json
 configs/codex-weekly-estimate-snapshots.json
 .tmp-local-network-candidate-20260821/
+.tmp-linuxdo-post/
 _research/
 docs/yyn-cpa-http-vs-ws-codex-trial.md
 outputs/
