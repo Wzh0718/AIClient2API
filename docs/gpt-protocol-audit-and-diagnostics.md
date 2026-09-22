@@ -23,14 +23,16 @@ Filters include `since`, `until`, `keyHash`, `credential`, `provider`, `model`, 
 
 ## Manual diagnostics
 
-Open `gpt-diagnostics.html` as an authenticated administrator. A run targets explicit credential UUID and model pairs, executes serially, and never invokes normal fallback routing. The page shows the exact request/output budget before a run.
+Open `gpt-diagnostics.html` as an authenticated administrator. Search and select up to ten GPT/OpenAI credentials, then select or enter a shared model ID. Individual rows can override the model or return to the shared value. Disabled credentials cannot be selected; unhealthy credentials remain available for diagnosis. Model suggestions come from configuration, not live availability checks. A run targets explicit credential UUID and model pairs, executes serially, and never invokes normal fallback routing. The page shows request/output upper bounds before a run, not actual usage.
 
 - `POST /api/gpt-diagnostics/runs`
 - `GET /api/gpt-diagnostics/runs`
 - `GET /api/gpt-diagnostics/runs/:runId`
 - `POST /api/gpt-diagnostics/runs/:runId/cancel`
-- `POST /api/gpt-diagnostics/runs/:runId/score`
+- `GET /api/gpt-diagnostics/capabilities`
 
-The pelican test accepts only self-contained SVG without scripts, event handlers, external/data URLs, or `foreignObject`; its sandboxed preview and manual score are retained with the run. Knowledge-cutoff self-reporting is displayed separately from fixed dated checks. ModelTrace uses a SHA-256-verified candidate bank pinned to commit `3f0dd2f4b451ad424f3b165a108a468efe4d4d81`; its probability is labeled as closed-set attribution, not identity proof. Empty output, upstream model mismatch, and the community `518n-2` reasoning-token pattern are shown as separate passive signals and never change credential health.
+New runs use `gpt-diagnostics-v2`, with `knowledge` and `modeltrace` as the default tests. Knowledge uses one request capped at 2,048 output tokens; ModelTrace uses three capped at 8,192 each. The total per target is at most four requests and 26,624 output tokens. Capabilities expose `testVersion`, `maxTargets`, `defaultTests`, `tests` (ID, label, request count and per-request token limit), and `perTarget` budget. Execution and estimation use the same definitions. Explicit unsupported test IDs return 400; the former manual scoring POST endpoint returns 410. Completed legacy records remain readable without migration; the page no longer renders the retired test's preview or scores.
 
-Diagnostic outputs and preview artifacts are retained for 35 days under `configs/gpt-diagnostics`. A restart marks queued or running jobs as interrupted; it does not resume them.
+Knowledge-cutoff self-reporting is displayed separately from fixed dated checks. ModelTrace uses a SHA-256-verified candidate bank pinned to commit `3f0dd2f4b451ad424f3b165a108a468efe4d4d81`; its probability is labeled as closed-set attribution, not identity proof. Empty output, upstream model mismatch, and the community `518n-2` reasoning-token pattern are shown as separate passive signals and never change credential health.
+
+Diagnostic outputs and legacy artifacts are retained for 35 days under `configs/gpt-diagnostics`. A restart marks queued or running jobs as interrupted; it does not resume them. Cancellation prevents subsequent requests; an in-flight request may still finish. The UI refreshes every five seconds while visible, retains expanded evidence and user input, and preserves existing results when refresh fails. New target results snapshot the credential name and channel; legacy or deleted credentials fall back to their UUID.

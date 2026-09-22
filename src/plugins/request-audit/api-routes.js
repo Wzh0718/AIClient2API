@@ -309,6 +309,10 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
             return true;
         }
         try {
+            if (path === '/api/gpt-diagnostics/capabilities' && method === 'GET') {
+                sendJson(res, 200, { success: true, data: gptDiagnosticsRunner.capabilities() });
+                return true;
+            }
             if (path === '/api/gpt-diagnostics/runs' && method === 'POST') {
                 const body = await getRequestBody(req, { maxBytes: 64 * 1024 });
                 const run = await gptDiagnosticsRunner.create(body);
@@ -328,10 +332,7 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
             }
             const scoreMatch = path.match(/^\/api\/gpt-diagnostics\/runs\/([^/]+)\/score$/);
             if (scoreMatch && method === 'POST') {
-                const body = await getRequestBody(req, { maxBytes: 16 * 1024 });
-                const run = await gptDiagnosticsRunner.score(decodeURIComponent(scoreMatch[1]), body);
-                if (!run) sendJson(res, 404, { success: false, error: { message: 'Diagnostic run not found' } });
-                else sendJson(res, 200, { success: true, data: { run } });
+                sendJson(res, 410, { success: false, error: { message: 'Manual scoring has been retired' } });
                 return true;
             }
             const runMatch = path.match(/^\/api\/gpt-diagnostics\/runs\/([^/]+)$/);

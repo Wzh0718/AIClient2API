@@ -4,8 +4,24 @@ import { promises as fs } from 'node:fs';
 import { analyzeModelTraceOutputs, loadModelTraceBank, modelTraceChallenges, MODELTRACE_BANK_VERSION } from './modeltrace.js';
 import { getRequestAttempts } from '../../utils/request-attempts.js';
 
-const TEST_VERSION = 'gpt-diagnostics-v1';
-const DEFAULT_TESTS = ['pelican_svg', 'knowledge', 'modeltrace'];
+const TEST_VERSION = 'gpt-diagnostics-v2';
+const MAX_TARGETS = 10;
+const TESTS = Object.freeze({
+    knowledge: Object.freeze({ label: '知识时间', requestCount: 1, maxOutputTokensPerRequest: 2048 }),
+    modeltrace: Object.freeze({ label: 'ModelTrace', requestCount: modelTraceChallenges().length, maxOutputTokensPerRequest: 8192 })
+});
+const DEFAULT_TESTS = Object.keys(TESTS);
+
+function validateTests(tests = DEFAULT_TESTS) {
+    if (!Array.isArray(tests) || !tests.length) {
+        throw Object.assign(new Error('Select at least one supported diagnostic test'), { statusCode: 400 });
+    }
+    const unsupported = tests.filter(test => !Object.hasOwn(TESTS, test));
+    if (unsupported.length) {
+        throw Object.assign(new Error(`Unsupported diagnostic tests: ${unsupported.join(', ')}`), { statusCode: 400 });
+    }
+    return [...new Set(tests)];
+}
 
 function safeId(value) { return String(value || '').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120); }
 function extractText(value, seen = new Set()) {
@@ -60,16 +76,6 @@ function scoreKnowledgeOutput(text) {
             python_3_13_0_release: 'https://www.python.org/downloads/release/python-3130/'
         }
     };
-}
-
-export function sanitizePelicanSvg(text) {
-    const match = String(text || '').match(/<svg\b[\s\S]*?<\/svg>/i);
-    if (!match) return { valid: false, reason: 'missing_svg', svg: null };
-    const svg = match[0];
-    if (Buffer.byteLength(svg, 'utf8') > 512 * 1024) return { valid: false, reason: 'svg_too_large', svg: null };
-    if (/<(?:script|foreignObject|iframe|object|embed)\b/i.test(svg)) return { valid: false, reason: 'unsafe_element', svg: null };
-    if (/\son[a-z]+\s*=|javascript:|(?:href|src)\s*=\s*["'](?:https?:|\/\/|data:)/i.test(svg)) return { valid: false, reason: 'unsafe_reference', svg: null };
-    return { valid: true, reason: null, svg };
 }
 
 function buildRequest(providerType, model, prompt, maxOutputTokens = 4096) {
@@ -148,18 +154,30 @@ export class GptDiagnosticsRunner {
         this.cancelled = new Set();
     }
     async init() { await this.store.init(); return this; }
+    capabilities() {
+        const { requestCount, maxOutputTokens } = this.estimate({ targets: [{}] });
+        return {
+            testVersion: TEST_VERSION, maxTargets: MAX_TARGETS, defaultTests: [...DEFAULT_TESTS],
+            tests: Object.entries(TESTS).map(([id, test]) => ({ id, ...test })),
+            perTarget: { requestCount, maxOutputTokens }
+        };
+    }
     estimate({ targets = [], tests = DEFAULT_TESTS } = {}) {
-        const perTarget = tests.reduce((sum, test) => sum + (test === 'modeltrace' ? 3 : 1), 0);
-        return { targetCount: targets.length, requestCount: targets.length * perTarget, maxOutputTokens: targets.length * (tests.includes('modeltrace') ? 18_000 : 0) + targets.length * (tests.length - (tests.includes('modeltrace') ? 1 : 0)) * 4096 };
+        const selected = validateTests(tests);
+        const requestCount = selected.reduce((sum, test) => sum + TESTS[test].requestCount, 0);
+        const maxOutputTokens = selected.reduce((sum, test) => sum + TESTS[test].requestCount * TESTS[test].maxOutputTokensPerRequest, 0);
+        return { targetCount: targets.length, requestCount: targets.length * requestCount, maxOutputTokens: targets.length * maxOutputTokens };
     }
     async create(input = {}) {
-        const targets = Array.isArray(input.targets) ? input.targets.filter(item => item?.providerUuid && item?.model) : [];
-        if (!targets.length || targets.length > 10) throw Object.assign(new Error('targets must contain 1-10 providerUuid/model pairs'), { statusCode: 400 });
-        const tests = Array.isArray(input.tests) ? input.tests.filter(test => DEFAULT_TESTS.includes(test)) : DEFAULT_TESTS;
-        if (!tests.length) throw Object.assign(new Error('No supported diagnostic tests selected'), { statusCode: 400 });
+        const targets = input.targets;
+        if (!Array.isArray(targets) || !targets.length || targets.length > MAX_TARGETS || targets.some(item =>
+            typeof item?.providerUuid !== 'string' || !item.providerUuid.trim() || typeof item?.model !== 'string' || !item.model.trim())) {
+            throw Object.assign(new Error('targets must contain 1-10 providerUuid/model pairs'), { statusCode: 400 });
+        }
+        const tests = validateTests(input.tests);
         const run = {
             runId: crypto.randomUUID(), testVersion: TEST_VERSION, status: 'queued', createdAt: new Date().toISOString(),
-            targets: targets.map(item => ({ providerUuid: item.providerUuid, model: item.model })), tests,
+            targets: targets.map(item => ({ providerUuid: item.providerUuid.trim(), model: item.model.trim() })), tests,
             estimate: this.estimate({ targets, tests }), results: [], bankVersion: tests.includes('modeltrace') ? MODELTRACE_BANK_VERSION : null
         };
         run.artifactDir = path.join(this.store.dir, 'artifacts', safeId(run.runId));
@@ -173,20 +191,9 @@ export class GptDiagnosticsRunner {
     async cancel(id) {
         const run = this.store.get(id);
         if (!run) return null;
+        if (!['queued', 'running'].includes(run.status)) return run;
         this.cancelled.add(id);
         if (run.status === 'queued') { run.status = 'cancelled'; run.completedAt = new Date().toISOString(); await this.store.save(run); }
-        return run;
-    }
-    async score(id, { providerUuid, model, score } = {}) {
-        const run = this.store.get(id);
-        if (!run) return null;
-        const target = run.results.find(item => item.providerUuid === providerUuid && item.model === model);
-        const normalized = Number(score);
-        if (!target?.pelican || !Number.isFinite(normalized) || normalized < 0 || normalized > 5) {
-            throw Object.assign(new Error('Pelican score must be between 0 and 5 for an existing target'), { statusCode: 400 });
-        }
-        target.pelican.manualScore = normalized;
-        await this.store.save(run);
         return run;
     }
     async pump() {
@@ -194,14 +201,14 @@ export class GptDiagnosticsRunner {
         const id = this.queue.shift();
         if (!id) return;
         const run = this.store.get(id);
-        if (!run || run.status !== 'queued') { void this.pump(); return; }
+        if (!run || run.status !== 'queued') { this.cancelled.delete(id); void this.pump(); return; }
         this.active = id;
         try {
             await this.execute(run);
         } catch (error) {
             run.status = 'failed'; run.error = error.message; run.completedAt = new Date().toISOString();
             await this.store.save(run).catch(() => {});
-        } finally { this.active = null; void this.pump(); }
+        } finally { this.cancelled.delete(id); this.active = null; void this.pump(); }
     }
     async execute(run) {
         run.status = 'running'; run.startedAt = new Date().toISOString(); await this.store.save(run);
@@ -229,11 +236,15 @@ export class GptDiagnosticsRunner {
         const providerConfig = manager?.findProviderByUuid?.(target.providerUuid);
         if (!providerConfig) throw new Error('Credential not found');
         const providerType = findProviderType(manager, target.providerUuid, providerConfig);
+        target.providerType = providerType;
+        target.providerName = providerConfig.customName || null;
+        if (providerConfig.isDisabled) throw new Error('Credential is disabled');
         if (!providerType || !/openai|codex/i.test(providerType)) throw new Error('Only GPT/OpenAI credentials are supported');
         const adapterFactory = this.adapterFactory || (await import('../../providers/adapter.js')).getServiceAdapter;
         const adapter = adapterFactory({ ...manager.globalConfig, ...providerConfig, MODEL_PROVIDER: providerType });
         const probes = [];
-        const call = async (test, prompt, maxTokens) => {
+        const call = async (test, prompt) => {
+            const maxTokens = TESTS[test].maxOutputTokensPerRequest;
             if (this.cancelled.has(run.runId)) throw new Error('cancelled');
             const startedAt = new Date().toISOString();
             const requestId = `diag_${crypto.randomUUID()}`;
@@ -293,25 +304,14 @@ export class GptDiagnosticsRunner {
             return { response, text, probe };
         };
         const output = { ...target, providerType, status: 'completed', probes, passiveSignals: [] };
-        if (run.tests.includes('pelican_svg')) {
-            const value = await call('pelican_svg', 'Create a single self-contained SVG illustration of a pelican riding a bicycle. Return only SVG. Include visible wheels, pedals, pelican body, beak and wings. Do not use scripts, external URLs, data URLs or foreignObject.', 8192);
-            const sanitized = sanitizePelicanSvg(value.text);
-            output.pelican = { valid: sanitized.valid, reason: sanitized.reason, manualScore: null };
-            if (sanitized.valid) {
-                const file = path.join(run.artifactDir, `${safeId(target.providerUuid)}-${safeId(target.model)}-pelican.svg`);
-                await fs.writeFile(file, sanitized.svg, { encoding: 'utf8', mode: 0o600 });
-                output.pelican.artifact = file;
-                output.pelican.previewSvg = sanitized.svg;
-            }
-        }
         if (run.tests.includes('knowledge')) {
-            const value = await call('knowledge', 'Return compact JSON with fields claimed_knowledge_cutoff and answers. The answers object must contain gpt_4_1_announcement and python_3_13_0_release as YYYY-MM-DD dates. Answer without browsing and use null if unsure. Do not claim the cutoff proves model identity.', 2048);
+            const value = await call('knowledge', 'Return compact JSON with fields claimed_knowledge_cutoff and answers. The answers object must contain gpt_4_1_announcement and python_3_13_0_release as YYYY-MM-DD dates. Answer without browsing and use null if unsure. Do not claim the cutoff proves model identity.');
             output.knowledge = { raw: value.text.slice(0, 32_000), selfReportedCutoffOnly: true, ...scoreKnowledgeOutput(value.text) };
         }
         if (run.tests.includes('modeltrace') && bank) {
             const values = [];
             for (const challenge of modelTraceChallenges()) {
-                const value = await call('modeltrace', challenge.prompt, 8192);
+                const value = await call('modeltrace', challenge.prompt);
                 values.push({ text: value.text, expectedCount: challenge.expectedCount });
             }
             output.modelTrace = analyzeModelTraceOutputs(values, bank);

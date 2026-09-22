@@ -3,32 +3,63 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>GPT 质量检测</title>
-  <style>
-    :root{color-scheme:dark;--bg:#09111f;--card:#111d31;--line:#29405f;--text:#e9f1ff;--muted:#93a8c5;--accent:#68d5c8;--warn:#ffca6a;--bad:#ff8585}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#14284a,var(--bg) 45%);color:var(--text);font:14px/1.5 system-ui,sans-serif}main{max-width:1180px;margin:auto;padding:32px 20px}h1,h2{margin:.2em 0}.lead,.muted{color:var(--muted)}.panel{background:rgba(17,29,49,.96);border:1px solid var(--line);border-radius:16px;padding:20px;margin:18px 0}.form{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:end}label{display:grid;gap:6px}input,textarea,button{border:1px solid var(--line);background:#0b1628;color:var(--text);border-radius:9px;padding:10px}textarea{min-height:100px;resize:vertical}button{background:var(--accent);color:#071313;font-weight:700;cursor:pointer}.estimate{margin:12px 0;color:var(--warn)}.run{border-top:1px solid var(--line);padding:16px 0}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#213855}.target{margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:10px}.signals{color:var(--warn)}pre{white-space:pre-wrap;max-height:240px;overflow:auto;background:#07111f;padding:10px;border-radius:8px}iframe{width:100%;height:360px;background:white;border:0;border-radius:8px}a{color:var(--accent)}@media(max-width:760px){.form{grid-template-columns:1fr}}
-  </style>
+  <meta name="theme-color" content="#F5F7FA">
+  <title>GPT 质量检测 · AIClient</title>
+  <link rel="stylesheet" href="app/gpt-diagnostics.css">
+  <script type="module" src="app/gpt-diagnostics.js"></script>
 </head>
-<body><main>
-  <p><a href="request-audit.html">← 请求记录</a></p>
-  <h1>GPT 质量检测</h1>
-  <p class="lead">固定凭据和模型执行鹈鹕 SVG、知识时间与 ModelTrace 指纹。结果是诊断证据，不会自动停用凭据，也不把闭集归因当成模型身份证明。</p>
-  <section class="panel">
-    <div class="form">
-      <label>检测目标（每行：凭据 UUID,模型）<textarea id="targets" autocomplete="off" placeholder="provider-uuid-1,gpt-5.5&#10;provider-uuid-2,gpt-5.6-sol"></textarea></label>
-      <button id="start">开始检测</button>
+<body>
+<main>
+  <header class="page-header">
+    <a class="back" href="request-audit.html">← 返回请求记录</a>
+    <div class="heading-row"><h1>GPT 质量检测</h1><span class="eyebrow">凭据诊断</span></div>
+    <p class="muted">选择凭据与模型，比较知识时间和 ModelTrace 指纹。</p>
+  </header>
+
+  <section class="panel" aria-labelledby="config-title">
+    <div class="section-heading"><h2 id="config-title">检测配置</h2><span id="selection-count" class="muted">尚未选择凭据</span></div>
+    <div id="config-error" class="notice error" hidden><span id="config-error-text"></span> <button id="retry-config" class="text-button">重新加载</button></div>
+    <div class="config-grid">
+      <div class="field picker">
+        <label id="credential-label" for="credential-toggle">检测凭据</label>
+        <button id="credential-toggle" class="select-button" aria-expanded="false" aria-controls="credential-menu" disabled><span id="credential-summary">正在加载凭据…</span><span aria-hidden="true">⌄</span></button>
+        <div id="credential-menu" class="picker-menu" hidden>
+          <label class="sr-only" for="credential-search">搜索凭据名称、渠道或 UUID</label>
+          <input id="credential-search" type="search" placeholder="搜索名称、渠道或 UUID" autocomplete="off">
+          <div class="picker-toolbar"><span class="muted">可勾选多个凭据</span><button id="clear-selection" class="text-button">清空选择</button></div>
+          <div id="credential-options" class="credential-options" role="group" aria-labelledby="credential-label"></div>
+          <p id="picker-hint" class="muted picker-hint" role="status"></p>
+        </div>
+        <p class="field-help">固定所选凭据执行，不切换至其他凭据。</p>
+      </div>
+      <div class="field">
+        <label for="shared-model">统一模型</label>
+        <input id="shared-model" list="shared-model-options" placeholder="选择或输入模型 ID" autocomplete="off" disabled>
+        <datalist id="shared-model-options"></datalist>
+        <p class="field-help">候选来自配置，不代表实时可用性；也可输入自定义模型 ID。</p>
+      </div>
     </div>
-    <div class="estimate">每个目标执行 5 个真实请求，最大输出预算约 26,192 tokens。检测串行执行。</div>
-    <p id="status" class="muted"></p>
+    <div id="target-list" class="target-list"></div>
+    <div class="tests-line"><span class="muted">检测内容</span><span class="test-tag">知识时间</span><span class="test-tag">ModelTrace 指纹</span></div>
+    <div class="action-bar">
+      <div><strong id="budget">正在加载检测预算…</strong><p class="field-help">输出预算为上限，非实际消耗；真实请求按目标串行执行。</p></div>
+      <button id="start" class="primary" disabled>开始检测</button>
+    </div>
+    <p id="submit-status" class="status-message" role="status" aria-live="polite"></p>
   </section>
-  <section class="panel"><h2>历史与趋势</h2><div id="runs">加载中…</div></section>
+
+  <section class="panel" aria-labelledby="current-title">
+    <div class="section-heading"><h2 id="current-title" tabindex="-1">当前任务</h2><span class="muted">每 5 秒刷新</span></div>
+    <div id="runs-error" class="notice error" hidden><span id="runs-error-text"></span> <button id="retry-runs" class="text-button">重试</button></div>
+    <div id="current-runs"><p class="empty">正在加载任务…</p></div>
+    <p id="cancel-status" class="status-message" role="status"></p>
+  </section>
+
+  <section class="panel history-panel" aria-labelledby="history-title">
+    <div class="section-heading"><h2 id="history-title">检测历史</h2><span id="history-count" class="muted"></span></div>
+    <div id="history-runs"><p class="empty">正在加载记录…</p></div>
+  </section>
+  <footer class="page-note">结果仅用于诊断，不会自动停用凭据。知识截止时间为模型自报；ModelTrace 闭集归因不证明模型身份。</footer>
 </main>
-<script>
-const auth=()=>{const token=localStorage.getItem('authToken');return token?{Authorization:`Bearer ${token}`}:{}};
-const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function api(url,options={}){const response=await fetch(url,{...options,headers:{...auth(),...(options.headers||{})}});const body=await response.json().catch(()=>({}));if(!response.ok||body.success===false)throw new Error(body.error?.message||`HTTP ${response.status}`);return body.data;}
-function targetHtml(target,runId,index){const trace=target.modelTrace;const pelican=target.pelican;const signals=(target.passiveSignals||[]).map(x=>esc(x.code)).join('、')||'无';return `<div class="target"><strong>${esc(target.providerType||'')} / ${esc(target.model)}</strong><p>状态：${esc(target.status)}　被动信号：<span class="signals">${signals}</span></p>${pelican?`<p>鹈鹕 SVG：${pelican.valid?'格式有效':`无效 ${esc(pelican.reason)}`}　人工评分：${pelican.manualScore??'未评分'} ${pelican.valid?`<input data-score-input="${esc(runId)}:${index}" type="number" min="0" max="5" step="0.5" style="width:70px"><button data-score="${esc(runId)}:${index}">保存评分</button>`:''}</p>${pelican.previewSvg?`<details><summary>安全预览</summary><iframe sandbox data-svg="${esc(runId)}:${index}"></iframe></details>`:''}`:''}${trace?`<p>ModelTrace：${trace.valid?`${esc(trace.predictionName)}，闭集概率 ${(Number(trace.closedSetProbability)*100).toFixed(2)}%`:`无有效输出 ${esc(trace.reason)}`}<br><span class="muted">候选库 ${esc(trace.bankVersion)}；仅表示当前候选库内的相似归因。</span></p>`:''}${target.knowledge?`<details><summary>知识时间输出</summary><pre>${esc(target.knowledge.raw)}</pre></details>`:''}</div>`}
-function render(runs){document.getElementById('runs').innerHTML=runs.length?runs.map(run=>`<article class="run"><span class="badge">${esc(run.status)}</span> <strong>${esc(run.testVersion)}</strong> <span class="muted">${new Date(run.createdAt).toLocaleString()}</span><p>${run.estimate.requestCount} 请求 / 最大 ${Number(run.estimate.maxOutputTokens).toLocaleString()} 输出 tokens ${['queued','running'].includes(run.status)?`<button data-cancel="${esc(run.runId)}">取消</button>`:''}</p>${(run.results||[]).map((target,index)=>targetHtml(target,run.runId,index)).join('')}</article>`).join(''):'暂无检测记录。';document.querySelectorAll('[data-cancel]').forEach(button=>button.onclick=async()=>{await api(`/api/gpt-diagnostics/runs/${button.dataset.cancel}/cancel`,{method:'POST'});await load();});document.querySelectorAll('[data-svg]').forEach(frame=>{const [runId,index]=frame.dataset.svg.split(':');const target=runs.find(run=>run.runId===runId)?.results?.[Number(index)];if(target?.pelican?.previewSvg)frame.srcdoc=target.pelican.previewSvg});document.querySelectorAll('[data-score]').forEach(button=>button.onclick=async()=>{const [runId,index]=button.dataset.score.split(':');const run=runs.find(item=>item.runId===runId);const target=run?.results?.[Number(index)];const input=document.querySelector(`[data-score-input="${button.dataset.score}"]`);await api(`/api/gpt-diagnostics/runs/${runId}/score`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({providerUuid:target.providerUuid,model:target.model,score:Number(input.value)})});await load()});}
-async function load(){try{render((await api('/api/gpt-diagnostics/runs')).runs||[])}catch(error){document.getElementById('runs').textContent=error.message}}
-document.getElementById('start').onclick=async()=>{const targets=document.getElementById('targets').value.split(/\r?\n/).map(line=>line.split(',').map(value=>value.trim())).filter(parts=>parts[0]&&parts[1]).map(([providerUuid,model])=>({providerUuid,model}));if(!targets.length){document.getElementById('status').textContent='请按“凭据 UUID,模型”每行输入一个目标。';return}try{const data=await api('/api/gpt-diagnostics/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({targets})});document.getElementById('status').textContent=`已创建 ${data.run.runId}`;await load()}catch(error){document.getElementById('status').textContent=error.message}};
-load();setInterval(load,5000);
-</script></body></html>
+</body>
+</html>
