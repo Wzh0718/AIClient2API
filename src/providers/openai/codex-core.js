@@ -313,7 +313,7 @@ export class CodexApiService {
 
     resolveFingerprintState(requestBody) {
         if (!requestBody || typeof requestBody !== 'object') {
-            return { inboundHeaders: {}, ids: null, responsesLite: false };
+            return { inboundHeaders: {}, ids: null };
         }
         const cached = this.fingerprintRequestState.get(requestBody);
         if (cached) return cached;
@@ -322,18 +322,11 @@ export class CodexApiService {
         const inboundHeaders = context?.inboundCodexHeaders && typeof context.inboundCodexHeaders === 'object'
             ? { ...context.inboundCodexHeaders }
             : {};
-        const responsesLite = Object.entries(inboundHeaders).some(([name, value]) =>
-            name.toLowerCase() === 'x-openai-internal-codex-responses-lite' &&
-            value !== undefined &&
-            value !== null &&
-            String(value).trim()
-        );
         const originalClientSessionId = String(
             context?.originalClientSessionId || extractOriginalCodexSessionId(inboundHeaders, requestBody) || ''
         ).trim();
         const state = {
             inboundHeaders,
-            responsesLite,
             context: context || {},
             ids: resolveCodexFingerprintIds({
                 providerConfig: this.config,
@@ -505,7 +498,7 @@ export class CodexApiService {
 
         const url = `${this.baseUrl}/responses`;
         const fingerprintState = this.resolveFingerprintState(requestBody);
-        const body = await this.prepareRequestBody(selectedModel, requestBody, true, fingerprintState.ids, fingerprintState.responsesLite);
+        const body = await this.prepareRequestBody(selectedModel, requestBody, true, fingerprintState.ids);
         codexPromptCacheObservability.recordPresence({
             providerType: this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API,
             promptCacheOptions: body.prompt_cache_options
@@ -667,7 +660,7 @@ export class CodexApiService {
 
         const url = `${this.baseUrl}/responses`;
         const fingerprintState = this.resolveFingerprintState(requestBody);
-        const body = await this.prepareRequestBody(selectedModel, requestBody, true, fingerprintState.ids, fingerprintState.responsesLite);
+        const body = await this.prepareRequestBody(selectedModel, requestBody, true, fingerprintState.ids);
         codexPromptCacheObservability.recordPresence({
             providerType: this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API,
             promptCacheOptions: body.prompt_cache_options
@@ -862,7 +855,7 @@ export class CodexApiService {
 
         for (const name of [
             'x-codex-turn-metadata', 'x-codex-window-id', 'x-codex-installation-id',
-            'x-client-request-id', 'thread-id', 'x-openai-internal-codex-responses-lite'
+            'x-client-request-id', 'thread-id'
         ]) {
             const value = getInboundHeader(name);
             if (value !== undefined && value !== null && String(value).trim()) {
@@ -969,7 +962,7 @@ export class CodexApiService {
     /**
      * 准备请求体
      */
-    async prepareRequestBody(model, requestBody, stream, fingerprintIds = null, responsesLite = false) {
+    async prepareRequestBody(model, requestBody, stream, fingerprintIds = null) {
         // 明确会话维度：优先 OpenAI metadata，其次 Codex CLI client_metadata
         const sessionId = resolveCodexSessionId(requestBody);
 
@@ -1100,7 +1093,7 @@ export class CodexApiService {
         const result = {
             ...cleanedBody,
             store: cleanedBody.store ?? false,
-            parallel_tool_calls: responsesLite ? false : (cleanedBody.parallel_tool_calls ?? true),
+            parallel_tool_calls: cleanedBody.parallel_tool_calls ?? true,
             include: cleanedBody.include || ['reasoning.encrypted_content'],
             service_tier: (isSpeedModel && (!cleanedBody.service_tier || cleanedBody.service_tier === 'default'))
                 ? defaultServiceTier
@@ -1108,8 +1101,7 @@ export class CodexApiService {
             reasoning: {
                 ...cleanedBody.reasoning,
                 effort: normalizeCodexReasoningEffort(upstreamModel, cleanedBody.reasoning?.effort, isSpeedModel) || defaultReasoningEffort,
-                summary: cleanedBody.reasoning?.summary || 'auto',
-                ...(responsesLite ? { context: 'all_turns' } : {})
+                summary: cleanedBody.reasoning?.summary || 'auto'
             },
             stream,
             prompt_cache_key: cache.id

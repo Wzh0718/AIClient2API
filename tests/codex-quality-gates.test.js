@@ -100,7 +100,7 @@ describe('Codex proxy quality gates', () => {
         }
     });
 
-    test('forwards the client Responses Lite marker to upstream', () => {
+    test('does not forward the client Responses Lite marker to upstream', () => {
         const service = createService();
 
         try {
@@ -109,13 +109,13 @@ describe('Codex proxy quality gates', () => {
                 ids: null
             });
 
-            expect(getHeader(present, 'X-Openai-Internal-Codex-Responses-Lite')).toBe('true');
+            expect(getHeader(present, 'X-Openai-Internal-Codex-Responses-Lite')).toBeUndefined();
         } finally {
             service.stopCacheCleanup();
         }
     });
 
-    test('normalizes Responses Lite request fields for streaming and non-streaming calls', async () => {
+    test('treats Responses Lite requests as ordinary Responses calls', async () => {
         const service = createService();
         const completedEvent = 'data: {"type":"response.completed","response":{"id":"r1","status":"completed","model":"gpt-5.4-mini","output":[]}}\n\n';
         const makeStream = () => (async function* () {
@@ -148,17 +148,17 @@ describe('Codex proxy quality gates', () => {
             }
 
             const [nonStreamingConfig, streamingConfig] = axios.request.mock.calls.map(([config]) => config);
-            expect(getHeader(nonStreamingConfig.headers, 'x-openai-internal-codex-responses-lite')).toBe('true');
-            expect(getHeader(streamingConfig.headers, 'x-openai-internal-codex-responses-lite')).toBe('true');
-            expect(nonStreamingConfig.data.reasoning.context).toBe('all_turns');
-            expect(nonStreamingConfig.data.parallel_tool_calls).toBe(false);
+            expect(getHeader(nonStreamingConfig.headers, 'x-openai-internal-codex-responses-lite')).toBeUndefined();
+            expect(getHeader(streamingConfig.headers, 'x-openai-internal-codex-responses-lite')).toBeUndefined();
+            expect(nonStreamingConfig.data.reasoning.context).toBeUndefined();
+            expect(nonStreamingConfig.data.parallel_tool_calls).toBe(true);
             expect(streamingConfig.data.reasoning).toMatchObject({
                 effort: 'high',
                 summary: 'detailed',
-                context: 'all_turns',
+                context: 'current_turn',
                 custom: 'preserve-me'
             });
-            expect(streamingConfig.data.parallel_tool_calls).toBe(false);
+            expect(streamingConfig.data.parallel_tool_calls).toBe(true);
         } finally {
             service.stopCacheCleanup();
         }
@@ -199,7 +199,6 @@ describe('Codex proxy quality gates', () => {
         expect(context.inboundCodexHeaders).toEqual({
             'x-codex-window-id': 'window-private',
             'thread-id': 'thread-private',
-            'x-openai-internal-codex-responses-lite': 'true',
             'x-codex-turn-state': 'opaque-state'
         });
         expect(context.inboundCodexHeaders['x-unrelated-private-header']).toBeUndefined();

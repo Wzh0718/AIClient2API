@@ -159,7 +159,6 @@ const CODEX_FINGERPRINT_HEADER_NAMES = Object.freeze([
     'session-id',
     'session_id',
     'thread-id',
-    'x-openai-internal-codex-responses-lite',
     'x-codex-turn-state'
 ]);
 
