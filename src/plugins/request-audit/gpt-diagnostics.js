@@ -34,6 +34,9 @@ function extractText(value, seen = new Set()) {
     if (Array.isArray(value.content)) return value.content.map(item => extractText(item, seen)).join('');
     if (Array.isArray(value.output)) return value.output.map(item => extractText(item, seen)).join('');
     if (Array.isArray(value.choices)) return value.choices.map(item => extractText(item?.message || item?.delta || item, seen)).join('');
+    // Codex/Responses 非流式适配器返回 SSE 终结事件信封 { type: 'response.completed', response: {...} }，
+    // 必须先下钻信封，否则兜底遍历会把事件名 type 当成回答文本。
+    if (value.response && typeof value.response === 'object') return extractText(value.response, seen);
     for (const item of Object.values(value)) {
         const text = extractText(item, seen);
         if (text) return text;

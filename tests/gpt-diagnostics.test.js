@@ -112,6 +112,33 @@ describe('GPT diagnostics safety and fingerprint inputs', () => {
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
+  test('extracts assistant text from the Codex/Responses SSE completed envelope', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'gpt-diag-envelope-'));
+    const generateContent = jest.fn(async () => ({
+      type: 'response.completed',
+      response: {
+        id: 'resp_test', status: 'completed', object: 'response', model: 'gpt-5.6-luna',
+        output: [{ type: 'message', role: 'assistant', content: [
+          { type: 'output_text', text: '{"claimed_knowledge_cutoff":"2025-06","answers":{"gpt_4_1_announcement":"2025-04-14","python_3_13_0_release":"2024-10-07"}}' }
+        ] }],
+        usage: { output_tokens: 120, output_tokens_details: { reasoning_tokens: 42 } }
+      }
+    }));
+    try {
+      const runner = await new GptDiagnosticsRunner({ dir,
+        providerManager: { globalConfig: {}, findProviderByUuid: () => ({ MODEL_PROVIDER: 'openai-codex-oauth' }) },
+        adapterFactory: () => ({ generateContent })
+      }).init();
+      const created = await runner.create({ targets: [{ providerUuid: 'p', model: 'gpt-test' }], tests: ['knowledge'] });
+      while (runner.active || runner.get(created.runId)?.status === 'queued') await new Promise(resolve => setTimeout(resolve, 5));
+      const run = runner.get(created.runId);
+      expect(run.results[0].status).toBe('completed');
+      expect(run.results[0].knowledge).toMatchObject({ correct: 2, total: 2, claimedKnowledgeCutoff: '2025-06' });
+      expect(run.results[0].probes[0]).toMatchObject({ responseModel: 'gpt-5.6-luna', reasoningTokens: 42, emptyOutput: false });
+      expect(run.results[0].passiveSignals).not.toContainEqual(expect.objectContaining({ code: 'empty_output' }));
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
   test('runs a fixed credential without fallback and links every probe to a request record', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'gpt-diag-test-'));
     const recordProbe = jest.fn(async () => {});
