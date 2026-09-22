@@ -93,6 +93,32 @@ function sanitizeDiagnosticCode(value) {
     return text.length <= 128 ? text : text.slice(0, 128);
 }
 
+function sanitizeDiagnosticMessage(value) {
+    if (value === undefined || value === null || value === '') return { value: null, truncated: false };
+    const sanitized = String(value);
+    const encoded = Buffer.from(sanitized, 'utf8');
+    if (encoded.length <= 2048) return { value: sanitized, truncated: false };
+    return {
+        value: encoded.subarray(0, 2048).toString('utf8').replace(/\uFFFD$/u, ''),
+        truncated: true
+    };
+}
+
+function normalizeFailure(context = {}) {
+    const source = context.failure;
+    if (!source || typeof source !== 'object') return null;
+    const message = sanitizeDiagnosticMessage(source.message);
+    return {
+        source: source.source === 'internal' ? 'internal' : 'upstream',
+        upstreamHttpStatus: Number.isFinite(Number(source.upstreamHttpStatus)) ? Number(source.upstreamHttpStatus) : null,
+        code: sanitizeDiagnosticCode(source.code),
+        type: sanitizeDiagnosticCode(source.type),
+        message: message.value,
+        requestId: sanitizeDiagnosticCode(source.requestId),
+        truncated: source.truncated === true || message.truncated
+    };
+}
+
 function normalizeResponse(context = {}) {
     const source = context.response || {};
     const rawStatus = source.httpStatus ?? context.httpStatus;
@@ -131,28 +157,35 @@ function normalizeAttempts(context = {}) {
     const source = Array.isArray(context.requestAttempts)
         ? context.requestAttempts
         : getRequestAttempts(context.processedRequestBody);
-    return source.slice(0, 50).map((attempt, index) => ({
-        attemptId: String(attempt.attemptId || `${context.requestId || 'request'}:${index + 1}`),
-        sequence: index + 1,
-        startedAt: attempt.startedAt || null,
-        completedAt: attempt.completedAt || null,
-        durationMs: Number.isFinite(Number(attempt.durationMs)) ? Number(attempt.durationMs) : null,
-        providerType: attempt.providerType || null,
-        providerUuidHash: hashSecret(attempt.providerUuid),
-        plannedModel: attempt.plannedModel || null,
-        outboundModel: attempt.outboundModel || null,
-        upstreamResponseModel: attempt.upstreamResponseModel || null,
-        reasoningEffort: attempt.reasoningEffort || null,
-        serviceTier: attempt.serviceTier || null,
-        turnStateEnabled: attempt.turnStateEnabled === true,
-        turnStateSource: attempt.turnStateSource || null,
-        turnStateRequestLength: toNumber(attempt.turnStateRequestLength),
-        turnStateSkipReason: attempt.turnStateSkipReason || null,
-        stream: attempt.stream === true,
-        status: attempt.status || 'unknown',
-        httpStatus: Number.isFinite(Number(attempt.httpStatus)) ? Number(attempt.httpStatus) : null,
-        errorCode: sanitizeDiagnosticCode(attempt.errorCode)
-    }));
+    return source.slice(0, 50).map((attempt, index) => {
+        const errorMessage = sanitizeDiagnosticMessage(attempt.errorMessage);
+        return {
+            attemptId: String(attempt.attemptId || `${context.requestId || 'request'}:${index + 1}`),
+            sequence: index + 1,
+            startedAt: attempt.startedAt || null,
+            completedAt: attempt.completedAt || null,
+            durationMs: Number.isFinite(Number(attempt.durationMs)) ? Number(attempt.durationMs) : null,
+            providerType: attempt.providerType || null,
+            providerUuidHash: hashSecret(attempt.providerUuid),
+            plannedModel: attempt.plannedModel || null,
+            outboundModel: attempt.outboundModel || null,
+            upstreamResponseModel: attempt.upstreamResponseModel || null,
+            reasoningEffort: attempt.reasoningEffort || null,
+            serviceTier: attempt.serviceTier || null,
+            turnStateEnabled: attempt.turnStateEnabled === true,
+            turnStateSource: attempt.turnStateSource || null,
+            turnStateRequestLength: toNumber(attempt.turnStateRequestLength),
+            turnStateSkipReason: attempt.turnStateSkipReason || null,
+            stream: attempt.stream === true,
+            status: attempt.status || 'unknown',
+            httpStatus: Number.isFinite(Number(attempt.httpStatus)) ? Number(attempt.httpStatus) : null,
+            errorCode: sanitizeDiagnosticCode(attempt.errorCode),
+            errorType: sanitizeDiagnosticCode(attempt.errorType),
+            errorMessage: errorMessage.value,
+            upstreamRequestId: sanitizeDiagnosticCode(attempt.upstreamRequestId),
+            errorTruncated: attempt.errorTruncated === true || errorMessage.truncated
+        };
+    });
 }
 
 function deriveStatus(context, response) {
@@ -187,6 +220,7 @@ export function buildRequestAuditEvent(context = {}) {
     const requestedModel = context.originalRequestBody?.model || actualModel;
     const cacheAffinityScope = context._codexCacheAffinityScope || {};
     const response = normalizeResponse(context);
+    const failure = normalizeFailure(context);
     const runtime = normalizeRuntime(context.runtime);
     const derivedStatus = deriveStatus(context, response);
     const selectedProviderUuid = context._codexRouting?.selectedProviderUuid || null;
@@ -216,7 +250,7 @@ export function buildRequestAuditEvent(context = {}) {
     ].some(field => Object.prototype.hasOwnProperty.call(routing, field));
 
     return {
-        schemaVersion: 6,
+        schemaVersion: 7,
         eventId: context._runtimeEventId || context.eventId || null,
         timestamp,
         beijingDate: beijing.date,
@@ -365,6 +399,7 @@ export function buildRequestAuditEvent(context = {}) {
             retryCount: toNumber(context.retryCount),
             cooldownApplied: Boolean(context.cooldownApplied)
         },
+        ...(failure ? { failure } : {}),
         response,
         ...(runtime ? { runtime } : {}),
         usage

@@ -259,20 +259,21 @@ describe('provider auth failure health marking', () => {
         };
         const providerPoolManager = createProviderPoolManager();
         const res = new FakeResponse();
+        const audit = {};
 
-        await handleStreamRequest(
-            res,
-            service,
-            'gpt-5.4',
-            { input: [{ role: 'user', content: [{ type: 'input_text', text: 'ping' }] }] },
-            'openaiResponses',
-            'openai-codex-oauth',
-            'none',
-            null,
-            providerPoolManager,
-            'codex-provider-1',
-            'Codex Provider'
-        );
+        await requestContext.run({ requestAudit: audit }, () => handleStreamRequest(
+                res,
+                service,
+                'gpt-5.4',
+                { input: [{ role: 'user', content: [{ type: 'input_text', text: 'ping' }] }] },
+                'openaiResponses',
+                'openai-codex-oauth',
+                'none',
+                null,
+                providerPoolManager,
+                'codex-provider-1',
+                'Codex Provider'
+            ));
 
         expect(res.statusCode).toBe(200);
         expect(res.body).toContain('event: response.failed');
@@ -290,6 +291,16 @@ describe('provider auth failure health marking', () => {
         expect(providerPoolManager.markProviderUnhealthy).not.toHaveBeenCalled();
         expect(providerPoolManager.markProviderUnhealthyImmediately).not.toHaveBeenCalled();
         expect(providerPoolManager.releaseSlot).toHaveBeenCalledWith('openai-codex-oauth', 'codex-provider-1');
+        expect(audit.terminal).toMatchObject({
+            outcome: 'upstream_error',
+            errorClass: 'invalid_request_error',
+            failure: {
+                source: 'upstream',
+                upstreamHttpStatus: 400,
+                type: 'invalid_request_error',
+                message: expect.stringContaining("Function 'image_gen.imagegen' conflicts with a hosted tool")
+            }
+        });
     });
 
     test('marks a unary Codex token_invalidated error immediately unhealthy in the provider pool', async () => {

@@ -165,6 +165,16 @@ function compactMetadata(context = {}) {
             errorCode: context.response.errorCode
         } : undefined,
         runtime,
+        outcome: context.outcome || null,
+        failure: context.failure && typeof context.failure === 'object' ? {
+            source: context.failure.source === 'internal' ? 'internal' : 'upstream',
+            upstreamHttpStatus: Number.isFinite(Number(context.failure.upstreamHttpStatus)) ? Number(context.failure.upstreamHttpStatus) : null,
+            code: context.failure.code ? String(context.failure.code).slice(0, 128) : null,
+            type: context.failure.type ? String(context.failure.type).slice(0, 128) : null,
+            message: context.failure.message ? String(context.failure.message).slice(0, 2048) : null,
+            requestId: context.failure.requestId ? String(context.failure.requestId).slice(0, 128) : null,
+            truncated: context.failure.truncated === true
+        } : undefined,
         errorClass: context.errorClass || null
     };
 

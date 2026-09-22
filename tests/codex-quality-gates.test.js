@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, jest, test } from '@jest/globals';
 import axios from 'axios';
+import { Readable } from 'stream';
 import { CodexApiService } from '../src/providers/openai/codex-core.js';
 import { CODEX_FINGERPRINT_CONTEXT_KEY } from '../src/providers/openai/codex-fingerprint.js';
 import { extractInboundCodexFingerprintContext } from '../src/utils/common.js';
@@ -15,6 +16,7 @@ import {
     codexPromptCacheObservability
 } from '../src/providers/openai/codex-prompt-cache-observability.js';
 import { postCodexOAuthRefreshRequest } from '../src/auth/codex-oauth.js';
+import { getRequestAttempts } from '../src/utils/request-attempts.js';
 
 jest.mock('axios', () => ({
     request: jest.fn(),
@@ -446,6 +448,54 @@ describe('Codex proxy quality gates', () => {
                 httpStatus: 400,
                 promptCacheOptions: options
             }));
+        } finally {
+            service.stopCacheCleanup();
+        }
+    });
+
+    test('captures streamed upstream error details before recording the failed attempt', async () => {
+        const upstreamBody = JSON.stringify({
+            error: {
+                type: 'invalid_request_error',
+                code: 'unsupported_parameter',
+                param: 'tools[0].type',
+                message: 'Responses Lite rejects this hosted tool for private@example.com'
+            }
+        });
+        const upstreamError = Object.assign(new Error('Request failed with status code 400'), {
+            code: 'ERR_BAD_REQUEST',
+            response: {
+                status: 400,
+                headers: { 'x-request-id': 'upstream-400' },
+                data: Readable.from([upstreamBody])
+            }
+        });
+        axios.request.mockRejectedValueOnce(upstreamError);
+        const service = createService();
+        const request = {
+            model: 'gpt-5.4-mini',
+            input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }]
+        };
+
+        try {
+            let thrown;
+            try {
+                for await (const _event of service.generateContentStream('gpt-5.4-mini', request)) {}
+            } catch (error) {
+                thrown = error;
+            }
+
+            expect(thrown).toBe(upstreamError);
+            expect(thrown.message).toContain('Responses Lite rejects this hosted tool');
+            expect(thrown.message).toContain('private@example.com');
+            expect(getRequestAttempts(request)[0]).toMatchObject({
+                status: 'error',
+                httpStatus: 400,
+                errorCode: 'unsupported_parameter',
+                errorType: 'invalid_request_error',
+                errorMessage: expect.stringContaining('Responses Lite rejects this hosted tool'),
+                upstreamRequestId: 'upstream-400'
+            });
         } finally {
             service.stopCacheCleanup();
         }

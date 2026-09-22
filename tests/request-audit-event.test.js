@@ -16,7 +16,7 @@ describe('request audit event', () => {
       response: { httpStatus: 200, completed: true }
     });
 
-    expect(event.schemaVersion).toBe(6);
+    expect(event.schemaVersion).toBe(7);
     expect(event.request).toMatchObject({ billingModel: 'gpt-5.6-sol-fast', upstreamResponseModel: 'gpt-5.4' });
     expect(event.cost).toMatchObject({
       usd: expect.any(Number), actualUsd: expect.any(Number), estimatedUsd: 0,
@@ -75,7 +75,7 @@ describe('request audit event', () => {
     });
 
     expect(event).toMatchObject({
-      schemaVersion: 6,
+      schemaVersion: 7,
       request: {
         method: 'POST',
         path: '/openai-codex-oauth/v1/chat/completions',
@@ -100,6 +100,64 @@ describe('request audit event', () => {
         errorClass: 'missing_image_generation_result'
       }
     });
+  });
+
+  test('records an upstream terminal failure separately from the downstream HTTP status', () => {
+    const secret = 'Bearer abcdefghijklmnopqrstuvwxyz';
+    const event = buildRequestAuditEvent({
+      requestId: 'req-upstream-failure',
+      model: 'gpt-5.6-sol',
+      outcome: 'upstream_error',
+      errorClass: 'invalid_request_error',
+      failure: {
+        source: 'upstream',
+        upstreamHttpStatus: 400,
+        code: 'invalid_request_error',
+        type: 'invalid_request_error',
+        message: `Bad request for private@example.com with ${secret} ${'x'.repeat(3000)}`,
+        requestId: 'upstream-request-1',
+        truncated: false
+      },
+      requestAttempts: [{
+        attemptId: 'attempt-failed', status: 'error', httpStatus: 400,
+        errorCode: 'invalid_request_error', errorType: 'invalid_request_error',
+        errorMessage: `Rejected ${secret}`, upstreamRequestId: 'upstream-request-1'
+      }],
+      response: { httpStatus: 200, bytes: 578, completed: true }
+    });
+
+    expect(event).toMatchObject({
+      schemaVersion: 7,
+      status: { outcome: 'upstream_error', httpStatus: 200, errorClass: 'invalid_request_error' },
+      response: { httpStatus: 200, completed: true },
+      failure: {
+        source: 'upstream', upstreamHttpStatus: 400, code: 'invalid_request_error',
+        requestId: 'upstream-request-1', truncated: true
+      }
+    });
+    expect(event.attempts[0]).toMatchObject({
+      status: 'error', httpStatus: 400, errorCode: 'invalid_request_error',
+      errorType: 'invalid_request_error', upstreamRequestId: 'upstream-request-1'
+    });
+    expect(Buffer.byteLength(event.failure.message, 'utf8')).toBeLessThanOrEqual(2048);
+    expect(JSON.stringify(event)).toContain('private@example.com');
+    expect(JSON.stringify(event)).toContain('abcdefghijklmnopqrstuvwxyz');
+  });
+
+  test('keeps a request successful when an earlier attempt failed but the final response completed', () => {
+    const event = buildRequestAuditEvent({
+      requestId: 'req-retry-success',
+      model: 'gpt-5.6-sol',
+      requestAttempts: [
+        { attemptId: 'attempt-1', status: 'error', httpStatus: 503, errorCode: 'server_error' },
+        { attemptId: 'attempt-2', status: 'success', httpStatus: 200 }
+      ],
+      response: { httpStatus: 200, completed: true }
+    });
+
+    expect(event.status.outcome).toBe('success');
+    expect(event.attempts.map(attempt => attempt.status)).toEqual(['error', 'success']);
+    expect(event.failure).toBeUndefined();
   });
 
   test('persists normalized request timing and runtime diagnostics without secrets', () => {

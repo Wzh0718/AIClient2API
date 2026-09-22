@@ -815,7 +815,7 @@
           <input id="modelFilter" autocomplete="off" spellcheck="false" placeholder="全部模型">
         </label>
         <label>状态
-          <select id="outcome"><option value="">全部状态</option><option value="success">成功</option><option value="http_error">HTTP 错误</option><option value="semantic_failure">语义失败</option><option value="client_aborted">客户端取消</option></select>
+          <select id="outcome"><option value="">全部状态</option><option value="success">成功</option><option value="upstream_error">上游失败</option><option value="stream_error">流处理失败</option><option value="http_error">HTTP 错误</option><option value="semantic_failure">语义失败</option><option value="client_aborted">客户端取消</option></select>
         </label>
         <div class="time-presets" id="timeHelp" aria-label="时间范围快捷选择">
           <button class="preset-btn active" type="button" data-range-minutes="20">20 分钟</button>
@@ -1239,10 +1239,17 @@
       return result;
     }
 
-    function outcomePill(status = {}) {
+    function outcomePill(event = {}) {
+      const status = event.status || {};
+      const failure = event.failure || {};
       const outcome = status.outcome || 'unknown';
       const httpStatus = status.httpStatus ?? '';
       if (outcome === 'success' && Number(httpStatus) < 400) return '<span class="pill good">成功</span>';
+      if (outcome === 'upstream_error') {
+        const upstreamStatus = failure.upstreamHttpStatus ?? '-';
+        return `<span class="pill bad" title="外层 HTTP ${escapeHtml(httpStatus || '-')}">上游失败 ${escapeHtml(upstreamStatus)}</span>`;
+      }
+      if (outcome === 'stream_error') return `<span class="pill bad">流处理失败</span>`;
       if (Number(httpStatus) === 429 || status.cooldownApplied) return '<span class="pill warn">429 / cooldown</span>';
       return `<span class="pill bad">${escapeHtml(outcome)} ${escapeHtml(httpStatus)}</span>`;
     }
@@ -1294,7 +1301,22 @@
         <div class="reason-item">
           <strong>#${escapeHtml(attempt.sequence)} ${escapeHtml(attempt.status || 'unknown')}</strong><br>
           <span class="muted">${escapeHtml(attempt.providerType || '-')} · ${escapeHtml(attempt.outboundModel || '-')} → ${escapeHtml(attempt.upstreamResponseModel || '未知')} · HTTP ${escapeHtml(attempt.httpStatus ?? '-')} · ${formatDuration(attempt.durationMs)}</span>
+          ${attempt.errorCode || attempt.errorType || attempt.errorMessage ? `<br><span class="muted">${escapeHtml(attempt.errorCode || attempt.errorType || 'error')}${attempt.errorMessage ? ` · ${escapeHtml(attempt.errorMessage)}` : ''}${attempt.errorTruncated ? ' · 已截断' : ''}</span>` : ''}
         </div>`).join('');
+      const failure = event.failure || null;
+      const failureHtml = failure ? `
+            <section class="detail-section">
+              <div>
+                <h3>失败详情</h3>
+                <div class="detail-grid">
+                  <div class="detail-box"><span>错误来源</span><strong>${escapeHtml(failure.source || '-')}</strong></div>
+                  <div class="detail-box"><span>上游 / 下游 HTTP</span><strong>${escapeHtml(failure.upstreamHttpStatus ?? '-')} / ${escapeHtml(event.response?.httpStatus ?? event.status?.httpStatus ?? '-')}</strong></div>
+                  <div class="detail-box"><span>Code / Type</span><strong>${escapeHtml(failure.code || '-')} / ${escapeHtml(failure.type || '-')}</strong></div>
+                  <div class="detail-box"><span>上游 Request ID</span><strong>${escapeHtml(failure.requestId || '-')}</strong></div>
+                  <div class="detail-box model-chain-box"><span>上游错误原文${failure.truncated ? '（已截断）' : ''}</span><strong>${escapeHtml(failure.message || '-')}</strong></div>
+                </div>
+              </div>
+            </section>` : '';
       const rows = SECTION_ORDER.map(id => {
         const item = sections[id] || { tokens: 0, percentOfTotalContext: 0 };
         return `
@@ -1314,6 +1336,7 @@
                   <div class="context-rows">${rows}</div>
                 </div>
             </section>
+            ${failureHtml}
             <section class="detail-section">
                 <div>
                   <h3>可能原因</h3>
@@ -1348,7 +1371,7 @@
               <div class="detail-box"><span>IP 来源</span><strong>${escapeHtml(event.network?.clientIpSource || '-')}</strong></div>
               <div class="detail-box"><span>响应字节</span><strong>${fmt(event.response?.bytes)}</strong></div>
               <div class="detail-box"><span>图片结果</span><strong>${event.response?.hasImageResult === true ? '有' : event.response?.hasImageResult === false ? '无' : '不适用'}</strong></div>
-              <div class="detail-box"><span>HTTP 状态</span><strong>${escapeHtml(event.response?.httpStatus ?? event.status?.httpStatus ?? '-')}</strong></div>
+              <div class="detail-box"><span>下游 HTTP 状态</span><strong>${escapeHtml(event.response?.httpStatus ?? event.status?.httpStatus ?? '-')}</strong></div>
               <div class="detail-box"><span>请求耗时</span><strong>${formatDuration(event.response?.durationMs)}</strong></div>
               <div class="detail-box"><span>首个下游输出</span><strong>${formatDuration(event.runtime?.stages?.clientFirstOutputMs)}</strong></div>
               <div class="detail-box"><span>Worker</span><strong>${escapeHtml(event.runtime?.workerId || '-')}</strong></div>
@@ -1419,7 +1442,7 @@
           <td><div class="stacked-value"><strong>${fmt(usage.promptTokens)}</strong><small>输出 ${fmt(usage.completionTokens)} · 缓存 ${fmt(usage.cachedTokens)} · ${fmtPct(usage.cacheHitRatio)}</small></div></td>
           <td><div class="stacked-value"><strong>${escapeHtml(cost.main)}</strong><small>${escapeHtml(cost.sub)}</small></div></td>
           <td><div class="stacked-value"><strong>${formatDuration(event.response?.durationMs)}</strong><small>${formatDuration(event.runtime?.stages?.clientFirstOutputMs)}</small></div></td>
-          <td>${outcomePill(event.status)}</td>
+          <td>${outcomePill(event)}</td>
         `;
         const open = () => openRequestDetail(event, tr);
         tr.addEventListener('click', open);
@@ -1430,7 +1453,7 @@
         const card = document.createElement('article');
         card.className = 'mobile-request-card';
         card.tabIndex = 0;
-        card.innerHTML = `<div class="mobile-card-head"><strong>${escapeHtml(event.potluckKey?.name || event.potluckKey?.prefix || '未命名 Key')}</strong>${outcomePill(event.status)}</div><div class="mobile-card-row"><span>${escapeHtml(shortTime(event.timestamp))}</span><span>${escapeHtml(event.request?.outboundModel || event.request?.model || '-')}</span></div><div class="mobile-card-row"><span>输入 ${fmt(usage.promptTokens)} / 输出 ${fmt(usage.completionTokens)} / 缓存 ${fmt(usage.cachedTokens)}</span><span>${escapeHtml(cost.main)}</span></div>`;
+        card.innerHTML = `<div class="mobile-card-head"><strong>${escapeHtml(event.potluckKey?.name || event.potluckKey?.prefix || '未命名 Key')}</strong>${outcomePill(event)}</div><div class="mobile-card-row"><span>${escapeHtml(shortTime(event.timestamp))}</span><span>${escapeHtml(event.request?.outboundModel || event.request?.model || '-')}</span></div><div class="mobile-card-row"><span>输入 ${fmt(usage.promptTokens)} / 输出 ${fmt(usage.completionTokens)} / 缓存 ${fmt(usage.cachedTokens)}</span><span>${escapeHtml(cost.main)}</span></div>`;
         card.addEventListener('click', () => openRequestDetail(event, card));
         card.addEventListener('keydown', keyboardEvent => {
           if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') { keyboardEvent.preventDefault(); openRequestDetail(event, card); }

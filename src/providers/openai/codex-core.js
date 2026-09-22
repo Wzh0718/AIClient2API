@@ -8,7 +8,13 @@ import os from 'os';
 import {refreshCodexTokensWithRetry} from '../../auth/oauth-handlers.js';
 import {getProviderPoolManager} from '../../services/service-manager.js';
 import {configureTLSSidecar, isTLSSidecarEnabledForProvider} from '../../utils/proxy-utils.js';
-import {MODEL_PROVIDER, formatExpiryLog, normalizeProviderErrorMessage} from '../../utils/common.js';
+import {
+    MODEL_PROVIDER,
+    captureSafeUpstreamErrorDiagnostic,
+    formatExpiryLog,
+    getSafeUpstreamErrorDiagnostic,
+    normalizeProviderErrorMessage
+} from '../../utils/common.js';
 import {isSupportedGptImageModel} from '../../utils/constants.js';
 import {getProxyConfigForProvider} from '../../utils/proxy-utils.js';
 import {getProviderModels} from '../provider-models.js';
@@ -244,6 +250,17 @@ function sanitizeCodexReasoningInput(input) {
 
 function parseRejectedFieldError(error) {
     if (error?.response?.status !== 400) return null;
+    const diagnostic = getSafeUpstreamErrorDiagnostic(error);
+    if (diagnostic) {
+        const code = String(diagnostic.code || '').trim().toLowerCase();
+        const message = String(diagnostic.message || '').trim();
+        if (!['unknown_parameter', 'unsupported_parameter'].includes(code) &&
+            !/unknown\s+parameter|unsupported\s+parameter/i.test(message)) {
+            return null;
+        }
+        if (diagnostic.param) return diagnostic.param;
+        return message.match(/(?:unknown|unsupported)[ _-]+parameter\s*(?::|=|is)?\s*["']?([^"'\s.]+(?:\[\d+\]\.[a-z_]+)?)/i)?.[1] || null;
+    }
     let payload = error.response.data;
     if (typeof payload === 'string') {
         try { payload = JSON.parse(payload); } catch { return null; }
@@ -258,6 +275,17 @@ function parseRejectedFieldError(error) {
     const explicitParam = String(upstreamError?.param || '').trim();
     if (explicitParam) return explicitParam;
     return message.match(/(?:unknown|unsupported)[ _-]+parameter\s*(?::|=|is)?\s*["']?([^"'\s.]+(?:\[\d+\]\.[a-z_]+)?)/i)?.[1] || null;
+}
+
+function requestAttemptErrorFields(error, diagnostic) {
+    return {
+        httpStatus: Number(diagnostic?.status || error?.response?.status || 0) || null,
+        errorCode: diagnostic?.code || error?.code || null,
+        errorType: diagnostic?.type || null,
+        errorMessage: diagnostic?.message || null,
+        upstreamRequestId: diagnostic?.requestId || null,
+        errorTruncated: diagnostic?.truncated === true
+    };
 }
 
 function removeRejectedResponsesField(body, error) {
@@ -561,17 +589,17 @@ export class CodexApiService {
                 });
                 return parsed;
             } catch (error) {
+                const diagnostic = await captureSafeUpstreamErrorDiagnostic(error);
                 finishRequestAttempt(attempt, {
                     status: 'error',
-                    httpStatus: Number(error?.response?.status || 0) || null,
-                    errorCode: error?.response?.data?.error?.code || error?.code || null
+                    ...requestAttemptErrorFields(error, diagnostic)
                 });
                 error.origin = error.origin || 'upstream_codex';
                 codexPromptCacheObservability.recordUpstreamError({
                     providerType: this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API,
                     promptCacheOptions: body.prompt_cache_options,
                     httpStatus: error.response?.status,
-                    errorClass: error.response?.data?.error?.type || error.response?.data?.error?.code
+                    errorClass: diagnostic?.type || diagnostic?.code
                 });
                 if (rejectedFieldRetryCount < 1 && removeRejectedResponsesField(body, error)) {
                     rejectedFieldRetryCount += 1;
@@ -749,10 +777,10 @@ export class CodexApiService {
                 });
                 return;
             } catch (error) {
+                const diagnostic = await captureSafeUpstreamErrorDiagnostic(error);
                 finishRequestAttempt(attempt, {
                     status: 'error',
-                    httpStatus: Number(error?.response?.status || 0) || null,
-                    errorCode: error?.response?.data?.error?.code || error?.code || null,
+                    ...requestAttemptErrorFields(error, diagnostic),
                     upstreamResponseModel: responseSnapshot?.model || null
                 });
                 error.origin = error.origin || 'upstream_codex';
@@ -760,7 +788,7 @@ export class CodexApiService {
                     providerType: this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API,
                     promptCacheOptions: body.prompt_cache_options,
                     httpStatus: error.response?.status,
-                    errorClass: error.response?.data?.error?.type || error.response?.data?.error?.code
+                    errorClass: diagnostic?.type || diagnostic?.code
                 });
                 if (!hasVisibleOutput && rejectedFieldRetryCount < 1 && removeRejectedResponsesField(body, error)) {
                     rejectedFieldRetryCount += 1;

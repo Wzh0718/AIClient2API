@@ -26,6 +26,10 @@ describe('request audit workspace source', () => {
     expect(html).toContain('aria-modal="true"');
     expect(html).toContain('function openRequestDetail');
     expect(html).toContain('上游调用时间线');
+    expect(html).toContain('失败详情');
+    expect(html).toContain('上游失败 ${escapeHtml(upstreamStatus)}');
+    expect(html).toContain('上游错误原文');
+    expect(html).toContain('attempt.errorMessage');
     expect(html).toContain('Turn-State');
     expect(html).toContain('路由、计费与安全元数据');
     expect(html).not.toContain('colspan="13"');

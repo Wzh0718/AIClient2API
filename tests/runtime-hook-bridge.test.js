@@ -118,6 +118,42 @@ describe('RuntimeHookBridge', () => {
         expect(JSON.stringify(messages)).not.toContain('maki_raw_secret_value');
     });
 
+    test('preserves terminal upstream failure outcome and original error text across workers', async () => {
+        const messages = [];
+        const bridge = new RuntimeHookBridge({
+            send: jest.fn(),
+            durableTransport: { publish: event => messages.push(event), snapshot: () => ({}) }
+        });
+        const originalMessage = 'Invalid value for private@example.com with Bearer original-upstream-token';
+
+        await bridge.handle('onRequestCompleted', {
+            requestId: 'terminal-failure-1',
+            outcome: 'upstream_error',
+            errorClass: 'invalid_request_error',
+            failure: {
+                source: 'upstream',
+                upstreamHttpStatus: 400,
+                code: 'invalid_value',
+                type: 'invalid_request_error',
+                message: originalMessage,
+                requestId: 'upstream-request-1',
+                truncated: false
+            },
+            response: { httpStatus: 200, completed: true }
+        });
+
+        expect(messages[0].args[0]).toMatchObject({
+            outcome: 'upstream_error',
+            errorClass: 'invalid_request_error',
+            failure: {
+                source: 'upstream', upstreamHttpStatus: 400, code: 'invalid_value',
+                type: 'invalid_request_error', message: originalMessage,
+                requestId: 'upstream-request-1', truncated: false
+            },
+            response: { httpStatus: 200, completed: true }
+        });
+    });
+
     test('preserves compact runtime diagnostics across workers without payload data', async () => {
         const published = [];
         const bridge = new RuntimeHookBridge({

@@ -666,6 +666,153 @@ function extractReadableErrorText(data) {
     }
 }
 
+const UPSTREAM_ERROR_READ_LIMIT_BYTES = 64 * 1024;
+const UPSTREAM_ERROR_MESSAGE_LIMIT_BYTES = 2 * 1024;
+const UPSTREAM_RESPONSE_LOG_LIMIT = 4 * 1024;
+const SAFE_UPSTREAM_ERROR_KEY = '_safeUpstreamErrorDiagnostic';
+
+function truncateUtf8(value, maxBytes) {
+    const text = String(value || '');
+    const encoded = Buffer.from(text, 'utf8');
+    if (encoded.length <= maxBytes) return { value: text, truncated: false };
+    return {
+        value: encoded.subarray(0, maxBytes).toString('utf8').replace(/\uFFFD$/u, ''),
+        truncated: true
+    };
+}
+
+function sanitizeUpstreamDiagnosticCode(value) {
+    if (value === undefined || value === null || value === '') return null;
+    const text = String(value);
+    return text.length <= 128 ? text : text.slice(0, 128);
+}
+
+export function normalizeUpstreamDiagnosticText(value) {
+    return String(value || '');
+}
+
+function defineSafeUpstreamDiagnostic(error, diagnostic) {
+    if (!error || typeof error !== 'object') return diagnostic;
+    try {
+        Object.defineProperty(error, SAFE_UPSTREAM_ERROR_KEY, {
+            value: diagnostic,
+            configurable: true,
+            writable: true,
+            enumerable: false
+        });
+    } catch {
+        error[SAFE_UPSTREAM_ERROR_KEY] = diagnostic;
+    }
+    return diagnostic;
+}
+
+function buildSafeUpstreamDiagnostic(error, { payload, rawText = '', readTruncated = false } = {}) {
+    const response = error?.response || {};
+    const root = payload && typeof payload === 'object' ? payload : null;
+    const upstreamError = root?.error && typeof root.error === 'object' ? root.error : root;
+    const readable = extractReadableErrorText(upstreamError || payload)
+        || extractReadableErrorText(payload)
+        || rawText
+        || error?.message
+        || '';
+    const message = truncateUtf8(normalizeUpstreamDiagnosticText(readable), UPSTREAM_ERROR_MESSAGE_LIMIT_BYTES);
+    const serializedBody = rawText || (() => {
+        if (payload === undefined || payload === null) return '';
+        if (typeof payload === 'string') return payload;
+        try { return JSON.stringify(payload); } catch { return String(payload); }
+    })();
+    const body = truncateUtf8(normalizeUpstreamDiagnosticText(serializedBody), UPSTREAM_RESPONSE_LOG_LIMIT);
+    const headerRequestId = response.headers?.['x-request-id'] || response.headers?.['request-id'] || null;
+    const requestId = upstreamError?.request_id || root?.request_id || headerRequestId || null;
+    return {
+        status: Number(response.status || error?.statusCode || error?.status || 0) || null,
+        code: sanitizeUpstreamDiagnosticCode(upstreamError?.code || error?.code || null),
+        type: sanitizeUpstreamDiagnosticCode(upstreamError?.type || null),
+        param: sanitizeUpstreamDiagnosticCode(upstreamError?.param || null),
+        message: message.value || null,
+        requestId: sanitizeUpstreamDiagnosticCode(requestId),
+        retryAfter: response.headers?.['retry-after'] || error?.retryAfter || null,
+        body: body.value || null,
+        truncated: Boolean(readTruncated || message.truncated || body.truncated)
+    };
+}
+
+export function getSafeUpstreamErrorDiagnostic(error) {
+    if (!error || typeof error !== 'object') return null;
+    if (error[SAFE_UPSTREAM_ERROR_KEY]) return error[SAFE_UPSTREAM_ERROR_KEY];
+    const data = error?.response?.data;
+    if (data && typeof data?.on === 'function' && typeof data?.read === 'function') return null;
+    return defineSafeUpstreamDiagnostic(error, buildSafeUpstreamDiagnostic(error, {
+        payload: data,
+        rawText: typeof data === 'string' ? data : ''
+    }));
+}
+
+function extractPartialJsonStringField(rawText, field) {
+    const marker = new RegExp(`"${field}"\\s*:\\s*"`, 'i').exec(rawText);
+    if (!marker) return null;
+    const start = marker.index + marker[0].length;
+    let escaped = false;
+    let value = '';
+    for (let index = start; index < rawText.length; index += 1) {
+        const character = rawText[index];
+        if (!escaped && character === '"') break;
+        value += character;
+        if (!escaped && character === '\\') escaped = true;
+        else escaped = false;
+    }
+    try { return JSON.parse(`"${value}"`); } catch { return value.replace(/\\[nrt]/g, ' ').replace(/\\"/g, '"'); }
+}
+
+function extractPartialJsonError(rawText) {
+    if (!rawText || typeof rawText !== 'string') return null;
+    const error = Object.fromEntries(['code', 'type', 'param', 'message']
+        .map(field => [field, extractPartialJsonStringField(rawText, field)])
+        .filter(([, value]) => value !== null));
+    return Object.keys(error).length ? { error } : null;
+}
+
+export async function captureSafeUpstreamErrorDiagnostic(error) {
+    const cached = getSafeUpstreamErrorDiagnostic(error);
+    if (cached) return cached;
+    const data = error?.response?.data;
+    if (!data || typeof data?.on !== 'function' || typeof data?.read !== 'function') {
+        return getSafeUpstreamErrorDiagnostic(error);
+    }
+
+    const chunks = [];
+    let totalBytes = 0;
+    let readTruncated = false;
+    try {
+        for await (const chunk of data) {
+            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+            const remaining = UPSTREAM_ERROR_READ_LIMIT_BYTES - totalBytes;
+            if (remaining <= 0) {
+                readTruncated = true;
+                break;
+            }
+            if (buffer.length > remaining) {
+                chunks.push(buffer.subarray(0, remaining));
+                totalBytes += remaining;
+                readTruncated = true;
+                break;
+            }
+            chunks.push(buffer);
+            totalBytes += buffer.length;
+        }
+        if (readTruncated && typeof data.destroy === 'function') data.destroy();
+    } catch (readError) {
+        logger.warn(`[Error Normalize] Failed to read error response stream: ${readError.message}`);
+    }
+
+    const rawText = Buffer.concat(chunks).toString('utf8');
+    let payload = rawText;
+    if (rawText) {
+        try { payload = JSON.parse(rawText); } catch { payload = extractPartialJsonError(rawText) || rawText; }
+    }
+    return defineSafeUpstreamDiagnostic(error, buildSafeUpstreamDiagnostic(error, { payload, rawText, readTruncated }));
+}
+
 function isDefinitiveProviderAuthFailure(error) {
     const status = Number(getErrorStatusCode(error));
     const responseText = extractReadableErrorText(error?.response?.data);
@@ -710,32 +857,8 @@ function isDefinitiveProviderAuthFailure(error) {
 }
 
 export async function getNormalizedErrorResponseText(error) {
-    const data = error?.response?.data;
-    const fallbackText = extractReadableErrorText(data) || error?.message || '';
-
-    if (!data || typeof data?.on !== 'function' || typeof data?.read !== 'function') {
-        return fallbackText;
-    }
-
-    const chunks = [];
-    try {
-        for await (const chunk of data) {
-            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
-        }
-
-        const bodyText = Buffer.concat(chunks).toString('utf8');
-        if (!bodyText) return fallbackText;
-
-        try {
-            const parsed = JSON.parse(bodyText);
-            return extractReadableErrorText(parsed) || bodyText;
-        } catch {
-            return bodyText;
-        }
-    } catch (readError) {
-        logger.warn(`[Error Normalize] Failed to read error response stream: ${readError.message}`);
-        return fallbackText;
-    }
+    const diagnostic = await captureSafeUpstreamErrorDiagnostic(error);
+    return diagnostic?.message || error?.message || '';
 }
 
 export function buildHttpErrorReason(status, context, responseText = '', options = {}) {
@@ -755,7 +878,7 @@ export async function normalizeProviderErrorMessage(error, options = {}) {
     // Normalize in place so existing throw/logging paths that keep using `error`
     // automatically see the readable message without forcing every caller to reassign.
     error.message = reason;
-    return { responseText, reason, status };
+    return { responseText, reason, status, diagnostic: getSafeUpstreamErrorDiagnostic(error) };
 }
 
 function getHeaderValue(headers, headerName) {
@@ -1008,26 +1131,68 @@ export function getRateLimitCooldownRecoveryTime(error, config = {}, now = Date.
     return new Date(now + cappedCooldownMs + jitter);
 }
 
-const UPSTREAM_RESPONSE_LOG_LIMIT = 4096;
-
 export function getSafeUpstreamResponseSummary(error) {
     const response = error?.response;
     if (!response) return null;
+    const diagnostic = getSafeUpstreamErrorDiagnostic(error);
+    if (diagnostic) {
+        return {
+            status: diagnostic.status,
+            requestId: diagnostic.requestId,
+            retryAfter: diagnostic.retryAfter,
+            body: diagnostic.body,
+            truncated: diagnostic.truncated
+        };
+    }
     let body = response.data;
     if (body !== undefined && typeof body !== 'string') {
         try { body = JSON.stringify(body); } catch { body = String(body); }
     }
-    body = body === undefined || body === null ? null : String(body)
-        .replace(/("(?:access[_-]?token|refresh[_-]?token|authorization|cookie|proxy[_-]?auth)"\s*:\s*")([^"\\]*)/gi, '$1[REDACTED]')
-        .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]');
-    const truncated = body !== null && body.length > UPSTREAM_RESPONSE_LOG_LIMIT;
+    body = body === undefined || body === null ? null : normalizeUpstreamDiagnosticText(String(body));
+    const limitedBody = body === null ? { value: null, truncated: false } : truncateUtf8(body, UPSTREAM_RESPONSE_LOG_LIMIT);
     return {
         status: Number(response.status || error.statusCode || error.status || 0) || null,
         requestId: response.headers?.['x-request-id'] || response.headers?.['request-id'] || null,
         retryAfter: response.headers?.['retry-after'] || error.retryAfter || null,
-        body: body === null ? null : body.slice(0, UPSTREAM_RESPONSE_LOG_LIMIT),
-        truncated
+        body: limitedBody.value,
+        truncated: limitedBody.truncated
     };
+}
+
+function requestAttemptFailureFields(error) {
+    const diagnostic = getSafeUpstreamErrorDiagnostic(error);
+    return {
+        httpStatus: Number(diagnostic?.status || error?.response?.status || 0) || null,
+        errorCode: diagnostic?.code || error?.code || null,
+        errorType: diagnostic?.type || null,
+        errorMessage: diagnostic?.message || null,
+        upstreamRequestId: diagnostic?.requestId || null,
+        errorTruncated: diagnostic?.truncated === true
+    };
+}
+
+function recordTerminalRequestFailure(error) {
+    const audit = requestContext.get('requestAudit');
+    if (!audit || typeof audit !== 'object') return null;
+    const diagnostic = getSafeUpstreamErrorDiagnostic(error)
+        || buildSafeUpstreamDiagnostic(error, { payload: error?.response?.data });
+    const upstream = Boolean(error?.response || String(error?.origin || '').startsWith('upstream_'));
+    const status = Number(diagnostic?.status || getErrorStatusCode(error) || 0) || null;
+    const errorClass = diagnostic?.type || diagnostic?.code || (status ? `${upstream ? 'upstream' : 'stream'}_http_${status}` : 'stream_error');
+    audit.terminal = {
+        outcome: upstream ? 'upstream_error' : 'stream_error',
+        errorClass,
+        failure: {
+            source: upstream ? 'upstream' : 'internal',
+            upstreamHttpStatus: upstream ? status : null,
+            code: diagnostic?.code || error?.code || null,
+            type: diagnostic?.type || null,
+            message: diagnostic?.message || normalizeUpstreamDiagnosticText(error?.message || ''),
+            requestId: diagnostic?.requestId || null,
+            truncated: diagnostic?.truncated === true
+        }
+    };
+    return audit.terminal;
 }
 
 function getUpstreamErrorLogDecision(error, scope, providerType = null, model = null) {
@@ -2230,8 +2395,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
     }  catch (error) {
         finishRequestAttempt(genericAttempt, {
             status: 'error',
-            httpStatus: Number(error?.response?.status || 0) || null,
-            errorCode: error?.response?.data?.error?.code || error?.code || null
+            ...requestAttemptFailureFields(error)
         });
         const upstreamLogDecision = getUpstreamErrorLogDecision(error, 'Server', toProvider, model);
         if (upstreamLogDecision.log) logger.error('\n[Server] Error during stream processing:', error.stack);
@@ -2254,6 +2418,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             logger.info(`[Stream Retry] Cannot retry: data already sent to client`);
             // 直接发送错误并结束
             normalizeAntigravityCapacityExhaustion(error, toProvider, model);
+            recordTerminalRequestFailure(error);
             const errorPayload = createStreamErrorResponse(error, fromProvider);
             if (!res.writableEnded) {
                 try {
@@ -2560,6 +2725,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
 
         // 使用新方法创建符合 fromProvider 格式的流式错误响应
         normalizeAntigravityCapacityExhaustion(error, toProvider, model);
+        recordTerminalRequestFailure(error);
         const errorPayload = createStreamErrorResponse(error, fromProvider);
         if (!clientDisconnected.value && !res.writableEnded) {
             try {
@@ -2776,8 +2942,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
     } catch (error) {
         finishRequestAttempt(genericAttempt, {
             status: 'error',
-            httpStatus: Number(error?.response?.status || 0) || null,
-            errorCode: error?.response?.data?.error?.code || error?.code || null
+            ...requestAttemptFailureFields(error)
         });
         const upstreamLogDecision = getUpstreamErrorLogDecision(error, 'Server', toProvider, model);
         if (upstreamLogDecision.log) logger.error('\n[Server] Error during unary processing:', error.stack);
@@ -3751,6 +3916,7 @@ function _applyCustomModelParameters(requestBody, customConfig, provider) {
 
 export function handleError(res, error, provider = null, fromProvider = null, req = null) {
     normalizeAntigravityCapacityExhaustion(error, provider, error?.capacityKey);
+    recordTerminalRequestFailure(error);
     const statusCode = getNumericHttpStatus(error) ?? 500;
     logUpstreamResponse(error, 'Server Request Failed');
     
@@ -4280,19 +4446,19 @@ export function createStreamErrorResponse(error, fromProvider) {
             const upstreamError = error.response?.data?.error && typeof error.response.data.error === 'object'
                 ? error.response.data.error
                 : {};
+            const diagnostic = getSafeUpstreamErrorDiagnostic(error);
             const responseSnapshot = error.responseSnapshot && typeof error.responseSnapshot === 'object'
                 ? error.responseSnapshot
                 : {};
             const responseId = error.responseId || responseSnapshot.id || `resp_failed_${Date.now()}`;
-            const upstreamMessage = typeof upstreamError.message === 'string' && upstreamError.message.trim()
-                ? upstreamError.message.trim()
-                : '';
+            const upstreamMessage = diagnostic?.message
+                || (typeof upstreamError.message === 'string' && upstreamError.message.trim() ? upstreamError.message.trim() : '');
             const failedMessage = error.isCodexOverload || error.isCodexModelCapacity || error.origin !== 'upstream_codex'
                 ? errorMessage
                 : (upstreamMessage || errorMessage);
             const failedCode = sanitizeCodexCapacityShedErrorCodeForClient(
                 error,
-                upstreamError.code,
+                diagnostic?.code || upstreamError.code,
                 getErrorType(statusCode)
             );
             const failedEvent = {
