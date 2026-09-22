@@ -65,7 +65,12 @@ describe('request audit workspace source', () => {
     expect(html).toContain('outcomeCounts');
     expect(html).toContain('cacheHitRatio');
     expect(html).toContain('averageLatency');
-    expect(html).toContain('context-stack');
+    expect(html).not.toContain('class="insights-grid"');
+    expect(html).not.toContain('id="cacheGauge"');
+    expect(html).not.toContain('id="contextStack"');
+    expect(html).toContain('输入 / 输出 / 缓存');
+    expect(html).toContain('model-chain-compact');
+    expect(html).toContain('toFixed(seconds < 100 ? 1 : 0)');
     expect(html).toContain('clientFirstOutputMs');
     expect(html).toContain('costDisplay');
     expect(html).toContain('modelEvidence');

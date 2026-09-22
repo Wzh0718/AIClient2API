@@ -371,38 +371,6 @@
     .muted { color: var(--muted); }
     .mini { font-size: 12px; line-height: 1.5; }
 
-    .ratio-wrap {
-      display: grid;
-      grid-template-columns: 132px minmax(0, 1fr);
-      gap: 18px;
-      align-items: center;
-    }
-
-    .gauge {
-      width: 132px;
-      height: 132px;
-      border-radius: 50%;
-      display: grid;
-      place-items: center;
-      background: conic-gradient(var(--primary) calc(var(--rate, 0) * 1turn), #e7dccb 0);
-      position: relative;
-    }
-
-    .gauge::after {
-      content: "";
-      position: absolute;
-      inset: 12px;
-      border-radius: 50%;
-      background: var(--surface-strong);
-    }
-
-    .gauge strong {
-      position: relative;
-      z-index: 1;
-      font-size: 25px;
-      letter-spacing: -.04em;
-    }
-
     .formula {
       display: inline-flex;
       margin-top: 10px;
@@ -469,27 +437,6 @@
       line-height: 1.55;
     }
 
-    .diagnostic-list {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-
-    .diagnostic-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
-      min-height: 32px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: var(--surface-muted);
-      color: var(--text);
-      font-size: 12px;
-      font-weight: 800;
-    }
-
-    .diagnostic-chip strong { font-family: var(--mono); }
-
     .reason-list {
       display: grid;
       gap: 8px;
@@ -504,17 +451,6 @@
       font-size: 12px;
       line-height: 1.5;
     }
-
-    .context-stack {
-      display: flex;
-      min-height: 18px;
-      margin-bottom: 14px;
-      border-radius: 999px;
-      overflow: hidden;
-      background: #e7dccb;
-    }
-
-    .segment { min-width: 3px; transition: width .24s ease; }
 
     .context-rows { display: grid; gap: 9px; }
 
@@ -656,6 +592,13 @@
       margin-top: 4px;
     }
 
+    .model-chain-compact {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+
     .model-chain-row {
       display: grid;
       grid-template-columns: minmax(92px, auto) 1fr;
@@ -719,7 +662,6 @@
       .time-presets { grid-column: auto; }
       .content { padding: 14px; }
       .metrics { grid-template-columns: 1fr 1fr; }
-      .ratio-wrap { grid-template-columns: 1fr; }
       .context-row { grid-template-columns: 14px minmax(0, 1fr) auto; }
       .context-row .pct { display: none; }
       .detail-panel { grid-template-columns: 1fr; }
@@ -754,7 +696,7 @@
     .stat-card .label { color: var(--text-secondary); font-size: 12px; }
     .stat-card .value { margin-top: 8px; color: var(--text-primary); font-size: clamp(22px, 2vw, 30px); font-weight: 750; letter-spacing: -.03em; }
     .stat-card small { display: block; margin-top: 5px; color: var(--text-tertiary); }
-    .filter-card, .insight-card, .request-card { margin-bottom: 20px; border: 1px solid var(--border-color); border-radius: var(--radius-xl); background: var(--bg-primary); box-shadow: var(--shadow-sm); }
+    .filter-card, .request-card { margin-bottom: 20px; border: 1px solid var(--border-color); border-radius: var(--radius-xl); background: var(--bg-primary); box-shadow: var(--shadow-sm); }
     .filter-card { padding: 18px; }
     .primary-filters { display: grid; grid-template-columns: minmax(220px, 1.3fr) minmax(180px, 1fr) 170px auto auto; gap: 12px; align-items: end; }
     .primary-filters label, .advanced-grid label, .raw-capture-grid label { display: grid; gap: 6px; color: var(--text-secondary); font-size: 12px; font-weight: 600; }
@@ -767,8 +709,6 @@
     .manual-key-field { grid-column: span 2; }
     .filter-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; }
     .status-line { margin: 0; min-height: 22px; color: var(--text-secondary); font-size: 13px; }
-    .insights-grid { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(0, 1.2fr); gap: 16px; margin-bottom: 20px; }
-    .insight-card { margin: 0; padding: 18px; }
     .card-head, .request-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
     .card-head h2, .request-header h2 { margin: 0; font-size: 17px; }
     .request-card { overflow: hidden; }
@@ -825,7 +765,7 @@
       .nav-actions .btn-text { display: none; }
       .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
       .stat-card { padding: 14px; }
-      .primary-filters, .advanced-grid, .insights-grid { grid-template-columns: 1fr; }
+      .primary-filters, .advanced-grid { grid-template-columns: 1fr; }
       .manual-key-field { grid-column: auto; }
       .filter-footer, .audit-meta { align-items: stretch; flex-direction: column; }
       .request-table-wrap { display: none; }
@@ -913,24 +853,11 @@
           <div class="stat-card"><div class="label">平均延迟</div><div class="value" id="averageLatency">—</div><small id="p95Latency">P95 —</small></div>
         </section>
 
-        <section class="insights-grid" aria-label="缓存与上下文洞察">
-          <article class="insight-card">
-            <div class="card-head"><div><h2>缓存命中率</h2><p class="muted mini">cachedTokens / promptTokens</p></div><span id="cacheGaugeText" class="pill">0.00%</span></div>
-            <div class="ratio-wrap"><div id="cacheGauge" class="gauge" style="--rate:0"><strong>Cache</strong></div><p class="muted">用于对比相同 Key、模型和账号的缓存稳定性；不会展示或保存原始 prompt。</p></div>
-            <div id="diagnosticsSummary" class="diagnostic-list"><span class="diagnostic-chip">暂无诊断</span></div>
-          </article>
-          <article class="insight-card">
-            <div class="card-head"><div><h2>上下文分类</h2><p class="muted mini">按真实 prompt tokens 校准的近似分类</p></div></div>
-            <div id="contextStack" class="context-stack" aria-label="上下文分类堆叠图"></div>
-            <div id="contextRows" class="context-rows"></div>
-          </article>
-        </section>
-
         <section class="request-card" aria-label="逐请求明细">
           <div class="request-header"><div><h2>最近请求</h2><p class="muted mini">点击请求打开安全详情；无需开启原始请求采集。</p></div><span id="requestCountLabel" class="pill">0 条</span></div>
           <div class="request-table-wrap">
             <table class="request-table">
-              <thead><tr><th class="time-col">时间</th><th class="key-col">Key</th><th class="model-col">模型路由</th><th class="provider-col">Provider / 账号</th><th class="number-col">输入 / 缓存</th><th class="number-col">成本</th><th class="number-col">延迟</th><th class="status-col">状态</th></tr></thead>
+              <thead><tr><th class="time-col">时间</th><th class="key-col">Key</th><th class="model-col">模型路由</th><th class="provider-col">Provider / 账号</th><th class="number-col">输入 / 输出 / 缓存</th><th class="number-col">成本</th><th class="number-col">延迟</th><th class="status-col">状态</th></tr></thead>
               <tbody id="requestRows"><tr><td colspan="8"><div class="empty"><div class="loading-skeleton" aria-label="正在加载"><span></span><span></span><span></span></div></div></td></tr></tbody>
             </table>
           </div>
@@ -977,16 +904,6 @@
       output: '输出',
       reasoning: '推理'
     };
-    const SECTION_HELP = {
-      instructions: 'system、developer、instructions 等稳定指令内容',
-      tools: 'tools、函数 schema、工具选择相关内容',
-      conversation: '用户/助手消息正文',
-      attachments: '图片、文件、base64 或 data URI 的估算 token',
-      metadata: 'temperature、reasoning、max tokens 等参数',
-      cached_input: '上游返回的 cached tokens，是真实 usage 字段',
-      output: 'completion tokens，来自上游 usage',
-      reasoning: 'reasoning tokens，来自上游 usage'
-    };
     const DIAGNOSTIC_LABELS = {
       client_prefix_limited: '客户端公共前缀有限',
       client_structure_variance: '客户端请求结构变化',
@@ -1008,7 +925,8 @@
     const fmt = value => Number(value || 0).toLocaleString('zh-CN');
     const formatDuration = value => {
       const number = Number(value);
-      return Number.isFinite(number) && number >= 0 ? `${number.toFixed(number < 100 ? 1 : 0)} ms` : '—';
+      const seconds = number / 1000;
+      return Number.isFinite(number) && number >= 0 ? `${seconds.toFixed(seconds < 100 ? 1 : 0)} s` : '—';
     };
     const fmtPct = value => `${(Number(value || 0) * 100).toFixed(2)}%`;
     const fmtUsd = value => {
@@ -1266,57 +1184,6 @@
       document.getElementById(id).textContent = formatter(value);
     }
 
-    function normalizedSectionsFromSummary(data) {
-      const sections = data.contextSections || {};
-      const outputTokens = Number(data.summary?.completionTokens || 0);
-      const reasoningTokens = Number(data.summary?.reasoningTokens || 0);
-      const promptTokens = Number(data.summary?.promptTokens || 0);
-      const totalBasis = Math.max(promptTokens + outputTokens + reasoningTokens, promptTokens, 1);
-      const result = {};
-
-      for (const id of SECTION_ORDER) {
-        const item = sections[id] || { tokens: 0 };
-        result[id] = {
-          tokens: Number(item.tokens || 0),
-          percentOfPrompt: Number(item.percentOfPrompt || 0),
-          percentOfTotalContext: Number(item.tokens || 0) / totalBasis
-        };
-      }
-      result.output.tokens = outputTokens;
-      result.output.percentOfTotalContext = outputTokens / totalBasis;
-      result.reasoning.tokens = reasoningTokens;
-      result.reasoning.percentOfTotalContext = reasoningTokens / totalBasis;
-      return result;
-    }
-
-    function renderContextRows(sections, basis = 'prompt') {
-      const stack = document.getElementById('contextStack');
-      const rows = document.getElementById('contextRows');
-      stack.innerHTML = '';
-      rows.innerHTML = '';
-
-      for (const id of SECTION_ORDER) {
-        const item = sections[id] || { tokens: 0, percentOfPrompt: 0, percentOfTotalContext: 0 };
-        const percent = basis === 'total' ? item.percentOfTotalContext : item.percentOfPrompt;
-        const width = clamp01(percent) * 100;
-        const segment = document.createElement('div');
-        segment.className = `segment ${id}`;
-        segment.style.width = `${width}%`;
-        segment.title = `${SECTION_LABELS[id]} ${fmtPct(percent)}`;
-        stack.appendChild(segment);
-
-        const row = document.createElement('div');
-        row.className = 'context-row';
-        row.innerHTML = `
-          <span class="dot ${id}"></span>
-          <span><strong>${SECTION_LABELS[id]}</strong><br><span class="muted mini">${SECTION_HELP[id]}</span></span>
-          <strong>${fmt(item.tokens)}</strong>
-          <span class="pct muted">${fmtPct(percent)}</span>
-        `;
-        rows.appendChild(row);
-      }
-    }
-
     function renderSummary(data) {
       const summary = data.summary || {};
       fillMetric('requestCount', summary.requestCount);
@@ -1328,8 +1195,6 @@
       const hasWindowCost = Number(windowCost.pricedRequestCount || 0) + Number(windowCost.estimatedRequestCount || 0) > 0;
       document.getElementById('totalCost').textContent = hasWindowCost ? fmtUsd(windowCost.usd) : '—';
       document.getElementById('cacheHitRatio').textContent = `缓存率 ${fmtPct(summary.cacheHitRatio)}`;
-      fillMetric('cacheGaugeText', summary.cacheHitRatio, fmtPct);
-      document.getElementById('cacheGauge').style.setProperty('--rate', clamp01(summary.cacheHitRatio));
       const outcomes = data.outcomeCounts || {};
       const successRate = Number(summary.requestCount || 0) > 0 ? Number(outcomes.success || 0) / Number(summary.requestCount) : 0;
       document.getElementById('successRate').textContent = `成功率 ${fmtPct(successRate)}`;
@@ -1341,9 +1206,7 @@
       sourceBadge.textContent = meta.complete ? 'SQLite 完整汇总' : '降级汇总';
       sourceBadge.title = `source=${meta.source || 'unknown'}`;
       document.getElementById('retentionLabel').textContent = `明细保留 ${fmt(meta.retentionDays || 7)} 天`;
-      renderContextRows(normalizedSectionsFromSummary(data), 'total');
       renderAnalysisFreshness(data.analysisFreshness);
-      renderDiagnosticsSummary(data.diagnosticsSummary || {});
     }
 
     function renderAnalysisFreshness(freshness = {}) {
@@ -1354,16 +1217,6 @@
       }
       const statusClass = freshness.status === 'fresh' ? 'good' : 'warn';
       node.innerHTML = `<span class="pill ${statusClass}">${escapeHtml(freshness.status)}</span> 生成于 ${escapeHtml(shortTime(freshness.generatedAt))}，延迟约 ${fmt(freshness.staleSeconds)} 秒。`;
-    }
-
-    function renderDiagnosticsSummary(summary = {}) {
-      const node = document.getElementById('diagnosticsSummary');
-      const entries = Object.entries(summary).sort((a, b) => Number(b[1]) - Number(a[1]));
-      if (entries.length === 0) {
-        node.innerHTML = '<span class="diagnostic-chip">暂无诊断</span>';
-        return;
-      }
-      node.innerHTML = entries.map(([code, count]) => `<span class="diagnostic-chip"><span>${escapeHtml(DIAGNOSTIC_LABELS[code] || code)}</span><strong>${fmt(count)}</strong></span>`).join('');
     }
 
     function normalizeRequestSections(event) {
@@ -1426,7 +1279,7 @@
           <strong>${escapeHtml(value)}</strong>
         </div>`).join('');
       return {
-        compact: `<div class="model-chain">${entries.map(([value, labels]) => `<div><small class="muted">${escapeHtml(labels.join('/'))}</small> <span class="pill warn">${escapeHtml(value)}</span></div>`).join('')}</div>`,
+        compact: `<span class="model-chain-compact">${entries.map(([value, labels]) => `<span><small class="muted">${escapeHtml(labels.join('/'))}</small> <span class="pill warn">${escapeHtml(value)}</span></span>`).join('<span class="muted">·</span>')}</span>`,
         detail: `<div class="detail-box model-chain-box"><span>模型链（存在差异）</span><div class="model-chain">${rows}</div></div>`
       };
     }
@@ -1563,7 +1416,7 @@
           <td><div class="stacked-value"><strong>${escapeHtml(event.potluckKey?.name || event.potluckKey?.prefix || '未命名')}</strong><small>${escapeHtml(event.potluckKey?.hash || '')}</small></div></td>
           <td>${models.compact}</td>
           <td class="provider-col"><div class="stacked-value"><strong>${escapeHtml(event.request?.toProvider || '-')}</strong><small>${escapeHtml(event.account?.providerNameDisplay || event.account?.accountEmail || '-')}</small></div></td>
-          <td><div class="stacked-value"><strong>${fmt(usage.promptTokens)}</strong><small>缓存 ${fmt(usage.cachedTokens)} · ${fmtPct(usage.cacheHitRatio)}</small></div></td>
+          <td><div class="stacked-value"><strong>${fmt(usage.promptTokens)}</strong><small>输出 ${fmt(usage.completionTokens)} · 缓存 ${fmt(usage.cachedTokens)} · ${fmtPct(usage.cacheHitRatio)}</small></div></td>
           <td><div class="stacked-value"><strong>${escapeHtml(cost.main)}</strong><small>${escapeHtml(cost.sub)}</small></div></td>
           <td><div class="stacked-value"><strong>${formatDuration(event.response?.durationMs)}</strong><small>${formatDuration(event.runtime?.stages?.clientFirstOutputMs)}</small></div></td>
           <td>${outcomePill(event.status)}</td>
@@ -1577,7 +1430,7 @@
         const card = document.createElement('article');
         card.className = 'mobile-request-card';
         card.tabIndex = 0;
-        card.innerHTML = `<div class="mobile-card-head"><strong>${escapeHtml(event.potluckKey?.name || event.potluckKey?.prefix || '未命名 Key')}</strong>${outcomePill(event.status)}</div><div class="mobile-card-row"><span>${escapeHtml(shortTime(event.timestamp))}</span><span>${escapeHtml(event.request?.outboundModel || event.request?.model || '-')}</span></div><div class="mobile-card-row"><span>输入 ${fmt(usage.promptTokens)} / 缓存 ${fmt(usage.cachedTokens)}</span><span>${escapeHtml(cost.main)}</span></div>`;
+        card.innerHTML = `<div class="mobile-card-head"><strong>${escapeHtml(event.potluckKey?.name || event.potluckKey?.prefix || '未命名 Key')}</strong>${outcomePill(event.status)}</div><div class="mobile-card-row"><span>${escapeHtml(shortTime(event.timestamp))}</span><span>${escapeHtml(event.request?.outboundModel || event.request?.model || '-')}</span></div><div class="mobile-card-row"><span>输入 ${fmt(usage.promptTokens)} / 输出 ${fmt(usage.completionTokens)} / 缓存 ${fmt(usage.cachedTokens)}</span><span>${escapeHtml(cost.main)}</span></div>`;
         card.addEventListener('click', () => openRequestDetail(event, card));
         card.addEventListener('keydown', keyboardEvent => {
           if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') { keyboardEvent.preventDefault(); openRequestDetail(event, card); }
