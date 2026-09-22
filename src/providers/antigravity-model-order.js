@@ -9,15 +9,16 @@
  *
  * Ordering is low tier to high tier: a request only ever falls forward to a
  * stronger model once its own tier is exhausted.
+ *
+ * The 3.8 effort tiers are deliberately excluded: they remain directly
+ * requestable, but are never fallback targets, so an exhausted 3.8 tier cannot
+ * turn lower-tier traffic into mass 429s.
  */
 export const ANTIGRAVITY_ELASTIC_MODEL_ORDER = Object.freeze([
     'gemini-2.5-flash-lite',
     'gemini-2.5-flash',
     'gemini-3.1-flash-lite',
-    'gemini-3-flash',
-    'gemini-3.8-flash-low',
-    'gemini-3.8-flash-medium',
-    'gemini-3.8-flash-high'
+    'gemini-3-flash'
 ]);
 
 export const ANTIGRAVITY_ELASTIC_SOURCE_MODEL = ANTIGRAVITY_ELASTIC_MODEL_ORDER[0];
