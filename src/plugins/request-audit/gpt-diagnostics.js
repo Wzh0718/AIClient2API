@@ -4,10 +4,11 @@ import { promises as fs } from 'node:fs';
 import { analyzeModelTraceOutputs, loadModelTraceBank, modelTraceChallenges, MODELTRACE_BANK_VERSION } from './modeltrace.js';
 import { getRequestAttempts } from '../../utils/request-attempts.js';
 
-const TEST_VERSION = 'gpt-diagnostics-v2';
+const TEST_VERSION = 'gpt-diagnostics-v3';
 const MAX_TARGETS = 10;
+// 每个凭据固定对这组模型逐一执行 ModelTrace 归因，前端不再选择模型。
+export const FIXED_MODELS = Object.freeze(['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra']);
 const TESTS = Object.freeze({
-    knowledge: Object.freeze({ label: '知识时间', requestCount: 1, maxOutputTokensPerRequest: 2048 }),
     modeltrace: Object.freeze({ label: 'ModelTrace', requestCount: modelTraceChallenges().length, maxOutputTokensPerRequest: 8192 })
 });
 const DEFAULT_TESTS = Object.keys(TESTS);
@@ -58,27 +59,6 @@ function responseModel(value, seen = new Set()) {
 function reasoningTokens(value) {
     const usage = value?.usage || value?.response?.usage || {};
     return Number(usage.output_tokens_details?.reasoning_tokens ?? usage.reasoning_tokens ?? usage.reasoningTokens ?? 0) || 0;
-}
-
-function scoreKnowledgeOutput(text) {
-    const expected = {
-        gpt_4_1_announcement: '2025-04-14',
-        python_3_13_0_release: '2024-10-07'
-    };
-    let parsed = null;
-    try { parsed = JSON.parse(String(text).match(/\{[\s\S]*\}/)?.[0] || ''); } catch {}
-    const answers = parsed?.answers && typeof parsed.answers === 'object' ? parsed.answers : {};
-    const checks = Object.entries(expected).map(([id, date]) => ({ id, expected: date, answer: answers[id] ?? null, correct: answers[id] === date }));
-    return {
-        claimedKnowledgeCutoff: parsed?.claimed_knowledge_cutoff ?? null,
-        checks,
-        correct: checks.filter(item => item.correct).length,
-        total: checks.length,
-        references: {
-            gpt_4_1_announcement: 'https://openai.com/index/gpt-4-1/',
-            python_3_13_0_release: 'https://www.python.org/downloads/release/python-3130/'
-        }
-    };
 }
 
 function buildRequest(providerType, model, prompt, maxOutputTokens = 4096) {
@@ -160,28 +140,35 @@ export class GptDiagnosticsRunner {
     capabilities() {
         const { requestCount, maxOutputTokens } = this.estimate({ targets: [{}] });
         return {
-            testVersion: TEST_VERSION, maxTargets: MAX_TARGETS, defaultTests: [...DEFAULT_TESTS],
+            testVersion: TEST_VERSION, maxTargets: MAX_TARGETS, models: [...FIXED_MODELS],
+            defaultTests: [...DEFAULT_TESTS],
             tests: Object.entries(TESTS).map(([id, test]) => ({ id, ...test })),
-            perTarget: { requestCount, maxOutputTokens }
+            perCredential: { requestCount, maxOutputTokens }
         };
     }
     estimate({ targets = [], tests = DEFAULT_TESTS } = {}) {
         const selected = validateTests(tests);
-        const requestCount = selected.reduce((sum, test) => sum + TESTS[test].requestCount, 0);
-        const maxOutputTokens = selected.reduce((sum, test) => sum + TESTS[test].requestCount * TESTS[test].maxOutputTokensPerRequest, 0);
-        return { targetCount: targets.length, requestCount: targets.length * requestCount, maxOutputTokens: targets.length * maxOutputTokens };
+        const requestCount = selected.reduce((sum, test) => sum + TESTS[test].requestCount, 0) * FIXED_MODELS.length;
+        const maxOutputTokens = selected.reduce((sum, test) => sum + TESTS[test].requestCount * TESTS[test].maxOutputTokensPerRequest, 0) * FIXED_MODELS.length;
+        return {
+            credentialCount: targets.length,
+            targetCount: targets.length * FIXED_MODELS.length,
+            requestCount: targets.length * requestCount,
+            maxOutputTokens: targets.length * maxOutputTokens
+        };
     }
     async create(input = {}) {
         const targets = input.targets;
         if (!Array.isArray(targets) || !targets.length || targets.length > MAX_TARGETS || targets.some(item =>
-            typeof item?.providerUuid !== 'string' || !item.providerUuid.trim() || typeof item?.model !== 'string' || !item.model.trim())) {
-            throw Object.assign(new Error('targets must contain 1-10 providerUuid/model pairs'), { statusCode: 400 });
+            typeof item?.providerUuid !== 'string' || !item.providerUuid.trim())) {
+            throw Object.assign(new Error('targets must contain 1-10 entries with providerUuid'), { statusCode: 400 });
         }
         const tests = validateTests(input.tests);
+        const credentials = [...new Set(targets.map(item => item.providerUuid.trim()))].map(providerUuid => ({ providerUuid }));
         const run = {
             runId: crypto.randomUUID(), testVersion: TEST_VERSION, status: 'queued', createdAt: new Date().toISOString(),
-            targets: targets.map(item => ({ providerUuid: item.providerUuid.trim(), model: item.model.trim() })), tests,
-            estimate: this.estimate({ targets, tests }), results: [], bankVersion: tests.includes('modeltrace') ? MODELTRACE_BANK_VERSION : null
+            targets: credentials.flatMap(credential => FIXED_MODELS.map(model => ({ ...credential, model }))), tests,
+            estimate: this.estimate({ targets: credentials, tests }), results: [], bankVersion: tests.includes('modeltrace') ? MODELTRACE_BANK_VERSION : null
         };
         run.artifactDir = path.join(this.store.dir, 'artifacts', safeId(run.runId));
         await this.store.save(run);
@@ -307,10 +294,6 @@ export class GptDiagnosticsRunner {
             return { response, text, probe };
         };
         const output = { ...target, providerType, status: 'completed', probes, passiveSignals: [] };
-        if (run.tests.includes('knowledge')) {
-            const value = await call('knowledge', 'Return compact JSON with fields claimed_knowledge_cutoff and answers. The answers object must contain gpt_4_1_announcement and python_3_13_0_release as YYYY-MM-DD dates. Answer without browsing and use null if unsure. Do not claim the cutoff proves model identity.');
-            output.knowledge = { raw: value.text.slice(0, 32_000), selfReportedCutoffOnly: true, ...scoreKnowledgeOutput(value.text) };
-        }
         if (run.tests.includes('modeltrace') && bank) {
             const values = [];
             for (const challenge of modelTraceChallenges()) {

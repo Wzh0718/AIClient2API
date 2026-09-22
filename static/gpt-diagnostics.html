@@ -13,7 +13,7 @@
   <header class="page-header">
     <a class="back" href="request-audit.html">← 返回请求记录</a>
     <div class="heading-row"><h1>GPT 质量检测</h1><span class="eyebrow">凭据诊断</span></div>
-    <p class="muted">选择凭据与模型，比较知识时间和 ModelTrace 指纹。</p>
+    <p class="muted">选择可用凭据，对固定 Codex 模型组逐一执行 ModelTrace 闭集指纹归因。</p>
   </header>
 
   <section class="panel" aria-labelledby="config-title">
@@ -33,14 +33,13 @@
         <p class="field-help">固定所选凭据执行，不切换至其他凭据。</p>
       </div>
       <div class="field">
-        <label for="shared-model">统一模型</label>
-        <input id="shared-model" list="shared-model-options" placeholder="选择或输入模型 ID" autocomplete="off" disabled>
-        <datalist id="shared-model-options"></datalist>
-        <p class="field-help">候选来自配置，不代表实时可用性；也可输入自定义模型 ID。</p>
+        <label id="fixed-models-label">固定模型组</label>
+        <div id="fixed-models" class="model-chips" aria-labelledby="fixed-models-label"><span class="muted">正在加载…</span></div>
+        <p class="field-help">每个凭据对以上模型逐一执行指纹检测，无需选择模型。</p>
       </div>
     </div>
     <div id="target-list" class="target-list"></div>
-    <div class="tests-line"><span class="muted">检测内容</span><span class="test-tag">知识时间</span><span class="test-tag">ModelTrace 指纹</span></div>
+    <div class="tests-line"><span class="muted">检测内容</span><span class="test-tag">ModelTrace 指纹（闭集归因）</span></div>
     <div class="action-bar">
       <div><strong id="budget">正在加载检测预算…</strong><p class="field-help">输出预算为上限，非实际消耗；真实请求按目标串行执行。</p></div>
       <button id="start" class="primary" disabled>开始检测</button>
@@ -59,7 +58,7 @@
     <div class="section-heading"><h2 id="history-title">检测历史</h2><span id="history-count" class="muted"></span></div>
     <div id="history-runs"><p class="empty">正在加载记录…</p></div>
   </section>
-  <footer class="page-note">结果仅用于诊断，不会自动停用凭据。知识截止时间为模型自报；ModelTrace 闭集归因不证明模型身份。</footer>
+  <footer class="page-note">结果仅用于诊断，不会自动停用凭据。ModelTrace 闭集归因不证明模型身份。</footer>
 </main>
 </body>
 </html>

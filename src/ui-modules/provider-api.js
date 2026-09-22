@@ -244,6 +244,7 @@ export async function handleGetProviders(req, res, currentConfig, providerPoolMa
         for (const [type, providers] of Object.entries(providerPoolManager.providerStatus)) {
             providerStatus[type] = providers.map(p => ({
                 ...p.config,
+                ...getProviderUiAvailability(p.config),
                 activeRequests: p.state?.activeCount || 0,
                 waitingRequests: p.state?.waitingCount || 0
             }));
@@ -263,6 +264,7 @@ export async function handleGetProviders(req, res, currentConfig, providerPoolMa
                     if (fileProviders.length > 0) {
                         providerStatus[type] = fileProviders.map(p => ({
                             ...p,
+                            ...getProviderUiAvailability(p),
                             activeRequests: 0,
                             waitingRequests: 0
                         }));
