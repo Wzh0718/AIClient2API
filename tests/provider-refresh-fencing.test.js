@@ -278,6 +278,25 @@ describe('provider refresh fencing', () => {
                 needsRefresh: true,
                 refreshCount: 2,
                 lastHealthStateTime: new Date(Date.now() - 11 * 60 * 1000).toISOString()
+            }, {
+                uuid: 'disabled',
+                isHealthy: true,
+                isDisabled: true,
+                needsRefresh: true,
+                refreshCount: 0,
+                lastHealthStateTime: new Date(Date.now() - 11 * 60 * 1000).toISOString()
+            }, {
+                uuid: 'queued',
+                isHealthy: true,
+                needsRefresh: true,
+                refreshCount: 0,
+                lastHealthStateTime: new Date(Date.now() - 11 * 60 * 1000).toISOString()
+            }, {
+                uuid: 'fence-waiting',
+                isHealthy: true,
+                needsRefresh: true,
+                refreshCount: 0,
+                lastHealthStateTime: new Date(Date.now() - 11 * 60 * 1000).toISOString()
             }]
         }, { persistenceEnabled: false });
         const byId = Object.fromEntries(manager.providerStatus.test.map(p => [p.uuid, p.config]));
@@ -290,14 +309,26 @@ describe('provider refresh fencing', () => {
         byId.retrying.needsRefresh = true;
         byId.retrying.refreshCount = 2;
         byId.retrying.lastHealthStateTime = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+        for (const uuid of ['disabled', 'queued', 'fence-waiting']) {
+            byId[uuid].needsRefresh = true;
+            byId[uuid].refreshCount = 0;
+            byId[uuid].lastHealthStateTime = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+        }
+        manager.refreshingUuids.add('queued');
+        manager.refreshRetryTimers.set('fence-waiting', {});
         const refreshSpy = jest.fn(async () => true);
         manager.refreshNode = refreshSpy;
 
-        manager._sweepStuckNeedsRefresh();
+        const result = manager.sweepStuckNeedsRefresh();
 
         expect(refreshSpy).toHaveBeenCalledWith('test', 'stuck', true);
         expect(refreshSpy).not.toHaveBeenCalledWith('test', 'fresh', true);
         expect(refreshSpy).not.toHaveBeenCalledWith('test', 'retrying', true);
+        expect(refreshSpy).not.toHaveBeenCalledWith('test', 'disabled', true);
+        expect(refreshSpy).not.toHaveBeenCalledWith('test', 'queued', true);
+        expect(refreshSpy).not.toHaveBeenCalledWith('test', 'fence-waiting', true);
+        expect(result).toEqual({ requeued: 1, skippedQueued: 1, skippedFenceRetry: 1 });
+        expect(byId.stuck).toMatchObject({ isHealthy: true, needsRefresh: true, refreshCount: 0 });
         refreshSpy.mockRestore();
     });
 

@@ -2222,12 +2222,18 @@ export class ProviderPoolManager {
         this.refreshRetryTimers.set(uuid, timer);
     }
 
+    sweepStuckNeedsRefresh(now = Date.now()) {
+        return this._sweepStuckNeedsRefresh(now);
+    }
+
     /**
      * Re-queue credentials that were marked needsRefresh but never actually started
      * a refresh (refreshCount stays 0) for longer than the stuck threshold.
      * @private
      */
     _sweepStuckNeedsRefresh(now = Date.now()) {
+        const result = { requeued: 0, skippedQueued: 0, skippedFenceRetry: 0 };
+        if (this.refreshShutdownRequested) return result;
         for (const providerType in this.providerStatus) {
             for (const providerStatus of this.providerStatus[providerType] || []) {
                 const config = providerStatus.config;
@@ -2238,10 +2244,20 @@ export class ProviderPoolManager {
                     Number(config.lastRefreshAttemptTime || 0)
                 );
                 if (lastActivity > 0 && (now - lastActivity) < STUCK_NEEDS_REFRESH_SWEEP_MS) continue;
-                this._log('warn', `Sweeping stuck needsRefresh for ${this._getDisplayName(config)} (${providerType})`);
+                if (this.refreshingUuids.has(config.uuid)) {
+                    result.skippedQueued++;
+                    continue;
+                }
+                if (this.refreshRetryTimers.has(config.uuid)) {
+                    result.skippedFenceRetry++;
+                    continue;
+                }
+                this._log('warn', `Re-enqueuing stuck needsRefresh for ${this._getDisplayName(config)} (${providerType})`);
                 this.refreshNode(providerType, config.uuid, true);
+                result.requeued++;
             }
         }
+        return result;
     }
 
     /**

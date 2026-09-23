@@ -12,6 +12,7 @@ import { getTLSSidecar } from '../utils/tls-sidecar.js';
 import { HEALTH_CHECK } from '../utils/constants.js';
 import { startCodexPrewarmService } from './codex-prewarm-service.js';
 import { startUsageCacheAutoRefreshService } from './usage-cache-auto-refresh-service.js';
+import { startProviderRefreshRecoveryService } from './provider-refresh-recovery-service.js';
 import { createAsyncActivityTracker, createStartupShutdownGate } from './async-activity-tracker.js';
 import { createShutdownCoordinator } from './shutdown-coordinator.js';
 import { registerWorkerShutdownHandlers } from './worker-shutdown-handlers.js';
@@ -155,6 +156,7 @@ const runtimeCoordination = createRuntimeCoordination();
 let serverInstance = null;
 let codexPrewarmService = null;
 let usageCacheAutoRefreshService = null;
+let providerRefreshRecoveryService = null;
 let heartbeatTimerId = null;
 let runtimeMetricsTimerId = null;
 let runtimeHookRetryTimerId = null;
@@ -420,6 +422,12 @@ async function stopBackgroundServices() {
         const service = usageCacheAutoRefreshService;
         usageCacheAutoRefreshService = null;
         await service?.stop();
+    });
+
+    await stopOne('provider refresh recovery', async () => {
+        const service = providerRefreshRecoveryService;
+        providerRefreshRecoveryService = null;
+        service?.stop();
     });
 
     await stopOne('heartbeat and token refresh', async () => {
@@ -806,6 +814,9 @@ async function startServer() {
         }
         // 服务器完全启动后,执行初始健康检查
         const poolManager = getProviderPoolManager();
+        if (!IS_EXECUTION_WORKER && poolManager) {
+            providerRefreshRecoveryService = startProviderRefreshRecoveryService(poolManager);
+        }
         if (!IS_EXECUTION_WORKER && poolManager) {
             logger.info('[Initialization] Performing initial health checks for provider pools...');
             healthCheckActivityTracker.run(async () => poolManager.performInitialHealthChecks()).catch(error => {

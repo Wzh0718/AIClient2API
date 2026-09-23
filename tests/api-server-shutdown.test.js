@@ -413,6 +413,12 @@ describe('API server shutdown coordinator', () => {
         expect(source).toContain('const requestActivityTracker = createAsyncActivityTracker();');
         expect(source).toContain('const heartbeatActivityTracker = createAsyncActivityTracker();');
         expect(source).toContain('const healthCheckActivityTracker = createAsyncActivityTracker();');
+        expect(source).toMatch(/if \(!IS_EXECUTION_WORKER && poolManager\) \{\s*providerRefreshRecoveryService = startProviderRefreshRecoveryService\(poolManager\);/);
+        expect(source.indexOf('providerRefreshRecoveryService = startProviderRefreshRecoveryService(poolManager)'))
+            .toBeLessThan(source.indexOf('const scheduledConfig = CONFIG.SCHEDULED_HEALTH_CHECK;'));
+        expect(source).toContain("await stopOne('provider refresh recovery'");
+        expect(source.indexOf("await stopOne('provider refresh recovery'"))
+            .toBeLessThan(source.indexOf("await stopOne('provider refresh queue'"));
         expect(source).toContain('const startupShutdownGate = createStartupShutdownGate({ logger });');
         expect(source).toContain('const requestShutdown = createShutdownCoordinator({');
         expect(source).toContain('onShutdownRequested: () => startupShutdownGate.requestShutdown(),');
