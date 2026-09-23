@@ -4,24 +4,29 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+    getCodexModelIds
+} from '../src/providers/openai/codex-model-capabilities.js';
+import {
     getProviderModels
 } from '../src/providers/provider-models.js';
 
 const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 describe('codex 5.6 model registration', () => {
-    test('lists GPT-5.6 Codex models without Spark or the GPT-5.4 flagship', () => {
+    test('lists current Codex models without retired GPT-5.4 models', () => {
         const models = getProviderModels('openai-codex-oauth');
+        const codexModels = getCodexModelIds(models);
 
         expect(models).toEqual(expect.arrayContaining([
             'gpt-5.6-sol',
             'gpt-5.6-terra',
-            'gpt-5.6-luna',
-            'gpt-5.4-mini'
+            'gpt-5.6-luna'
         ]));
         expect(models).not.toContain('gpt-5.5');
         expect(models).not.toContain('gpt-5.3-codex-spark');
         expect(models).not.toContain('gpt-5.4');
+        expect(models).not.toContain('gpt-5.4-mini');
+        expect(codexModels).not.toContain('gpt-5.4-mini-fast');
         expect(models).toEqual(expect.arrayContaining([
             'gpt-image-2',
             'gpt-image-2.5-flare',

@@ -120,12 +120,12 @@ describe('Codex proxy quality gates', () => {
 
     test('treats Responses Lite requests as ordinary Responses calls', async () => {
         const service = createService();
-        const completedEvent = 'data: {"type":"response.completed","response":{"id":"r1","status":"completed","model":"gpt-5.4-mini","output":[]}}\n\n';
+        const completedEvent = 'data: {"type":"response.completed","response":{"id":"r1","status":"completed","model":"gpt-5.6-luna","output":[]}}\n\n';
         const makeStream = () => (async function* () {
             yield Buffer.from(completedEvent);
         })();
         const makeRequest = (overrides = {}) => ({
-            model: 'gpt-5.4-mini',
+            model: 'gpt-5.6-luna',
             input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
             ...overrides,
             [CODEX_FINGERPRINT_CONTEXT_KEY]: {
@@ -137,8 +137,8 @@ describe('Codex proxy quality gates', () => {
             .mockResolvedValueOnce({ status: 200, headers: {}, data: makeStream() });
 
         try {
-            await service.generateContent('gpt-5.4-mini', makeRequest());
-            for await (const _event of service.generateContentStream('gpt-5.4-mini', makeRequest({
+            await service.generateContent('gpt-5.6-luna', makeRequest());
+            for await (const _event of service.generateContentStream('gpt-5.6-luna', makeRequest({
                 parallel_tool_calls: true,
                 reasoning: {
                     effort: 'high',
@@ -171,7 +171,7 @@ describe('Codex proxy quality gates', () => {
         const service = createService();
 
         try {
-            const prepared = await service.prepareRequestBody('gpt-5.4-mini', {
+            const prepared = await service.prepareRequestBody('gpt-5.6-luna', {
                 input: [{ role: 'user', content: 'hello' }],
                 parallel_tool_calls: true,
                 reasoning: { effort: 'high', summary: 'detailed', context: 'current_turn' }
@@ -395,7 +395,7 @@ describe('Codex proxy quality gates', () => {
         const promptCacheOptions = { retention: '24h', nested: { mode: 'private-value' } };
 
         try {
-            const prepared = await service.prepareRequestBody('gpt-5.4-mini', {
+            const prepared = await service.prepareRequestBody('gpt-5.6-luna', {
                 input: [{ role: 'user', content: 'secret prompt' }],
                 prompt_cache_options: promptCacheOptions
             }, true);
@@ -465,14 +465,14 @@ describe('Codex proxy quality gates', () => {
         const service = createService();
         const options = { retention: 'private-retention-value' };
         const request = {
-            model: 'gpt-5.4-mini',
+            model: 'gpt-5.6-luna',
             input: [{ role: 'user', content: [{ type: 'input_text', text: 'secret prompt' }] }],
             prompt_cache_options: options,
             [CODEX_FINGERPRINT_CONTEXT_KEY]: { inboundCodexHeaders: {}, originalClientSessionId: '' }
         };
 
         try {
-            await expect(service.generateContent('gpt-5.4-mini', request)).rejects.toBeTruthy();
+            await expect(service.generateContent('gpt-5.6-luna', request)).rejects.toBeTruthy();
             expect(axios.request.mock.calls[0][0].data.prompt_cache_options).toBe(options);
             expect(presenceSpy).toHaveBeenCalledTimes(1);
             expect(errorSpy).toHaveBeenCalledWith(expect.objectContaining({
@@ -505,14 +505,14 @@ describe('Codex proxy quality gates', () => {
         axios.request.mockRejectedValueOnce(upstreamError);
         const service = createService();
         const request = {
-            model: 'gpt-5.4-mini',
+            model: 'gpt-5.6-luna',
             input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }]
         };
 
         try {
             let thrown;
             try {
-                for await (const _event of service.generateContentStream('gpt-5.4-mini', request)) {}
+                for await (const _event of service.generateContentStream('gpt-5.6-luna', request)) {}
             } catch (error) {
                 thrown = error;
             }

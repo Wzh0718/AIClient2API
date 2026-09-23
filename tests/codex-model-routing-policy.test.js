@@ -7,12 +7,10 @@ import {
 
 describe('Codex entry model routing policy', () => {
     test.each(['gpt-5.4-mini', 'gpt-5.4-mini-fast'])(
-        'keeps GPT-5.4 mini family %s unchanged',
+        'rejects retired GPT-5.4 mini model %s',
         model => {
-            expect(resolveCodexEntryModel({ model, supported: true })).toEqual({
-                actualModel: model,
-                reason: null
-            });
+            expect(() => resolveCodexEntryModel({ model, supported: false }))
+                .toThrow(`[Codex] 不支持的模型: ${model}`);
         }
     );
 

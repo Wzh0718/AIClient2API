@@ -46,7 +46,7 @@ function createService(overrides = {}) {
 
 function requestBody(sessionId = 'client-session-a') {
     return {
-        model: 'gpt-5.4-mini',
+        model: 'gpt-5.6-luna',
         input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
         client_metadata: {
             session_id: sessionId,
@@ -84,7 +84,7 @@ describe('Codex OAuth fingerprint request integration', () => {
         }];
 
         try {
-            await service.generateContent('gpt-5.4-mini', body);
+            await service.generateContent('gpt-5.6-luna', body);
             expect(axios.request.mock.calls[0][0].data.input[0]).toEqual({
                 type: 'reasoning',
                 encrypted_content: 'opaque-test-value',
@@ -101,7 +101,7 @@ describe('Codex OAuth fingerprint request integration', () => {
             .mockResolvedValueOnce(completedResponse());
         const service = createService({ CODEX_RATE_LIMIT_RETRY_DELAY_MS: 0 });
         try {
-            await expect(service.generateContent('gpt-5.4-mini', requestBody())).resolves.toMatchObject({
+            await expect(service.generateContent('gpt-5.6-luna', requestBody())).resolves.toMatchObject({
                 type: 'response.completed'
             });
             expect(axios.request).toHaveBeenCalledTimes(2);
@@ -136,7 +136,7 @@ describe('Codex OAuth fingerprint request integration', () => {
         }];
 
         try {
-            await service.generateContent('gpt-5.4-mini', body);
+            await service.generateContent('gpt-5.6-luna', body);
             expect(axios.request).toHaveBeenCalledTimes(2);
             expect(axios.request.mock.calls[0][0].data.input[0].namespace).toBeUndefined();
             expect(axios.request.mock.calls[1][0].data.input[0].namespace).toBeUndefined();
@@ -161,7 +161,7 @@ describe('Codex OAuth fingerprint request integration', () => {
         const service = createService();
 
         try {
-            await expect(service.generateContent('gpt-5.4-mini', requestBody())).rejects.toBeTruthy();
+            await expect(service.generateContent('gpt-5.6-luna', requestBody())).rejects.toBeTruthy();
             expect(axios.request).toHaveBeenCalledTimes(1);
         } finally {
             service.stopCacheCleanup();
@@ -173,7 +173,7 @@ describe('Codex OAuth fingerprint request integration', () => {
         const service = createService();
 
         try {
-            await service.generateContent('gpt-5.4-mini', requestBody());
+            await service.generateContent('gpt-5.6-luna', requestBody());
             const request = axios.request.mock.calls[0][0];
             const embeddedHeader = JSON.parse(request.headers['x-codex-turn-metadata']);
             const embeddedBody = JSON.parse(request.data.client_metadata['x-codex-turn-metadata']);
@@ -202,7 +202,7 @@ describe('Codex OAuth fingerprint request integration', () => {
         const service = createService();
 
         try {
-            await service.generateContent('gpt-5.4-mini', requestBody());
+            await service.generateContent('gpt-5.6-luna', requestBody());
             expect(axios.request).toHaveBeenCalledTimes(2);
             expect(axios.request.mock.calls[0][0].data.client_metadata.turn_id)
                 .toBe(axios.request.mock.calls[1][0].data.client_metadata.turn_id);
@@ -217,7 +217,7 @@ describe('Codex OAuth fingerprint request integration', () => {
         const body = requestBody('original-session');
 
         try {
-            await service.generateContent('gpt-5.4-mini', body);
+            await service.generateContent('gpt-5.6-luna', body);
             const request = axios.request.mock.calls[0][0];
             expect(request.headers['Session-Id']).toBe('original-session');
             expect(request.headers['session-id']).toBeUndefined();
@@ -238,7 +238,7 @@ describe('Codex OAuth fingerprint request integration', () => {
         };
 
         try {
-            await service.generateContent('gpt-5.4-mini', body);
+            await service.generateContent('gpt-5.6-luna', body);
             const headers = axios.request.mock.calls[0][0].headers;
             expect(headers['Session-Id']).toBe('underscore-session');
             expect(headers.session_id).toBeUndefined();
@@ -255,8 +255,8 @@ describe('Codex OAuth fingerprint request integration', () => {
         const second = createService({ uuid: 'account-b', codexAccountKey: 'stable-account-b' });
 
         try {
-            await first.generateContent('gpt-5.4-mini', sharedBody);
-            await second.generateContent('gpt-5.4-mini', sharedBody);
+            await first.generateContent('gpt-5.6-luna', sharedBody);
+            await second.generateContent('gpt-5.6-luna', sharedBody);
             const firstRequest = axios.request.mock.calls[0][0];
             const secondRequest = axios.request.mock.calls[1][0];
             expect(firstRequest.headers['x-codex-installation-id']).not.toBe(secondRequest.headers['x-codex-installation-id']);
