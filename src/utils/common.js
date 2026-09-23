@@ -81,6 +81,22 @@ const DEFAULT_MAX_UPSTREAM_ATTEMPTS_PER_REQUEST = 3;
 const DEFAULT_ANTIGRAVITY_CAPACITY_MAX_UPSTREAM_ATTEMPTS = 6;
 const DEFAULT_HIGH_RETRY_MAX_UPSTREAM_ATTEMPTS = 20;
 const DEFAULT_CREDENTIAL_SWITCH_MAX_RETRIES = 5;
+const GEMINI_MALFORMED_FUNCTION_CALL_MAX_RETRIES = 2;
+
+function throwIfGeminiResponseFailed(response, provider) {
+    if (!isGeminiDiagnosticsProvider(provider)) return;
+    const strategy = ProviderStrategyFactory.getStrategy(getProtocolPrefix(provider));
+    const failure = strategy.classifyResponseFailure(response);
+    if (!failure) return;
+    const error = new Error(`[${provider}] Upstream returned ${failure.code}.`);
+    error.code = failure.code;
+    error.status = 502;
+    error.origin = 'upstream_response';
+    error.skipErrorCount = true;
+    error.shouldSwitchCredential = true;
+    error.isGeminiMalformedFunctionCall = true;
+    throw error;
+}
 
 function normalizeRetryBudgetModel(model) {
     const normalized = String(model || '').trim().toLowerCase();
@@ -2222,6 +2238,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 logger.info('[Stream] Stopping iteration due to client disconnect');
                 break;
             }
+            throwIfGeminiResponseFailed(nativeChunk, toProvider);
             if (includeAntigravityModelMetadata) {
                 antigravityRequestModel = normalizeResponseModelValue(requestBody?.model)
                     || antigravityRequestModel
@@ -2517,12 +2534,14 @@ export async function handleStreamRequest(res, service, model, requestBody, from
             retryContext,
             CONFIG,
             currentRetry,
-            maxRetries,
+            maxRetries: error.isGeminiMalformedFunctionCall
+                ? Math.min(maxRetries, GEMINI_MALFORMED_FUNCTION_CALL_MAX_RETRIES)
+                : maxRetries,
             providerPoolManager
         });
         if (shouldSwitchNow) {
             const isCodexTransient = isCodexTransientCredentialError(error);
-            const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity;
+            const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity || error.isGeminiMalformedFunctionCall;
             if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
             const failedCredentialUuids = [
                 ...(retryContext?.failedCredentialUuids || []),
@@ -2854,6 +2873,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             stream: false
         }) : null;
         const nativeResponse = await service.generateContent(model, requestBody);
+        throwIfGeminiResponseFailed(nativeResponse, toProvider);
         const antigravityRequestModel = isAntigravityProvider(toProvider)
             ? normalizeResponseModelValue(requestBody?.model) || normalizeResponseModelValue(model)
             : null;
@@ -3037,12 +3057,14 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
             retryContext,
             CONFIG,
             currentRetry,
-            maxRetries,
+            maxRetries: error.isGeminiMalformedFunctionCall
+                ? Math.min(maxRetries, GEMINI_MALFORMED_FUNCTION_CALL_MAX_RETRIES)
+                : maxRetries,
             providerPoolManager
         });
         if (shouldSwitchNow) {
             const isCodexTransient = isCodexTransientCredentialError(error);
-            const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity;
+            const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity || error.isGeminiMalformedFunctionCall;
             if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
             const failedCredentialUuids = [
                 ...(retryContext?.failedCredentialUuids || []),
@@ -3248,6 +3270,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
 
         // 使用新方法创建符合 fromProvider 格式的错误响应
         normalizeAntigravityCapacityExhaustion(error, toProvider, model);
+        if (error.isGeminiMalformedFunctionCall) recordTerminalRequestFailure(error);
         const errorResponse = createErrorResponse(error, fromProvider);
         const statusCode = getNumericHttpStatus(error) ?? 500;
         await handleUnifiedResponse(

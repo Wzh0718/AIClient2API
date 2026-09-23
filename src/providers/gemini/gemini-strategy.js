@@ -27,6 +27,14 @@ class GeminiStrategy extends ProviderStrategy {
         return '';
     }
 
+    classifyResponseFailure(response) {
+        const candidates = response?.candidates || response?.response?.candidates;
+        if (!Array.isArray(candidates)) return null;
+        return candidates.some(candidate => candidate?.finishReason === 'MALFORMED_FUNCTION_CALL')
+            ? { code: 'MALFORMED_FUNCTION_CALL' }
+            : null;
+    }
+
     extractPromptText(requestBody) {
         if (requestBody.contents && requestBody.contents.length > 0) {
             const lastContent = requestBody.contents[requestBody.contents.length - 1];

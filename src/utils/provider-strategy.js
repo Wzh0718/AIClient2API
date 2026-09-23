@@ -39,6 +39,10 @@ export class ProviderStrategy {
         throw new Error("Method 'extractResponseText()' must be implemented.");
     }
 
+    classifyResponseFailure(_response) {
+        return null;
+    }
+
     /**
      * Extracts prompt text from the request body.
      * @param {object} requestBody - Request body object.
