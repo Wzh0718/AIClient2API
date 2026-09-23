@@ -43,6 +43,10 @@ function ensureBucket(map, key) {
 
 function summarizeDurations(events = []) {
     const values = events
+        .filter(event => {
+            const value = event?.response?.durationMs;
+            return (typeof value === 'number' || typeof value === 'string') && String(value).trim() !== '';
+        })
         .map(event => Number(event?.response?.durationMs))
         .filter(value => Number.isFinite(value) && value >= 0)
         .sort((a, b) => a - b);
@@ -388,17 +392,19 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
         const summaryFilters = { ...filters };
         delete summaryFilters.cursor;
         delete summaryFilters.limit;
-        const sqliteAvailable = Boolean(gptRequestStore?.queryAll);
-        const events = sqliteAvailable
+        const aggregated = gptRequestStore?.querySummary?.(summaryFilters);
+        const sqliteAvailable = Boolean(aggregated || gptRequestStore?.queryAll);
+        const events = aggregated ? [] : sqliteAvailable
             ? gptRequestStore.queryAll(summaryFilters)
             : await store.query({ ...summaryFilters, limit: 2000 });
-        const diagnostics = await materialized.readDiagnostics({ requestIds: requestIds(events) });
+        const ids = aggregated ? gptRequestStore.queryRequestIds(summaryFilters) : requestIds(events);
+        const diagnostics = await materialized.readDiagnostics({ requestIds: ids });
         const freshness = await materialized.readFreshness();
         sendJson(res, 200, {
             success: true,
             data: {
                 window: { since: filters.since || null, until: filters.until || null },
-                ...buildAuditSummary(events),
+                ...(aggregated || buildAuditSummary(events)),
                 meta: {
                     source: sqliteAvailable ? 'gpt_requests_sqlite' : 'jsonl_fallback',
                     retentionDays: Number(config.GPT_REQUEST_AUDIT_RETENTION_DAYS || 7),
@@ -419,7 +425,8 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
                 success: true,
                 data: {
                     requests: result.requests.map(event => ({ ...event, diagnosis: diagnostics[event.requestId] || null })),
-                    nextCursor: result.nextCursor
+                    nextCursor: result.nextCursor,
+                    pagination: { supported: true }
                 }
             });
             return true;
@@ -429,6 +436,7 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
         sendJson(res, 200, {
             success: true,
             data: {
+                pagination: { supported: false },
                 requests: events.map(event => ({
                     ...event,
                     diagnosis: diagnostics[event.requestId] || null

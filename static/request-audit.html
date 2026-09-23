@@ -713,18 +713,40 @@
     .card-head h2, .request-header h2 { margin: 0; font-size: 17px; }
     .request-card { overflow: hidden; }
     .request-header { padding: 18px 20px; border-bottom: 1px solid var(--border-color); }
-    .request-table-wrap { overflow: hidden; }
-    .request-table { width: 100%; min-width: 0; table-layout: fixed; border-collapse: collapse; }
-    .request-table th { padding: 12px 14px; background: var(--bg-secondary); color: var(--text-secondary); font-size: 12px; text-align: left; }
-    .request-table td { padding: 13px 14px; border-top: 1px solid var(--border-color); color: var(--text-primary); font-size: 13px; vertical-align: middle; overflow-wrap: anywhere; }
+    .request-table-wrap { overflow-x: auto; }
+    .request-table { width: 100%; min-width: 1120px; table-layout: fixed; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    .request-table th { padding: 10px 10px; background: var(--bg-secondary); color: var(--text-secondary); font-size: 12px; font-weight: 500; text-align: left; }
+    .request-table td { padding: 10px; border-top: 1px solid var(--border-color); color: var(--text-primary); font-size: 12px; vertical-align: middle; }
     .request-table tbody tr { cursor: pointer; transition: background-color .15s ease; }
     .request-table tbody tr:hover, .request-table tbody tr:focus-within { background: var(--primary-10); }
-    .request-table .time-col { width: 142px; }
-    .request-table .key-col { width: 140px; }
-    .request-table .model-col { width: 210px; }
+    .request-table th, .request-table td { border-bottom: 0; }
+    .request-table .time-col { width: 124px; white-space: nowrap; }
+    .request-table .key-col { width: 100px; }
+    .request-table .model-col { width: 190px; }
     .request-table .provider-col { width: 180px; }
-    .request-table .number-col { width: 130px; }
-    .request-table .status-col { width: 130px; }
+    .request-table .number-col { width: 100px; text-align: right; }
+    .request-table .input-col { width: 148px; text-align: right; }
+    .request-table .timing-col { width: 168px; }
+    .request-table .status-col { width: 104px; }
+    .audit-cell { display: grid; gap: 4px; min-width: 0; }
+    .audit-cell small { color: var(--text-secondary); font-size: 11px; line-height: 1.4; }
+    .audit-truncate { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .audit-model { font-family: var(--mono); }
+    .audit-timing { display: flex; flex-wrap: wrap; gap: 3px 5px; font-variant-numeric: tabular-nums; }
+    .audit-timing span { white-space: nowrap; }
+    .request-table .pill, .mobile-request-card .pill { padding: 0; border: 0; border-radius: 0; background: transparent; font-size: 12px; font-weight: 500; }
+    .request-table .pill.good, .mobile-request-card .pill.good { color: var(--success-color, #15803d); }
+    .request-table .pill.bad, .mobile-request-card .pill.bad { color: var(--danger-color, #dc2626); }
+    .request-table .pill.warn, .mobile-request-card .pill.warn { color: var(--warning-color, #b45309); }
+    .audit-pagination { padding: 12px 16px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--border-color); font-size: 12px; color: var(--text-secondary); }
+    .audit-page-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .audit-page-actions label { display: flex; align-items: center; gap: 6px; margin: 0; }
+    .audit-page-actions select { width: 68px; min-height: 32px; padding: 4px 8px; }
+    .audit-page-actions .btn { min-height: 32px; padding: 6px 10px; font-size: 12px; }
+    .audit-feedback { padding: 8px 16px; display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--text-secondary); }
+    .audit-feedback.error { color: var(--danger-color); }
+    .audit-feedback[hidden] { display: none; }
+    .stats-grid[aria-busy="true"] { opacity: .55; }
     .row-open-btn { width: 100%; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
     .mobile-request-list { display: none; }
     .empty { min-height: 220px; display: grid; place-items: center; padding: 32px; text-align: center; color: var(--text-secondary); }
@@ -737,6 +759,7 @@
     body.drawer-open { overflow: hidden; }
     .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
     .drawer.open { transform: translateX(0); }
+    .drawer[aria-hidden="true"] { visibility: hidden; }
     .drawer-header { min-height: 68px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-color); }
     .drawer-header h2 { margin: 0; font-size: 18px; }
     .drawer-content { padding: 18px; overflow-y: auto; }
@@ -756,7 +779,6 @@
       .stats-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .primary-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .advanced-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .request-table .provider-col { display: none; }
     }
     @media (max-width: 860px) {
       .audit-navbar-inner { padding: 10px 14px; }
@@ -773,6 +795,8 @@
       .mobile-request-card { padding: 14px; border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-primary); cursor: pointer; }
       .mobile-card-head, .mobile-card-row { display: flex; justify-content: space-between; gap: 12px; }
       .mobile-card-row { margin-top: 8px; color: var(--text-secondary); font-size: 12px; }
+      .mobile-card-row > * { min-width: 0; }
+      .mobile-request-card { font-variant-numeric: tabular-nums; }
       .drawer, .tool-drawer { width: 100vw; }
       .detail-grid { grid-template-columns: 1fr; }
     }
@@ -838,12 +862,12 @@
               <label>凭据 Hash<input id="credential" autocomplete="off" spellcheck="false" placeholder="sha256:..."></label>
               <label>Provider<input id="providerFilter" autocomplete="off" spellcheck="false" placeholder="openai-codex-oauth"></label>
               <label>模型不一致<select id="modelMismatch"><option value="">全部</option><option value="true">仅不一致</option></select></label>
-              <label>每页数量<input id="limit" type="number" min="1" max="500" step="1" value="100" inputmode="numeric"></label>
             </div>
           </details>
           <div class="filter-footer"><p id="statusLine" class="status-line">正在加载最近 20 分钟请求…</p><span class="muted mini">无需开启原始请求采集</span></div>
         </section>
 
+        <div id="summaryFeedback" class="audit-feedback" role="status" hidden><span id="summaryMessage"></span><button id="retrySummary" class="btn btn-secondary" type="button" hidden>重试汇总</button></div>
         <section class="stats-grid" aria-label="完整时间窗汇总">
           <div class="stat-card"><div class="label">请求数</div><div class="value" id="requestCount">0</div><small id="successRate">成功率 —</small></div>
           <div class="stat-card"><div class="label">输入 Tokens</div><div class="value" id="promptTokens">0</div><small>完整筛选窗口</small></div>
@@ -857,12 +881,13 @@
           <div class="request-header"><div><h2>最近请求</h2><p class="muted mini">点击请求打开安全详情；无需开启原始请求采集。</p></div><span id="requestCountLabel" class="pill">0 条</span></div>
           <div class="request-table-wrap">
             <table class="request-table">
-              <thead><tr><th class="time-col">时间</th><th class="key-col">Key</th><th class="model-col">模型路由</th><th class="provider-col">Provider / 账号</th><th class="number-col">输入 / 输出 / 缓存</th><th class="number-col">成本</th><th class="number-col">延迟</th><th class="status-col">状态</th></tr></thead>
-              <tbody id="requestRows"><tr><td colspan="8"><div class="empty"><div class="loading-skeleton" aria-label="正在加载"><span></span><span></span><span></span></div></div></td></tr></tbody>
+              <thead><tr><th class="time-col">时间</th><th class="key-col">Key</th><th class="provider-col">Provider / 账号</th><th class="model-col">模型</th><th class="input-col" title="总输入包含缓存命中的 Tokens">输入（含缓存）</th><th class="number-col">输出</th><th class="number-col">成本</th><th class="timing-col">耗时</th><th class="status-col">状态</th></tr></thead>
+              <tbody id="requestRows"><tr><td colspan="9"><div class="empty"><div class="loading-skeleton" aria-label="正在加载"><span></span><span></span><span></span></div></div></td></tr></tbody>
             </table>
           </div>
           <div id="mobileRequestList" class="mobile-request-list"></div>
-          <div class="load-more-wrap"><button id="loadMore" class="btn btn-secondary" type="button" hidden>加载更多</button></div>
+          <div id="listFeedback" class="audit-feedback" role="status" hidden><span id="listMessage"></span><button id="retryList" class="btn btn-secondary" type="button" hidden>重试本页</button></div>
+          <div class="audit-pagination"><span id="pageInfo" aria-live="polite">第 1 页 · 本页 0 条</span><div class="audit-page-actions"><label>每页<select id="limit"><option value="20">20</option><option value="50" selected>50</option><option value="100">100</option></select></label><button id="previousPage" class="btn btn-secondary" type="button" disabled>上一页</button><button id="nextPage" class="btn btn-secondary" type="button" disabled>下一页</button></div></div>
         </section>
       </section>
     </div>
@@ -924,9 +949,11 @@
 
     const fmt = value => Number(value || 0).toLocaleString('zh-CN');
     const formatDuration = value => {
+      if ((typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '') return '—';
       const number = Number(value);
       const seconds = number / 1000;
-      return Number.isFinite(number) && number >= 0 ? `${seconds.toFixed(seconds < 100 ? 1 : 0)} s` : '—';
+      if (!Number.isFinite(number) || number < 0) return '—';
+      return number < 1000 ? `${Math.round(number)}ms` : `${seconds.toFixed(seconds < 100 ? 1 : 0)}s`;
     };
     const fmtPct = value => `${(Number(value || 0) * 100).toFixed(2)}%`;
     const fmtUsd = value => {
@@ -1031,11 +1058,7 @@
       if (model) params.set('model', model);
       if (provider) params.set('provider', provider);
       if (outcome) params.set('outcome', outcome);
-      const limit = document.getElementById('limit').value.trim() || '200';
-      if (limit) {
-        const normalizedLimit = Math.min(Math.max(Number(limit) || 200, 1), 2000);
-        params.set('limit', String(normalizedLimit));
-      }
+      params.set('limit', document.getElementById('limit').value || '50');
       return params;
     }
 
@@ -1274,7 +1297,7 @@
       const upstreamReported = Boolean(request.upstreamResponseModel);
       if (entries.length <= 1) {
         const value = entries[0]?.[0] || fallback;
-        const note = upstreamReported ? '四阶段一致' : '请求 / 计划 / 出站一致；上游未报告 model';
+        const note = fields.every(([, value]) => Boolean(value)) ? '四阶段一致' : (upstreamReported ? '已报告阶段一致；部分阶段未记录' : '已报告阶段一致；上游未报告 model');
         return {
           compact: `<span class="pill">${escapeHtml(value)}</span>`,
           detail: `<div class="detail-box model-chain-box"><span>模型</span><strong>${escapeHtml(value)}</strong><small class="muted">${note}</small></div>`
@@ -1412,6 +1435,32 @@
       setDrawer(document.getElementById('detailDrawer'), true, trigger);
     }
 
+    function listTime(value) {
+      const date = new Date(value);
+      if (!value || !Number.isFinite(date.getTime())) return '—';
+      return `${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+    }
+
+    function listModel(event) {
+      const request = event.request || {};
+      const requested = request.requestedModel || request.model;
+      const outbound = request.outboundModel || request.actualModel;
+      const main = requested && outbound && requested !== outbound ? `${requested} → ${outbound}` : outbound || (requested ? `请求 ${requested}` : '—');
+      const known = [requested, request.plannedModel, outbound, request.upstreamResponseModel].filter(Boolean);
+      const differs = request.modelMismatch || new Set(known).size > 1;
+      const note = [differs ? '路由差异' : '', !request.upstreamResponseModel ? '上游未报告' : ''].filter(Boolean).join(' · ');
+      return `<div class="audit-cell audit-model"><span class="audit-truncate" title="${escapeHtml(main)}">${escapeHtml(main)}</span>${note ? `<small class="audit-truncate" title="${escapeHtml(note)}">${escapeHtml(note)}</small>` : ''}</div>`;
+    }
+
+    function listTiming(event) {
+      return `<div class="audit-timing"><span>总 ${formatDuration(event.response?.durationMs)}</span><span class="muted" title="从请求开始至首个下游输出，非首 Token">/ 首出 ${formatDuration(event.runtime?.stages?.clientFirstOutputMs)}</span></div>`;
+    }
+
+    function listStatus(event) {
+      const error = event.status?.outcome !== 'success' ? event.failure?.errorType || event.failure?.errorCode || '' : '';
+      return `<div class="audit-cell">${outcomePill(event)}${error ? `<small class="audit-truncate" title="${escapeHtml(error)}">${escapeHtml(error)}</small>` : ''}</div>`;
+    }
+
     function renderRequests(requests) {
       const body = document.getElementById('requestRows');
       const mobile = document.getElementById('mobileRequestList');
@@ -1421,28 +1470,34 @@
 
       if (!requests || requests.length === 0) {
         const empty = '<div class="empty"><div><i class="fas fa-inbox fa-2x"></i><h3>当前筛选没有请求</h3><p>request-audit 已启用；可扩大时间范围或清除高级筛选。</p></div></div>';
-        body.innerHTML = `<tr><td colspan="8">${empty}</td></tr>`;
+        body.innerHTML = `<tr><td colspan="9">${empty}</td></tr>`;
         mobile.innerHTML = empty;
         return;
       }
 
       requests.forEach((event, index) => {
         const usage = event.usage || {};
-        const models = modelEvidence(event);
+        const models = listModel(event);
         const cost = costDisplay(event.cost);
+        const costNote = cost.missing || Number(event.cost?.estimatedUsd || 0) > 0 ? cost.sub : '';
+        const account = event.account?.providerNameDisplay || event.account?.accountEmail || '未知账号';
+        const provider = event.request?.toProvider || '—';
+        const key = event.potluckKey?.name || event.potluckKey?.prefix || '未命名';
+        const providerHtml = `<div class="audit-cell"><span class="audit-truncate" title="${escapeHtml(account)}">${escapeHtml(account)}</span><small class="audit-truncate" title="${escapeHtml(provider)}">${escapeHtml(provider)}</small></div>`;
         const tr = document.createElement('tr');
         tr.tabIndex = 0;
         tr.dataset.index = String(index);
         tr.setAttribute('aria-label', `打开请求 ${event.requestId || index + 1} 详情`);
         tr.innerHTML = `
-          <td>${escapeHtml(shortTime(event.timestamp))}</td>
-          <td><div class="stacked-value"><strong>${escapeHtml(event.potluckKey?.name || event.potluckKey?.prefix || '未命名')}</strong><small>${escapeHtml(event.potluckKey?.hash || '')}</small></div></td>
-          <td>${models.compact}</td>
-          <td class="provider-col"><div class="stacked-value"><strong>${escapeHtml(event.request?.toProvider || '-')}</strong><small>${escapeHtml(event.account?.providerNameDisplay || event.account?.accountEmail || '-')}</small></div></td>
-          <td><div class="stacked-value"><strong>${fmt(usage.promptTokens)}</strong><small>输出 ${fmt(usage.completionTokens)} · 缓存 ${fmt(usage.cachedTokens)} · ${fmtPct(usage.cacheHitRatio)}</small></div></td>
-          <td><div class="stacked-value"><strong>${escapeHtml(cost.main)}</strong><small>${escapeHtml(cost.sub)}</small></div></td>
-          <td><div class="stacked-value"><strong>${formatDuration(event.response?.durationMs)}</strong><small>${formatDuration(event.runtime?.stages?.clientFirstOutputMs)}</small></div></td>
-          <td>${outcomePill(event)}</td>
+          <td class="time-col" title="${escapeHtml(shortTime(event.timestamp))}">${escapeHtml(listTime(event.timestamp))}</td>
+          <td><span class="audit-truncate" title="${escapeHtml(key)}">${escapeHtml(key)}</span></td>
+          <td>${providerHtml}</td>
+          <td>${models}</td>
+          <td class="input-col"><div class="audit-cell"><span>${fmt(usage.promptTokens)}</span><small>缓存 ${fmt(usage.cachedTokens)} · ${fmtPct(usage.cacheHitRatio)}</small></div></td>
+          <td class="number-col">${fmt(usage.completionTokens)}</td>
+          <td class="number-col"><div class="audit-cell"><span>${escapeHtml(cost.main)}</span>${costNote ? `<small>${escapeHtml(costNote)}</small>` : ''}</div></td>
+          <td>${listTiming(event)}</td>
+          <td>${listStatus(event)}</td>
         `;
         const open = () => openRequestDetail(event, tr);
         tr.addEventListener('click', open);
@@ -1453,7 +1508,8 @@
         const card = document.createElement('article');
         card.className = 'mobile-request-card';
         card.tabIndex = 0;
-        card.innerHTML = `<div class="mobile-card-head"><strong>${escapeHtml(event.potluckKey?.name || event.potluckKey?.prefix || '未命名 Key')}</strong>${outcomePill(event)}</div><div class="mobile-card-row"><span>${escapeHtml(shortTime(event.timestamp))}</span><span>${escapeHtml(event.request?.outboundModel || event.request?.model || '-')}</span></div><div class="mobile-card-row"><span>输入 ${fmt(usage.promptTokens)} / 输出 ${fmt(usage.completionTokens)} / 缓存 ${fmt(usage.cachedTokens)}</span><span>${escapeHtml(cost.main)}</span></div>`;
+        card.setAttribute('aria-label', `打开请求 ${event.requestId || index + 1} 详情`);
+        card.innerHTML = `<div class="mobile-card-head"><span class="audit-truncate">${escapeHtml(key)}</span>${listStatus(event)}</div><div class="mobile-card-row">${providerHtml}<span title="${escapeHtml(shortTime(event.timestamp))}">${escapeHtml(listTime(event.timestamp))}</span></div><div class="mobile-card-row">${models}</div><div class="mobile-card-row"><span>输入（含缓存） ${fmt(usage.promptTokens)} / 输出 ${fmt(usage.completionTokens)}</span><span>${escapeHtml(cost.main)} ${escapeHtml(costNote)}</span></div><div class="mobile-card-row"><span>缓存 ${fmt(usage.cachedTokens)} · ${fmtPct(usage.cacheHitRatio)}</span></div><div class="mobile-card-row">${listTiming(event)}</div>`;
         card.addEventListener('click', () => openRequestDetail(event, card));
         card.addEventListener('keydown', keyboardEvent => {
           if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') { keyboardEvent.preventDefault(); openRequestDetail(event, card); }
@@ -1497,42 +1553,123 @@
       if (location.hash !== '#audit') history.replaceState(null, '', '#audit');
     }
 
-    let nextCursor = null;
-    async function loadAudit({ append = false } = {}) {
-      const button = document.getElementById('load');
-      button.disabled = true;
-      setStatus('正在查询审计数据...');
-      if (!append) {
-        document.getElementById('requestRows').innerHTML = '<tr><td colspan="8"><div class="empty"><div class="loading-skeleton" aria-label="正在加载"><span></span><span></span><span></span></div></div></td></tr>';
-        document.getElementById('mobileRequestList').innerHTML = '<div class="empty">正在加载最近请求…</div>';
-      }
+    let queryVersion = 0, listVersion = 0, summaryVersion = 0;
+    let queryParams = null, pageIndex = 0, pageCursors = [null], nextCursor = null;
+    let listController, summaryController, listBusy = false, pageReady = false, failedPage = 0;
+    let paginationSupported = true;
+
+    function queryFeedback(kind, message, error = false) {
+      const node = document.getElementById(`${kind}Feedback`);
+      node.hidden = !message;
+      node.classList.toggle('error', error);
+      document.getElementById(`${kind}Message`).textContent = message;
+      document.getElementById(kind === 'list' ? 'retryList' : 'retrySummary').hidden = !error;
+    }
+
+    function updatePager() {
+      document.getElementById('previousPage').disabled = listBusy || !pageReady || pageIndex === 0 || !paginationSupported;
+      document.getElementById('nextPage').disabled = listBusy || !pageReady || !nextCursor || !paginationSupported;
+      document.getElementById('pageInfo').textContent = pageReady
+        ? `第 ${pageIndex + 1} 页 · 本页 ${window.__auditRequests?.length || 0} 条${paginationSupported ? '' : ' · 降级数据不支持分页，结果可能不完整'}`
+        : window.__auditRequests ? '当前窗口尚未加载 · 旧结果仅供参考' : '等待查询结果';
+      document.querySelector('.request-card').setAttribute('aria-busy', String(listBusy));
+    }
+
+    async function loadPage(target = 0) {
+      if (!queryParams || target < 0 || target >= pageCursors.length) return;
+      const version = ++listVersion, query = queryVersion;
+      listController?.abort();
+      listController = new AbortController();
+      const params = new URLSearchParams(queryParams);
+      if (pageCursors[target]) params.set('cursor', pageCursors[target]);
+      listBusy = true;
+      queryFeedback('list', `正在加载第 ${target + 1} 页…`);
+      updatePager();
       try {
-        const params = await buildParams();
-        const requestParams = new URLSearchParams(params);
-        if (append && nextCursor) requestParams.set('cursor', nextCursor);
-        const [summaryResponse, requestsResponse] = await Promise.all([
-          fetchJson(`/api/request-audit/summary?${params}`),
-          fetchJson(`/api/request-audit/requests?${requestParams}`)
-        ]);
-        renderSummary(summaryResponse.data || {});
-        const requests = requestsResponse.data?.requests || [];
-        renderRequests(append ? [...(window.__auditRequests || []), ...requests] : requests);
-        window.__auditRequests = append ? [...(window.__auditRequests || []), ...requests] : requests;
-        nextCursor = requestsResponse.data?.nextCursor || null;
-        document.getElementById('loadMore').hidden = !nextCursor;
-        const windowText = [params.get('since'), params.get('until')].filter(Boolean).join(' 到 ');
-        const selected = document.getElementById('keySelect');
-        const keyText = selected.value ? selected.options[selected.selectedIndex]?.textContent?.split(' · ')[0] : '全部 Key';
-        document.getElementById('windowLabel').textContent = `${shortTime(params.get('since'))} 至 ${shortTime(params.get('until'))} · ${keyText}`;
-        setStatus(`查询完成${windowText ? `：${windowText}` : ''}`);
+        const response = await fetchJson(`/api/request-audit/requests?${params}`, { signal: listController.signal });
+        if (version !== listVersion || query !== queryVersion) return;
+        const data = response.data || {};
+        window.__auditRequests = data.requests || [];
+        renderRequests(window.__auditRequests);
+        pageIndex = target;
+        pageReady = true;
+        paginationSupported = data.pagination?.supported ?? Object.hasOwn(data, 'nextCursor');
+        nextCursor = paginationSupported ? data.nextCursor || null : null;
+        pageCursors = pageCursors.slice(0, target + 1);
+        if (nextCursor) pageCursors[target + 1] = nextCursor;
+        queryFeedback('list', '');
+        setStatus('列表已更新；汇总状态见上方。');
       } catch (error) {
-        setStatus(error.message || '查询失败', true);
-        const message = escapeHtml(error.message || '查询失败');
-        const errorState = `<div class="empty"><div><i class="fas fa-triangle-exclamation fa-2x"></i><h3>请求明细加载失败</h3><p>${message}</p><button class="btn btn-secondary" type="button" onclick="loadAudit()">重试</button></div></div>`;
-        document.getElementById('requestRows').innerHTML = `<tr><td colspan="8">${errorState}</td></tr>`;
-        document.getElementById('mobileRequestList').innerHTML = errorState;
+        if (version !== listVersion || query !== queryVersion || error.name === 'AbortError') return;
+        failedPage = target;
+        if (!window.__auditRequests) {
+          const empty = '<div class="empty">请求列表尚未加载，请重试。</div>';
+          document.getElementById('requestRows').innerHTML = `<tr><td colspan="9">${empty}</td></tr>`;
+          document.getElementById('mobileRequestList').innerHTML = empty;
+        }
+        queryFeedback('list', `${error.message || '列表加载失败'}${window.__auditRequests ? '；已保留原列表。' : ''}`, true);
       } finally {
-        button.disabled = false;
+        if (version === listVersion && query === queryVersion) { listBusy = false; updatePager(); }
+      }
+    }
+
+    async function loadSummary() {
+      if (!queryParams) return;
+      const version = ++summaryVersion, query = queryVersion;
+      summaryController?.abort();
+      summaryController = new AbortController();
+      const params = new URLSearchParams(queryParams);
+      params.delete('limit');
+      document.querySelector('.stats-grid').setAttribute('aria-busy', 'true');
+      queryFeedback('summary', '正在计算当前窗口汇总；旧数值仅供参考…');
+      try {
+        const response = await fetchJson(`/api/request-audit/summary?${params}`, { signal: summaryController.signal });
+        if (version !== summaryVersion || query !== queryVersion) return;
+        renderSummary(response.data || {});
+        queryFeedback('summary', response.data?.meta?.complete ? '' : '降级汇总：仅覆盖部分记录，不代表完整窗口。');
+      } catch (error) {
+        if (version !== summaryVersion || query !== queryVersion || error.name === 'AbortError') return;
+        queryFeedback('summary', `${error.message || '汇总加载失败'}；当前数值尚未更新。`, true);
+      } finally {
+        if (version === summaryVersion && query === queryVersion) document.querySelector('.stats-grid').setAttribute('aria-busy', 'false');
+      }
+    }
+
+    async function loadAudit() {
+      const version = ++queryVersion;
+      listController?.abort();
+      summaryController?.abort();
+      queryParams = null;
+      pageReady = false;
+      listBusy = true;
+      updatePager();
+      setStatus('正在查询审计数据…');
+      try {
+        const preset = document.querySelector('.preset-btn.active');
+        if (preset?.dataset.rangeToday) setTodayTimeRange();
+        else if (preset?.dataset.rangeMinutes) setDefaultTimeRange(Number(preset.dataset.rangeMinutes));
+        const params = await buildParams();
+        if (version !== queryVersion) return;
+        const now = new Date().toISOString();
+        if (preset || !params.get('until') || params.get('until') > now) params.set('until', now);
+        if (preset?.dataset.rangeMinutes) params.set('since', new Date(Date.parse(now) - Number(preset.dataset.rangeMinutes) * 60000).toISOString());
+        if (params.get('since') && params.get('since') >= params.get('until')) throw new Error('开始时间必须早于结束时间');
+        queryParams = params;
+        pageIndex = 0;
+        pageCursors = [null];
+        nextCursor = null;
+        const selected = document.getElementById('keySelect');
+        const keyText = selected.value ? selected.options[selected.selectedIndex]?.textContent?.split(' · ')[0] : params.has('keyHash') ? '指定 Key' : '全部 Key';
+        document.getElementById('windowLabel').textContent = `${shortTime(params.get('since')) || '不限开始时间'} 至 ${shortTime(params.get('until'))} · ${keyText}`;
+        await Promise.allSettled([loadPage(0), loadSummary()]);
+      } catch (error) {
+        if (version !== queryVersion) return;
+        listBusy = false;
+        document.querySelector('.stats-grid').setAttribute('aria-busy', 'false');
+        queryFeedback('summary', '筛选无效，旧汇总尚未更新。');
+        queryFeedback('list', '筛选无效，修改后重新查询；旧列表已保留。');
+        setStatus(error.message || '查询失败', true);
+        updatePager();
       }
     }
 
@@ -1562,7 +1699,14 @@
       }
     });
     document.getElementById('load').addEventListener('click', () => loadAudit());
-    document.getElementById('loadMore').addEventListener('click', () => loadAudit({ append: true }));
+    document.getElementById('previousPage').addEventListener('click', () => loadPage(pageIndex - 1));
+    document.getElementById('nextPage').addEventListener('click', () => loadPage(pageIndex + 1));
+    document.getElementById('retryList').addEventListener('click', () => loadPage(failedPage));
+    document.getElementById('retrySummary').addEventListener('click', loadSummary);
+    document.getElementById('limit').addEventListener('change', loadAudit);
+    for (const id of ['since', 'until']) document.getElementById(id).addEventListener('change', () => {
+      document.querySelectorAll('.preset-btn').forEach(button => button.classList.remove('active'));
+    });
     document.getElementById('saveRawCapture').addEventListener('click', saveRawCaptureSettings);
     document.querySelectorAll('.preset-btn').forEach(button => {
       button.addEventListener('click', () => {
@@ -1599,6 +1743,9 @@
         document.getElementById('rawCaptureManualHelp').textContent = '将使用手动输入的完整 key 在浏览器本地计算 hash 后保存。';
       }
     });
+    for (const id of ['keySelect', 'keyInput', 'modelFilter', 'outcome', 'since', 'until', 'clientIp', 'requestPath', 'credential', 'providerFilter', 'modelMismatch']) {
+      document.getElementById(id).addEventListener('change', () => loadAudit());
+    }
     function applyTheme(theme) {
       document.documentElement.setAttribute('data-theme', theme);
       localStorage.setItem('theme', theme);

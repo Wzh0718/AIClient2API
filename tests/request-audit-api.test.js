@@ -1,6 +1,29 @@
 import { buildAuditSummary, handleRequestAuditRoutes, setGptDiagnosticsRunner, setGptRequestStore, setRawCaptureController } from '../src/plugins/request-audit/api-routes.js';
 
 describe('request audit api aggregation', () => {
+  test('optimized SQLite summary never reads full events and diagnostics use only filtered IDs', async () => {
+    const aggregate = buildAuditSummary([{ requestId: 'only', response: { durationMs: 120 }, usage: { promptTokens: 100 } }]);
+    const querySummary = jest.fn(() => aggregate), queryAll = jest.fn(() => { throw new Error('full event scan'); });
+    const readDiagnostics = jest.fn(async () => ({ only: { primaryReason: 'fixture' } }));
+    const queryRequestIds = jest.fn(() => ['only']);
+    setGptRequestStore({ querySummary, queryAll, queryRequestIds });
+    try {
+      const payload = await callRoute('/api/request-audit/summary?keyHash=test&limit=20&cursor=ignored', {
+        _requestAuditSkipAuth: true,
+        _requestAuditStore: {},
+        _requestAuditAnalysisStore: { readDiagnostics, readFreshness: async () => ({ status: 'fresh' }) }
+      });
+      expect(queryAll).not.toHaveBeenCalled();
+      expect(querySummary.mock.calls[0][0]).not.toHaveProperty('cursor');
+      expect(querySummary.mock.calls[0][0]).not.toHaveProperty('limit');
+      expect(queryRequestIds).toHaveBeenCalledWith(querySummary.mock.calls[0][0]);
+      expect(readDiagnostics).toHaveBeenCalledWith({ requestIds: ['only'] });
+      expect(payload.data.summary).toEqual(aggregate.summary);
+      expect(payload.data.diagnosticsSummary).toEqual({ fixture: 1 });
+      expect(payload.data.meta.complete).toBe(true);
+    } finally { setGptRequestStore(null); }
+  });
+
   test('summarizes usage models accounts and context sections', () => {
     const summary = buildAuditSummary([
       {

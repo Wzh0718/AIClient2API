@@ -72,7 +72,7 @@ describe('request audit workspace source', () => {
     expect(html).not.toContain('class="insights-grid"');
     expect(html).not.toContain('id="cacheGauge"');
     expect(html).not.toContain('id="contextStack"');
-    expect(html).toContain('输入 / 输出 / 缓存');
+    expect(html).toContain('输入（含缓存）');
     expect(html).toContain('model-chain-compact');
     expect(html).toContain('toFixed(seconds < 100 ? 1 : 0)');
     expect(html).toContain('clientFirstOutputMs');

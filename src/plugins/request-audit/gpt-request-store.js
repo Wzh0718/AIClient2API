@@ -30,6 +30,15 @@ export class GptRequestStore {
         this.db = new Database(this.dbPath);
         this.db.pragma('journal_mode = WAL');
         this.db.pragma('synchronous = NORMAL');
+        this.db.function('audit_number', { deterministic: true }, value => {
+            const number = Number(value);
+            return Number.isFinite(number) ? number : 0;
+        });
+        this.db.function('audit_duration', { deterministic: true }, value => {
+            if (value == null || (typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '') return null;
+            const number = Number(value);
+            return Number.isFinite(number) && number >= 0 ? number : null;
+        });
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS gpt_requests (
                 event_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, timestamp TEXT NOT NULL,
@@ -41,6 +50,10 @@ export class GptRequestStore {
             CREATE INDEX IF NOT EXISTS idx_gpt_requests_time ON gpt_requests(timestamp DESC, request_id DESC);
             CREATE INDEX IF NOT EXISTS idx_gpt_requests_request ON gpt_requests(request_id);
             CREATE INDEX IF NOT EXISTS idx_gpt_requests_filters ON gpt_requests(key_hash, credential_hash, provider, outcome);
+            CREATE INDEX IF NOT EXISTS idx_gpt_requests_key_time ON gpt_requests(key_hash, timestamp DESC, request_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_gpt_requests_credential_time ON gpt_requests(credential_hash, timestamp DESC, request_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_gpt_requests_provider_time ON gpt_requests(provider, timestamp DESC, request_id DESC);
+            CREATE INDEX IF NOT EXISTS idx_gpt_requests_outcome_time ON gpt_requests(outcome, timestamp DESC, request_id DESC);
             CREATE TABLE IF NOT EXISTS gpt_request_attempts (
                 attempt_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, sequence INTEGER NOT NULL,
                 timestamp TEXT, provider TEXT, credential_hash TEXT, planned_model TEXT,
@@ -131,7 +144,7 @@ export class GptRequestStore {
         if (['true', '1', true].includes(filters.modelMismatch)) clauses.push('model_mismatch = 1');
         const cursor = includeCursor ? decodeCursor(filters.cursor) : null;
         if (includeCursor && cursor) {
-            clauses.push('(timestamp < @cursorTime OR (timestamp = @cursorTime AND request_id < @cursorRequestId))');
+            clauses.push('(timestamp, request_id) < (@cursorTime, @cursorRequestId)');
             params.cursorTime = cursor[0]; params.cursorRequestId = cursor[1];
         }
         return { clauses, params };
@@ -151,6 +164,69 @@ export class GptRequestStore {
         const { clauses, params } = this.buildFilter(filters, { includeCursor: false });
         const sql = `SELECT payload_json FROM gpt_requests${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY timestamp ASC, request_id ASC`;
         return this.db.prepare(sql).all(params).map(row => JSON.parse(row.payload_json));
+    }
+
+    querySummary(filters = {}) {
+        const { clauses, params } = this.buildFilter(filters, { includeCursor: false });
+        const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+        const number = expression => `CASE WHEN typeof(${expression}) = 'text' THEN audit_number(${expression}) ELSE COALESCE(${expression},0) END`;
+        const usageFields = ['promptTokens', 'cachedTokens', 'completionTokens', 'reasoningTokens', 'totalTokens'];
+        const costFields = ['usd', 'actualUsd', 'estimatedUsd', 'estimatedPriceTokens', 'missingPriceTokens'];
+        const columns = [...usageFields.map(key => `${number(`json_extract(usage, '$.${key}')`)} AS ${key}`),
+            ...costFields.map(key => `${number(`json_extract(cost, '$.${key}')`)} AS ${key}`)];
+        const usageAggregate = `COUNT(*) AS requestCount, ${usageFields.map(key => `COALESCE(SUM(${key}),0) AS ${key}`).join(', ')}`;
+        const usageJson = `json_object('requestCount',requestCount,${usageFields.map(key => `'${key}',${key}`).join(',')})`;
+        // Materialize only scalar projections. Full payloads never cross the SQLite/JS boundary.
+        const cte = `WITH raw AS MATERIALIZED (
+            SELECT jsonb_extract(payload_json,'$.usage') usage, jsonb_extract(payload_json,'$.cost') cost,
+                COALESCE(NULLIF(json_extract(payload_json,'$.request.model'),''),'unknown') AS model,
+                COALESCE(NULLIF(json_extract(payload_json,'$.account.accountEmail'),''),NULLIF(json_extract(payload_json,'$.account.providerNameDisplay'),''),
+                    NULLIF(json_extract(payload_json,'$.account.providerUuidHash'),''),NULLIF(json_extract(payload_json,'$.account.providerUuid'),''),'unknown') AS account,
+                COALESCE(NULLIF(outcome,''),'unknown') AS outcome,
+                jsonb_extract(payload_json,'$.contextBreakdown.sections') AS sections,
+                CASE WHEN json_type(payload_json,'$.response.durationMs') IN ('integer','real')
+                    THEN CASE WHEN json_extract(payload_json,'$.response.durationMs') >= 0 THEN json_extract(payload_json,'$.response.durationMs') END
+                    WHEN json_type(payload_json,'$.response.durationMs') = 'text' THEN audit_duration(json_extract(payload_json,'$.response.durationMs')) END AS duration,
+                json_type(payload_json,'$.cost') IN ('object','array') AS hasCost,
+                json_extract(payload_json,'$.cost.pricingSource') = 'missing' AS missingPrice
+            FROM gpt_requests${where}),
+            projected AS MATERIALIZED (SELECT ${columns.join(',')}, model, account, outcome, sections, duration, hasCost, missingPrice FROM raw),
+            ranked AS MATERIALIZED (SELECT duration, ROW_NUMBER() OVER (ORDER BY duration) rank FROM projected WHERE duration IS NOT NULL),
+            timing AS (SELECT COUNT(*) count, AVG(duration) average, MAX(duration) max FROM ranked)`;
+        const rows = this.db.prepare(`${cte}
+            SELECT 'summary' kind, '' bucket, ${usageJson} value FROM (SELECT ${usageAggregate} FROM projected)
+            UNION ALL SELECT 'models', model, ${usageJson} FROM (SELECT model, ${usageAggregate} FROM projected GROUP BY model)
+            UNION ALL SELECT 'accounts', account, ${usageJson} FROM (SELECT account, ${usageAggregate} FROM projected GROUP BY account)
+            UNION ALL SELECT 'outcomeCounts', outcome, COUNT(*) FROM projected GROUP BY outcome
+            UNION ALL SELECT 'cost','',json_object(
+                ${costFields.map(key => `'${key}',COALESCE(SUM(${key}),0)`).join(',')},
+                'missingPriceRequestCount',COALESCE(SUM(CASE WHEN hasCost AND (missingPrice OR missingPriceTokens > 0) THEN 1 ELSE 0 END),0),
+                'estimatedRequestCount',COALESCE(SUM(CASE WHEN hasCost AND NOT COALESCE(missingPrice,0) AND missingPriceTokens <= 0 AND estimatedUsd > 0 THEN 1 ELSE 0 END),0),
+                'pricedRequestCount',COALESCE(SUM(CASE WHEN hasCost AND NOT COALESCE(missingPrice,0) AND missingPriceTokens <= 0 AND estimatedUsd <= 0 THEN 1 ELSE 0 END),0)) FROM projected
+            UNION ALL SELECT 'contextSections', COALESCE(NULLIF(json_extract(section.value,'$.id'),''),'unknown') section_id,
+                json_object('tokens', SUM(${number("COALESCE(json_extract(section.value,'$.calibratedTokens'),json_extract(section.value,'$.tokens'))")}))
+                FROM projected, json_each(projected.sections) section GROUP BY section_id
+            UNION ALL SELECT 'timing','',json_object('count',count,'average',average,'max',max,
+                'p50',(SELECT duration FROM ranked WHERE rank = MAX(1, (count * 50 + 99) / 100)),
+                'p95',(SELECT duration FROM ranked WHERE rank = MAX(1, (count * 95 + 99) / 100)),
+                'p99',(SELECT duration FROM ranked WHERE rank = MAX(1, (count * 99 + 99) / 100))) FROM timing
+        `).all(params);
+        const result = { summary: {}, models: {}, accounts: {}, outcomeCounts: {}, cost: {}, contextSections: {} };
+        for (const row of rows) {
+            const value = row.kind === 'outcomeCounts' ? row.value : JSON.parse(row.value);
+            if (row.kind === 'summary' || row.kind === 'models' || row.kind === 'accounts') {
+                value.cacheHitRatio = value.promptTokens > 0 ? value.cachedTokens / value.promptTokens : 0;
+            }
+            if (row.kind === 'summary' || row.kind === 'cost' || row.kind === 'timing') result[row.kind] = value;
+            else Object.defineProperty(result[row.kind], row.bucket, { value, enumerable: true });
+        }
+        for (const section of Object.values(result.contextSections)) section.percentOfPrompt = result.summary.promptTokens > 0 ? section.tokens / result.summary.promptTokens : 0;
+        return result;
+    }
+
+    queryRequestIds(filters = {}) {
+        const { clauses, params } = this.buildFilter(filters, { includeCursor: false });
+        return this.db.prepare(`SELECT request_id FROM gpt_requests${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''}`).pluck().all(params);
     }
 
     get(requestId) {

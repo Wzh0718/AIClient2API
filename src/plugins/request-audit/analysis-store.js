@@ -14,10 +14,16 @@ function isAnalysisFile(name) {
 export class RequestAuditAnalysisStore {
     constructor({
         dir = path.join(process.cwd(), 'configs', 'request-audit-analysis'),
-        freshSeconds = 5 * 60
+        freshSeconds = 5 * 60,
+        cacheMaxFiles = 32,
+        cacheMaxBytes = 32 * 1024 * 1024
     } = {}) {
         this.dir = dir;
         this.freshSeconds = Number(freshSeconds) || 300;
+        this.cacheMaxFiles = cacheMaxFiles;
+        this.cacheMaxBytes = cacheMaxBytes;
+        this.fileCache = new Map();
+        this.cacheBytes = 0;
     }
 
     getFilePath(timestamp = new Date()) {
@@ -36,30 +42,68 @@ export class RequestAuditAnalysisStore {
             .map(item => JSON.stringify({ ...item, generatedAt }))
             .join('\n');
         await fsp.writeFile(filePath, content ? `${content}\n` : '', { encoding: 'utf8', mode: 0o600 });
+        this.evictFile(filePath);
         await fsp.writeFile(this.getLatestPath(), JSON.stringify({
             generatedAt,
             count: diagnostics.length
         }, null, 2), { encoding: 'utf8', mode: 0o600 });
     }
 
-    async readDiagnostics({ requestIds = [] } = {}) {
-        if (!fs.existsSync(this.dir)) return {};
-        const wanted = new Set(requestIds.filter(Boolean));
-        const files = await this.listFiles();
-        const result = {};
+    evictFile(filePath) {
+        this.cacheBytes -= this.fileCache.get(filePath)?.bytes || 0;
+        this.fileCache.delete(filePath);
+    }
 
+    async readAnalysisFile(filePath) {
+        const stat = await fsp.stat(filePath).catch(() => null);
+        if (!stat) { this.evictFile(filePath); return new Map(); }
+        const signature = `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+        const cached = this.fileCache.get(filePath);
+        if (cached?.signature === signature) {
+            this.fileCache.delete(filePath);
+            this.fileCache.set(filePath, cached);
+            return cached.items;
+        }
+        this.evictFile(filePath);
+        const content = await fsp.readFile(filePath, 'utf8').catch(() => null);
+        const items = new Map();
+        if (content === null) return items;
+        for (const line of content.split(/\r?\n/)) {
+            if (!line.trim()) continue;
+            try {
+                const item = JSON.parse(line);
+                if (item.requestId) items.set(item.requestId, item);
+            } catch { /* Incomplete or malformed analysis rows are ignored. */ }
+        }
+        // Account for parsed objects as well as source text; never retain an oversized file.
+        const bytes = Buffer.byteLength(content) * 4 + items.size * 128;
+        const after = await fsp.stat(filePath).catch(() => null);
+        if (after && signature === `${after.size}:${after.mtimeMs}:${after.ctimeMs}` && bytes <= this.cacheMaxBytes && this.cacheMaxFiles > 0) {
+            while (this.fileCache.size && (this.fileCache.size >= this.cacheMaxFiles || this.cacheBytes + bytes > this.cacheMaxBytes)) {
+                this.evictFile(this.fileCache.keys().next().value);
+            }
+            // A concurrent reader may have populated the same entry while we awaited IO.
+            this.evictFile(filePath);
+            this.fileCache.set(filePath, { signature, bytes, items });
+            this.cacheBytes += bytes;
+        }
+        return items;
+    }
+
+    async readDiagnostics({ requestIds = [], all = false } = {}) {
+        if (!all && requestIds.length === 0) return {};
+        const wanted = new Set(requestIds.filter(Boolean));
+        if (!all && wanted.size === 0) return {};
+        const files = await this.listFiles();
+        const present = new Set(files);
+        for (const filePath of this.fileCache.keys()) if (!present.has(filePath)) this.evictFile(filePath);
+        const result = {};
         for (const filePath of files) {
-            const content = await fsp.readFile(filePath, 'utf8').catch(() => '');
-            for (const line of content.split(/\r?\n/)) {
-                if (!line.trim()) continue;
-                try {
-                    const item = JSON.parse(line);
-                    if (!item.requestId) continue;
-                    if (wanted.size > 0 && !wanted.has(item.requestId)) continue;
-                    result[item.requestId] = item;
-                } catch (_error) {
-                    // Ignore malformed materialized analysis rows.
-                }
+            const items = await this.readAnalysisFile(filePath);
+            if (all) {
+                for (const [id, item] of items) Object.defineProperty(result, id, { value: item, enumerable: true, configurable: true });
+            } else {
+                for (const id of wanted) if (items.has(id)) Object.defineProperty(result, id, { value: items.get(id), enumerable: true, configurable: true });
             }
         }
         return result;
