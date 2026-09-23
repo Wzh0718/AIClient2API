@@ -38,7 +38,7 @@ describe('api potluck cost estimator', () => {
         expect(cost.actualUsd).toBeCloseTo(1.065, 6);
         expect(cost.convertedUsd).toBeCloseTo(0.496, 6);
         expect(cost.conversionModel).toBe('gemini-2.5-flash');
-        expect(cost.pricingVersion).toBe('official-2026-09-05-codex-rules-r1');
+        expect(cost.pricingVersion).toBe('official-2026-09-22-gpt6-sol-luna-r1');
         expect(cost.missingPriceTokens).toBe(0);
     });
 

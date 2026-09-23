@@ -953,7 +953,7 @@ describe('api potluck key usage summary', () => {
             actualUsd: expect.closeTo(1.065, 6),
             convertedUsd: expect.closeTo(0.496, 6),
             conversionModel: 'gemini-2.5-flash',
-            pricingVersion: 'official-2026-09-05-codex-rules-r1',
+            pricingVersion: 'official-2026-09-22-gpt6-sol-luna-r1',
             missingPriceTokens: 0
         });
         expect(listedKey.usageHistory['2026-06-22'].summary.cost).toMatchObject({
