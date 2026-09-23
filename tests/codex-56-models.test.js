@@ -17,9 +17,9 @@ describe('codex 5.6 model registration', () => {
             'gpt-5.6-sol',
             'gpt-5.6-terra',
             'gpt-5.6-luna',
-            'gpt-5.5',
             'gpt-5.4-mini'
         ]));
+        expect(models).not.toContain('gpt-5.5');
         expect(models).not.toContain('gpt-5.3-codex-spark');
         expect(models).not.toContain('gpt-5.4');
         expect(models).toEqual(expect.arrayContaining([

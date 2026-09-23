@@ -222,6 +222,8 @@ function getFieldLabel(key) {
         'codexGeneralMax5hPercent': t('modal.provider.codexGeneralMax5hPercent') + ' ' + t('config.optional'),
         'codexGeneralMaxWeeklyPercent': t('modal.provider.codexGeneralMaxWeeklyPercent') + ' ' + t('config.optional'),
         'codexFingerprintMode': t('modal.provider.codexFingerprintMode'),
+        'codexGpt6OverrideEnabled': t('modal.provider.codexGpt6OverrideEnabled'),
+        'codexGpt6OverrideModel': t('modal.provider.codexGpt6OverrideModel'),
         'PROXY_URL': t('modal.provider.proxyUrl') + ' ' + t('config.optional'),
         'PROXY_REQUIRED': t('modal.provider.proxyRequired') + ' ' + t('config.optional'),
         'PROXY_ID': t('modal.provider.proxyId') + ' ' + t('config.optional'),
@@ -475,6 +477,28 @@ function getProviderTypeFields(providerType) {
             }
         ],
         'openai-codex-oauth': [
+            {
+                id: 'codexGpt6OverrideEnabled',
+                label: t('modal.provider.codexGpt6OverrideEnabled'),
+                type: 'select',
+                value: 'false',
+                options: [
+                    { value: 'false', label: t('modal.provider.disabled') },
+                    { value: 'true', label: t('modal.provider.enabled') }
+                ],
+                help: t('modal.provider.codexGpt6OverrideHelp')
+            },
+            {
+                id: 'codexGpt6OverrideModel',
+                label: t('modal.provider.codexGpt6OverrideModel'),
+                type: 'select',
+                value: 'gpt-6-luna',
+                options: [
+                    { value: 'gpt-6-astra', label: 'GPT-6 Astra' },
+                    { value: 'gpt-6-sol', label: 'GPT-6 Sol' },
+                    { value: 'gpt-6-luna', label: 'GPT-6 Luna' }
+                ]
+            },
             // [turn-state-disabled 2026-09-23] 同轮 Turn-State 缓存复用已停用，设置项下线
             // {
             //     id: 'codexTurnStateReuseEnabled',

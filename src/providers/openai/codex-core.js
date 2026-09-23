@@ -37,7 +37,7 @@ import requestContext from '../../utils/context.js';
 import { performance } from 'node:perf_hooks';
 import { getCodexOverloadRetryDelayMs, getCodexOverloadRetryMaxAttempts, getCodexRetryDelayMs, shouldRetryCodex429 } from './codex-retry-policy.js';
 import { extractPersistedCodexSubscriptionWindow, mergeCodexSubscriptionWindow } from '../../utils/codex-utils.js';
-import { getCodexModelIds, sanitizeCodexModelParameters, normalizeCodexReasoningEffort } from './codex-model-capabilities.js';
+import { getCodexModelIds, sanitizeCodexModelParameters, normalizeCodexReasoningEffort, resolveCodexOutboundModel, isCodexGpt6OverrideApplied } from './codex-model-capabilities.js';
 import {
     CODEX_TURN_STATE_HEADER,
     REUSABLE_CODEX_TURN_STATE_BYTES,
@@ -548,6 +548,7 @@ export class CodexApiService {
                 providerUuid: this.config.uuid || null,
                 plannedModel: selectedModel,
                 outboundModel: body.model || selectedModel,
+                modelOverrideApplied: isCodexGpt6OverrideApplied(selectedModel, this.config),
                 reasoningEffort: body.reasoning?.effort || null,
                 serviceTier: body.service_tier || null,
                 // [turn-state-disabled 2026-09-23] turnStateEnabled: fingerprintState.turnState?.enabled === true,
@@ -711,6 +712,7 @@ export class CodexApiService {
                 providerUuid: this.config.uuid || null,
                 plannedModel: selectedModel,
                 outboundModel: body.model || selectedModel,
+                modelOverrideApplied: isCodexGpt6OverrideApplied(selectedModel, this.config),
                 reasoningEffort: body.reasoning?.effort || null,
                 serviceTier: body.service_tier || null,
                 // [turn-state-disabled 2026-09-23] turnStateEnabled: fingerprintState.turnState?.enabled === true,
@@ -1015,9 +1017,11 @@ export class CodexApiService {
 
         // 图像生成模型：gpt-image-2 / Image 2.5 通过 image_generation 工具 + gpt-5.6-luna 实现
         const isImageModel = isSupportedGptImageModel(upstreamModel);
-        const effectiveUpstreamModel = isImageModel ? 'gpt-5.6-luna' : upstreamModel;
+        const effectiveUpstreamModel = isImageModel
+            ? 'gpt-5.6-luna'
+            : resolveCodexOutboundModel(upstreamModel, this.config);
 
-        const cleanedBody = sanitizeCodexModelParameters(upstreamModel, {...requestBody});
+        const cleanedBody = sanitizeCodexModelParameters(effectiveUpstreamModel, {...requestBody});
         if (fingerprintIds) {
             applyCodexFingerprintClientMetadata(cleanedBody, fingerprintIds);
         }
@@ -1136,7 +1140,7 @@ export class CodexApiService {
                 : (cleanedBody.service_tier || defaultServiceTier),
             reasoning: {
                 ...cleanedBody.reasoning,
-                effort: normalizeCodexReasoningEffort(upstreamModel, cleanedBody.reasoning?.effort, isSpeedModel) || defaultReasoningEffort,
+                effort: normalizeCodexReasoningEffort(effectiveUpstreamModel, cleanedBody.reasoning?.effort, isSpeedModel) || defaultReasoningEffort,
                 summary: cleanedBody.reasoning?.summary || 'auto'
             },
             stream,

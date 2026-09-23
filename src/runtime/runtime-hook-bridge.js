@@ -115,6 +115,7 @@ function compactMetadata(context = {}) {
         _monitorRequestId: context._monitorRequestId || context.requestId || null,
         _requestAuditLifecycle: context._requestAuditLifecycle === true,
         model: context.model || null,
+        usagePricingModel: context.usagePricingModel || null,
         fromProvider: context.fromProvider || null,
         toProvider: context.toProvider || null,
         potluckApiKey: context.potluckApiKey || null,

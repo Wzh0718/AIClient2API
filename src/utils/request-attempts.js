@@ -34,3 +34,10 @@ export function finishRequestAttempt(attempt, fields = {}) {
 export function getRequestAttempts(requestBody = {}) {
     return Array.isArray(requestBody?.[ATTEMPTS_KEY]) ? requestBody[ATTEMPTS_KEY] : [];
 }
+
+export function getSuccessfulOutboundModel(requestBody = {}, { requireOverride = false } = {}) {
+    const attempt = [...getRequestAttempts(requestBody)]
+        .reverse()
+        .find(item => item.status === 'success' && (!requireOverride || item.modelOverrideApplied === true));
+    return attempt?.upstreamResponseModel || attempt?.outboundModel || null;
+}

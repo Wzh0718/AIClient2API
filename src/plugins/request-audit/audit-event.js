@@ -169,6 +169,7 @@ function normalizeAttempts(context = {}) {
             providerUuidHash: hashSecret(attempt.providerUuid),
             plannedModel: attempt.plannedModel || null,
             outboundModel: attempt.outboundModel || null,
+            modelOverrideApplied: attempt.modelOverrideApplied === true,
             upstreamResponseModel: attempt.upstreamResponseModel || null,
             reasoningEffort: attempt.reasoningEffort || null,
             serviceTier: attempt.serviceTier || null,
@@ -242,7 +243,9 @@ export function buildRequestAuditEvent(context = {}) {
         || context._temporaryKeyModelRouteResult?.targetModel
         || requestedModel;
     const outboundModel = lastAttempt?.outboundModel || actualModel;
-    const billingModel = actualModel;
+    const billingModel = lastAttempt?.modelOverrideApplied
+        ? upstreamResponseModel || outboundModel
+        : actualModel;
     const estimatedCost = estimateUsageCost(usage, billingModel, { trackDiagnostics: false });
     const hasExtendedRouting = [
         'spilloverCause', 'groupWaitMs', 'groupRetryCount', 'fallbackAttemptCount',

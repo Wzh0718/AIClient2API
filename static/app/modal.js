@@ -411,7 +411,7 @@ function collectDraftProviderConfig(providerDetail, providerType, uuid) {
 
     configSelects.forEach(select => {
         const key = select.dataset.configKey;
-        providerConfig[key] = (key === 'PROXY_ID' || key === 'codexFingerprintMode')
+        providerConfig[key] = (key === 'PROXY_ID' || key === 'codexFingerprintMode' || key === 'codexGpt6OverrideModel')
             ? select.value
             : select.value === 'true';
     });

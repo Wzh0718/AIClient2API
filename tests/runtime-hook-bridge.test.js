@@ -219,12 +219,14 @@ describe('RuntimeHookBridge', () => {
         });
         await bridge.handle('onContentGenerated', {
             _monitorRequestId: 'req-1', model: 'model', toProvider: 'provider', providerUuid: 'uuid',
-            potluckApiKey: 'sk-potluck-test', originalRequestBody: { prompt: 'must not leave worker' }
+            potluckApiKey: 'sk-potluck-test', usagePricingModel: 'gpt-6-luna',
+            originalRequestBody: { prompt: 'must not leave worker' }
         });
 
         expect(messages).toHaveLength(1);
         expect(messages[0]).toMatchObject({ type: 'runtime_hook', hookName: 'onContentGenerated' });
         expect(messages[0].args[0]._runtimeUsage).toMatchObject({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+        expect(messages[0].args[0].usagePricingModel).toBe('gpt-6-luna');
         expect(JSON.stringify(messages)).not.toMatch(/secret prompt|secret response|originalRequestBody|b64_json/);
         expect(messages[0].args[0].potluckApiKey).toBe('sk-potluck-test');
     });

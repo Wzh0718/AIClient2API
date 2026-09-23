@@ -393,7 +393,9 @@ const apiPotluckPlugin = {
                     await incrementUsage(
                         potluckApiKey,
                         hookContext.toProvider, 
-                        hookContext.model,
+                        hookContext.toProvider === 'openai-codex-oauth'
+                            ? (hookContext.usagePricingModel || hookContext.model)
+                            : hookContext.model,
                         usage,
                         trackedRequestIds[0] || null,
                         {

@@ -21,7 +21,7 @@ import {
     extractOriginalCodexSessionId
 } from '../providers/openai/codex-fingerprint.js';
 import { resolveOriginalCodexTurnId } from '../providers/openai/codex-turn-state.js';
-import { beginRequestAttempt, finishRequestAttempt } from './request-attempts.js';
+import { beginRequestAttempt, finishRequestAttempt, getSuccessfulOutboundModel } from './request-attempts.js';
 import { matchesModelFamily } from '../providers/openai/codex-model-routing.js';
 import requestContext from './context.js';
 import { assertCodexRoutingIntegrity } from '../services/codex-routing-integrity.js';
@@ -3793,6 +3793,10 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     const finalUsageModelForAudit = temporaryRouteResult?.actualModel
         || CONFIG._codexRouteResult?.actualModel
         || finalUsageModel;
+    const usagePricingModel = (isCodexProvider(toProvider)
+        ? getSuccessfulOutboundModel(processedRequestBody, { requireOverride: true })
+        : null)
+        || finalUsageModelForAudit;
     const finalUsageAccount = resolveFinalUsageAccountContext(finalRouteResult, {
         providerUuid: actualUuid,
         providerName: actualCustomName,
@@ -3811,6 +3815,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
             toProvider: temporaryRouteResult?.actualProviderType || toProvider,
             ...finalUsageAccount,
             model: finalUsageModelForAudit,
+            usagePricingModel,
             isStream
         });
     } catch (e) { /* 静默失败，不影响主流程 */ }

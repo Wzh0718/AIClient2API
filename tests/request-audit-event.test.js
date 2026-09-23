@@ -25,6 +25,26 @@ describe('request audit event', () => {
     expect(event.cost.usd).toBeCloseTo(0.018875, 8);
   });
 
+  test('prices an overridden Codex request by the reported model and flags a downgrade', () => {
+    const event = buildRequestAuditEvent({
+      requestId: 'req-gpt6-override',
+      model: 'gpt-6-astra',
+      originalRequestBody: { model: 'gpt-5.6-sol' },
+      requestAttempts: [{
+        providerType: 'openai-codex-oauth', plannedModel: 'gpt-5.6-sol',
+        outboundModel: 'gpt-6-astra', upstreamResponseModel: 'gpt-6-luna',
+        modelOverrideApplied: true, status: 'success', httpStatus: 200
+      }],
+      usage: { promptTokens: 1000000, completionTokens: 100000, totalTokens: 1100000 },
+      response: { httpStatus: 200, completed: true }
+    });
+    expect(event.request).toMatchObject({
+      requestedModel: 'gpt-5.6-sol', outboundModel: 'gpt-6-astra',
+      upstreamResponseModel: 'gpt-6-luna', modelMismatch: true, billingModel: 'gpt-6-luna'
+    });
+    expect(event.cost.usd).toBeCloseTo(0.15, 8);
+  });
+
   test('marks unknown billing models as missing instead of reporting zero cost', () => {
     resetPricingDiagnostics();
     const event = buildRequestAuditEvent({
