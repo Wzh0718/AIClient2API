@@ -53,7 +53,16 @@ import { beginRequestAttempt, finishRequestAttempt } from '../../utils/request-a
 
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
 const CODEX_MODELS = getCodexModelIds(baseModels);
-const CODEX_VERSION = '0.154.0';
+const CODEX_VERSION = '0.156.1';
+function codexVersionForModel(model, version) {
+    if (!/^gpt-6-(?:sol|luna)$/i.test(model)) return version;
+    const parts = String(version).match(/^(\d+)\.(\d+)\.(\d+)/);
+    if (!parts) return CODEX_VERSION;
+    const [major, minor] = parts.slice(1).map(Number);
+    return major > 0 || minor >= 155
+        ? version
+        : CODEX_VERSION;
+}
 export const IMAGE_MODELS = new Set(['gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst']);
 const IMAGE_GENERATION_FUNCTION_NAMES = new Set(['image_gen.imagegen', 'image_gen__imagegen']);
 const IMAGE_TOOL_STRING_FIELDS = ['size', 'quality', 'background', 'output_format', 'input_fidelity', 'moderation'];
@@ -874,8 +883,9 @@ export class CodexApiService {
         const configuredBeta = String(this.config.CODEX_BETA_FEATURES || '').trim();
         const configuredUserAgent = String(this.config.CODEX_USER_AGENT || '').trim();
         const configuredOriginator = String(this.config.CODEX_ORIGINATOR || '').trim();
+        const version = codexVersionForModel(model, configuredVersion || getInboundHeader('version') || CODEX_VERSION);
         const headers = {
-            'version': configuredVersion || getInboundHeader('version') || CODEX_VERSION,
+            'version': version,
             'x-codex-beta-features': configuredBeta || getInboundHeader('x-codex-beta-features') || 'powershell_utf8',
             'x-oai-web-search-eligible': 'true',
             'authorization': `Bearer ${this.accessToken}`,

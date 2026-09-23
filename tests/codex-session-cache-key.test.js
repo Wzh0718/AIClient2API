@@ -35,14 +35,14 @@ afterEach(() => {
 });
 
 describe('Codex session cache key handling', () => {
-    test('uses the upstream Codex client version required for GPT-6 Astra', () => {
+    test('uses the upstream Codex client version required for GPT-6 Sol and Luna', () => {
         const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
 
         try {
             const headers = service.buildHeaders(null, false);
 
-        expect(headers.version).toBe('0.154.0');
-            expect(headers['user-agent']).toContain('codex-tui/0.154.0');
+            expect(headers.version).toBe('0.156.1');
+            expect(headers['user-agent']).toContain('codex-tui/0.156.1');
         } finally {
             service.stopCacheCleanup();
         }
