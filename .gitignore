@@ -40,3 +40,6 @@ _research/
 docs/yyn-cpa-http-vs-ws-codex-trial.md
 outputs/
 
+# Local Codex plans and isolated experiments
+/.zcode/
+/scripts/experiments/
