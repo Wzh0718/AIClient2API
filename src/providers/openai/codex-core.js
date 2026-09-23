@@ -41,11 +41,13 @@ import { getCodexModelIds, sanitizeCodexModelParameters, normalizeCodexReasoning
 import {
     CODEX_TURN_STATE_HEADER,
     REUSABLE_CODEX_TURN_STATE_BYTES,
-    captureCodexTurnState,
-    captureCodexTurnStateAsync,
+    // [turn-state-disabled 2026-09-23] 缓存复用停用，仅保留透传所需导入
+    // captureCodexTurnState,
+    // captureCodexTurnStateAsync,
     normalizeCodexTurnState,
-    resolveCodexTurnStateForRequest,
-    resolveCodexTurnStateForRequestAsync
+    // resolveCodexTurnStateForRequest,
+    // resolveCodexTurnStateForRequestAsync,
+    resolveInboundCodexTurnState
 } from './codex-turn-state.js';
 import { beginRequestAttempt, finishRequestAttempt } from '../../utils/request-attempts.js';
 
@@ -531,9 +533,10 @@ export class CodexApiService {
             providerType: this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API,
             promptCacheOptions: body.prompt_cache_options
         });
-        fingerprintState.turnState = await resolveCodexTurnStateForRequestAsync({
-            config: this.config, context: fingerprintState.context, model: body.model || selectedModel
-        });
+        // [turn-state-disabled 2026-09-23] 同轮缓存复用停用；入站头透传改在 buildHeaders 内处理
+        // fingerprintState.turnState = await resolveCodexTurnStateForRequestAsync({
+        //     config: this.config, context: fingerprintState.context, model: body.model || selectedModel
+        // });
         const headers = this.buildHeaders(body.prompt_cache_key, true, fingerprintState, body.model || selectedModel);
 
         let overloadRetryCount = 0;
@@ -547,10 +550,10 @@ export class CodexApiService {
                 outboundModel: body.model || selectedModel,
                 reasoningEffort: body.reasoning?.effort || null,
                 serviceTier: body.service_tier || null,
-                turnStateEnabled: fingerprintState.turnState?.enabled === true,
-                turnStateSource: fingerprintState.turnState?.source || 'none',
-                turnStateRequestLength: fingerprintState.turnState?.length || 0,
-                turnStateSkipReason: fingerprintState.turnState?.skipReason || null,
+                // [turn-state-disabled 2026-09-23] turnStateEnabled: fingerprintState.turnState?.enabled === true,
+                // turnStateSource: fingerprintState.turnState?.source || 'none',
+                // turnStateRequestLength: fingerprintState.turnState?.length || 0,
+                // turnStateSkipReason: fingerprintState.turnState?.skipReason || null,
                 stream: false
             });
             try {
@@ -575,7 +578,7 @@ export class CodexApiService {
                 const runtimeRequest = requestContext.get('runtimeRequest');
                 runtimeRequest?.recordStage?.('upstreamFirstByteMs', upstreamReceivedAt - upstreamStartedAt);
                 const parsed = this.parseNonStreamResponse(response.data);
-                this.captureObservedTurnState(fingerprintState, body.model || selectedModel);
+                // [turn-state-disabled 2026-09-23] this.captureObservedTurnState(fingerprintState, body.model || selectedModel);
                 const upstreamResponseModel = parsed?.model || parsed?.response?.model || null;
                 if (upstreamResponseModel) {
                     requestContext.get('runtimeRequest')?.setMetadata?.({ upstreamResponseModel });
@@ -693,9 +696,10 @@ export class CodexApiService {
             providerType: this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API,
             promptCacheOptions: body.prompt_cache_options
         });
-        fingerprintState.turnState = await resolveCodexTurnStateForRequestAsync({
-            config: this.config, context: fingerprintState.context, model: body.model || selectedModel
-        });
+        // [turn-state-disabled 2026-09-23] 同轮缓存复用停用；入站头透传改在 buildHeaders 内处理
+        // fingerprintState.turnState = await resolveCodexTurnStateForRequestAsync({
+        //     config: this.config, context: fingerprintState.context, model: body.model || selectedModel
+        // });
         const headers = this.buildHeaders(body.prompt_cache_key, true, fingerprintState, body.model || selectedModel);
 
         let overloadRetryCount = 0;
@@ -709,10 +713,10 @@ export class CodexApiService {
                 outboundModel: body.model || selectedModel,
                 reasoningEffort: body.reasoning?.effort || null,
                 serviceTier: body.service_tier || null,
-                turnStateEnabled: fingerprintState.turnState?.enabled === true,
-                turnStateSource: fingerprintState.turnState?.source || 'none',
-                turnStateRequestLength: fingerprintState.turnState?.length || 0,
-                turnStateSkipReason: fingerprintState.turnState?.skipReason || null,
+                // [turn-state-disabled 2026-09-23] turnStateEnabled: fingerprintState.turnState?.enabled === true,
+                // turnStateSource: fingerprintState.turnState?.source || 'none',
+                // turnStateRequestLength: fingerprintState.turnState?.length || 0,
+                // turnStateSkipReason: fingerprintState.turnState?.skipReason || null,
                 stream: true
             });
             const bufferedPrelude = [];
@@ -768,7 +772,7 @@ export class CodexApiService {
                 while (bufferedPrelude.length > 0) {
                     yield bufferedPrelude.shift();
                 }
-                if (sawCompleted) this.captureObservedTurnState(fingerprintState, body.model || selectedModel);
+                // [turn-state-disabled 2026-09-23] if (sawCompleted) this.captureObservedTurnState(fingerprintState, body.model || selectedModel);
                 runtimeRequest?.recordStage?.('upstreamCompleteMs', performance.now() - upstreamStartedAt);
                 finishRequestAttempt(attempt, {
                     status: 'success',
@@ -909,19 +913,22 @@ export class CodexApiService {
             applyCodexFingerprintHeaders(headers, fingerprintState.ids);
         }
 
-        const turnState = fingerprintState?.turnState || resolveCodexTurnStateForRequest({
-            config: this.config,
-            context: fingerprintState?.context || {},
-            model
-        });
-        if (fingerprintState) fingerprintState.turnState = turnState;
-        if (turnState.value) headers[CODEX_TURN_STATE_HEADER] = turnState.value;
-        requestContext.get('runtimeRequest')?.setMetadata?.({
-            codexTurnStateEnabled: turnState.enabled,
-            codexTurnStateSource: turnState.source,
-            codexTurnStateLength: turnState.length,
-            codexTurnStateSkipReason: turnState.skipReason || null
-        });
+        // [turn-state-disabled 2026-09-23] 缓存票据注入与复用观测停用，仅保留客户端 x-codex-turn-state 透明透传。
+        // const turnState = fingerprintState?.turnState || resolveCodexTurnStateForRequest({
+        //     config: this.config,
+        //     context: fingerprintState?.context || {},
+        //     model
+        // });
+        // if (fingerprintState) fingerprintState.turnState = turnState;
+        // if (turnState.value) headers[CODEX_TURN_STATE_HEADER] = turnState.value;
+        // requestContext.get('runtimeRequest')?.setMetadata?.({
+        //     codexTurnStateEnabled: turnState.enabled,
+        //     codexTurnStateSource: turnState.source,
+        //     codexTurnStateLength: turnState.length,
+        //     codexTurnStateSkipReason: turnState.skipReason || null
+        // });
+        const inboundTurnState = resolveInboundCodexTurnState(fingerprintState?.context?.inboundCodexHeaders || {});
+        if (inboundTurnState) headers[CODEX_TURN_STATE_HEADER] = inboundTurnState;
 
         // 根据是否流式设置 Accept 头
         if (stream) {
@@ -944,31 +951,32 @@ export class CodexApiService {
         const context = fingerprintState?.context || {};
         context.downstreamCodexTurnState = value;
         const length = Buffer.byteLength(value, 'utf8');
-        requestContext.get('runtimeRequest')?.setMetadata?.({ codexTurnStateResponseLength: length });
+        // [turn-state-disabled 2026-09-23] requestContext.get('runtimeRequest')?.setMetadata?.({ codexTurnStateResponseLength: length });
         return { observed: true, length, reusable: length === REUSABLE_CODEX_TURN_STATE_BYTES };
     }
 
-    captureObservedTurnState(fingerprintState, model) {
-        const context = fingerprintState?.context || {};
-        const value = normalizeCodexTurnState(context.downstreamCodexTurnState);
-        if (!value) return null;
-        const captureOptions = {
-            config: this.config,
-            context,
-            model,
-            headers: { [CODEX_TURN_STATE_HEADER]: value }
-        };
-        const result = captureCodexTurnState(captureOptions);
-        context.turnStateCacheOutcome = result.reason;
-        context.turnStateCacheCaptured = result.captured === true;
-        const resultPromise = captureCodexTurnStateAsync({ ...captureOptions, skipLocal: true });
-        void resultPromise.catch(() => {});
-        requestContext.get('runtimeRequest')?.setMetadata?.({
-            codexTurnStateCaptured: result.captured,
-            codexTurnStateResponseLength: result.length || Buffer.byteLength(value, 'utf8')
-        });
-        return result;
-    }
+    // [turn-state-disabled 2026-09-23] captureObservedTurnState 整体停用（缓存捕获）：
+    // captureObservedTurnState(fingerprintState, model) {
+    //     const context = fingerprintState?.context || {};
+    //     const value = normalizeCodexTurnState(context.downstreamCodexTurnState);
+    //     if (!value) return null;
+    //     const captureOptions = {
+    //         config: this.config,
+    //         context,
+    //         model,
+    //         headers: { [CODEX_TURN_STATE_HEADER]: value }
+    //     };
+    //     const result = captureCodexTurnState(captureOptions);
+    //     context.turnStateCacheOutcome = result.reason;
+    //     context.turnStateCacheCaptured = result.captured === true;
+    //     const resultPromise = captureCodexTurnStateAsync({ ...captureOptions, skipLocal: true });
+    //     void resultPromise.catch(() => {});
+    //     requestContext.get('runtimeRequest')?.setMetadata?.({
+    //         codexTurnStateCaptured: result.captured,
+    //         codexTurnStateResponseLength: result.length || Buffer.byteLength(value, 'utf8')
+    //     });
+    //     return result;
+    // }
 
     /**
      * 构建 Codex 管理类接口请求头

@@ -1361,7 +1361,7 @@
               <div class="detail-box"><span>总成本</span><strong>${escapeHtml(cost.main)}</strong><small class="muted">${escapeHtml(cost.sub)}</small></div>
               <div class="detail-box"><span>成本拆分</span><strong>${cost.missing ? '—' : `实际 ${escapeHtml(fmtUsd(event.cost?.actualUsd))} / 估算 ${escapeHtml(fmtUsd(event.cost?.estimatedUsd))}`}</strong></div>
               <div class="detail-box"><span>价格版本</span><strong>${escapeHtml(event.cost?.pricingVersion || '-')}</strong><small class="muted">${escapeHtml(event.cost?.pricingSource || '-')} · ×${escapeHtml(event.cost?.priceMultiplier ?? 1)}</small></div>
-              <div class="detail-box"><span>Turn-State</span><strong>${escapeHtml(event.turnState?.source || 'none')} / 请求 ${fmt(event.turnState?.requestLength)} B / 响应 ${fmt(event.turnState?.responseLength)} B / ${escapeHtml(event.turnState?.cacheOutcome || '未缓存')}</strong></div>
+              ${/* [turn-state-disabled 2026-09-23] <div class="detail-box"><span>Turn-State</span><strong>${escapeHtml(event.turnState?.source || 'none')} / 请求 ${fmt(event.turnState?.requestLength)} B / 响应 ${fmt(event.turnState?.responseLength)} B / ${escapeHtml(event.turnState?.cacheOutcome || '未缓存')}</strong></div> */ ''}
               <div class="detail-box"><span>Reasoning 参数</span><strong>${escapeHtml(event.parameters?.requestedReasoningEffort || '-')} → ${escapeHtml(event.parameters?.effectiveReasoningEffort || '-')}</strong></div>
               <div class="detail-box"><span>Service tier</span><strong>${escapeHtml(event.parameters?.requestedServiceTier || '-')} → ${escapeHtml(event.parameters?.effectiveServiceTier || '-')}</strong></div>
               <div class="detail-box"><span>Reasoning</span><strong>${fmt(usage.reasoningTokens)}</strong></div>

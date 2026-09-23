@@ -140,11 +140,11 @@ function compactMetadata(context = {}) {
             : getRequestAttempts(context.processedRequestBody),
         codexEvidence: context.processedRequestBody?.[CODEX_FINGERPRINT_CONTEXT_KEY] ? {
             upstreamResponseModel: context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].upstreamResponseModel || null,
-            turnStateCacheOutcome: context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].turnStateCacheOutcome || null,
-            turnStateCacheCaptured: context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].turnStateCacheCaptured === true,
-            turnStateResponseLength: context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].downstreamCodexTurnState
-                ? Buffer.byteLength(context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].downstreamCodexTurnState, 'utf8')
-                : 0
+            // [turn-state-disabled 2026-09-23] turnStateCacheOutcome: context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].turnStateCacheOutcome || null,
+            // turnStateCacheCaptured: context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].turnStateCacheCaptured === true,
+            // turnStateResponseLength: context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].downstreamCodexTurnState
+            //     ? Buffer.byteLength(context.processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY].downstreamCodexTurnState, 'utf8')
+            //     : 0
         } : undefined,
         isStream: typeof context.isStream === 'boolean' ? context.isStream : undefined,
         method: context.method || null,

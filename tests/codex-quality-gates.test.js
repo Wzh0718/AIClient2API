@@ -4,13 +4,14 @@ import { Readable } from 'stream';
 import { CodexApiService } from '../src/providers/openai/codex-core.js';
 import { CODEX_FINGERPRINT_CONTEXT_KEY } from '../src/providers/openai/codex-fingerprint.js';
 import { extractInboundCodexFingerprintContext } from '../src/utils/common.js';
-import {
-    CodexTurnStateCache,
-    codexTurnStateCache,
-    handleCodexTurnStateIpcMessage,
-    normalizeCodexTurnState,
-    resolveCodexTurnStateForRequest
-} from '../src/providers/openai/codex-turn-state.js';
+// [turn-state-disabled 2026-09-23] 缓存复用停用；恢复功能时取消本导入与下方注释用例的注释
+// import {
+//     CodexTurnStateCache,
+//     codexTurnStateCache,
+//     handleCodexTurnStateIpcMessage,
+//     normalizeCodexTurnState,
+//     resolveCodexTurnStateForRequest
+// } from '../src/providers/openai/codex-turn-state.js';
 import {
     CodexPromptCacheObservability,
     codexPromptCacheObservability
@@ -206,124 +207,155 @@ describe('Codex proxy quality gates', () => {
         expect(context.inboundCodexHeaders['x-unrelated-private-header']).toBeUndefined();
     });
 
-    test('reuses turn state only inside the same credential model session and turn scope', () => {
-        let now = 1_000;
-        const cache = new CodexTurnStateCache({ now: () => now, idleTtlMs: 5_000, maxEntries: 2 });
-        const config = { codexTurnStateReuseEnabled: true, uuid: 'credential-a', providerConfigRevision: 7 };
-        const context = {
-            callerKeyHash: 'key-a', originalClientSessionId: 'session-a', originalTurnId: 'turn-a', inboundCodexHeaders: {}
-        };
-        const first = resolveCodexTurnStateForRequest({ config, context, model: 'gpt-5.5', cache });
-        expect(first).toMatchObject({ source: 'none', skipReason: 'cache_miss' });
-        const reusableState = 'x'.repeat(292);
-        expect(cache.capture(first.scope, reusableState)).toBe(true);
-        expect(resolveCodexTurnStateForRequest({ config, context, model: 'gpt-5.5', cache })).toMatchObject({
-            value: reusableState, source: 'cache'
-        });
-        expect(resolveCodexTurnStateForRequest({
-            config,
-            context: { ...context, originalTurnId: 'turn-b' },
-            model: 'gpt-5.5',
-            cache
-        }).value).toBeNull();
-        expect(resolveCodexTurnStateForRequest({ config, context, model: 'gpt-5.6-sol', cache }).value).toBeNull();
-        now += 5_001;
-        expect(resolveCodexTurnStateForRequest({ config, context, model: 'gpt-5.5', cache }).value).toBeNull();
-    });
-
-    test('client turn state wins while invalid or oversized values are rejected', () => {
-        const cache = new CodexTurnStateCache();
-        const config = { codexTurnStateReuseEnabled: true, uuid: 'credential-a' };
-        const context = {
-            callerKeyHash: 'key-a', originalClientSessionId: 'session-a', originalTurnId: 'turn-a',
-            inboundCodexHeaders: { 'x-codex-turn-state': 'client-state' }
-        };
-        const result = resolveCodexTurnStateForRequest({ config, context, model: 'gpt-5.5', cache });
-        cache.capture(result.scope, 'x'.repeat(292));
-        expect(result).toMatchObject({ value: 'client-state', source: 'client' });
-        expect(normalizeCodexTurnState('bad\r\nheader')).toBeNull();
-        expect(normalizeCodexTurnState('x'.repeat(8193))).toBeNull();
-    });
-
-    test('returns any upstream turn state downstream but caches only successful 292-byte tickets', () => {
-        const service = createService({ codexTurnStateReuseEnabled: true });
-        const context = {
-            inboundCodexHeaders: {}, callerKeyHash: 'key-a', originalClientSessionId: 'session-a', originalTurnId: 'turn-a'
-        };
-        const state = { inboundHeaders: {}, context, ids: null };
-        try {
-            service.buildHeaders(null, false, state, 'gpt-5.5');
-            const observed = service.observeTurnStateFromResponse({ 'x-codex-turn-state': 'short-opaque-state' }, state);
-            expect(observed).toMatchObject({ observed: true, reusable: false, length: 18 });
-            expect(context.downstreamCodexTurnState).toBe('short-opaque-state');
-            expect(service.captureObservedTurnState(state, 'gpt-5.5')).toMatchObject({ captured: false, reason: 'length_mismatch' });
-            expect(getHeader(service.buildHeaders(null, false, { inboundHeaders: {}, context: { ...context, downstreamCodexTurnState: null }, ids: null }, 'gpt-5.5'), 'x-codex-turn-state')).toBeUndefined();
-
-            const ticket = `g${'A'.repeat(291)}`;
-            expect(service.observeTurnStateFromResponse({ 'x-codex-turn-state': ticket }, state)).toMatchObject({ reusable: true, length: 292 });
-            expect(service.captureObservedTurnState(state, 'gpt-5.5')).toMatchObject({ captured: true, length: 292 });
-            const next = service.buildHeaders(null, false, { inboundHeaders: {}, context, ids: null }, 'gpt-5.5');
-            expect(getHeader(next, 'x-codex-turn-state')).toBe(ticket);
-        } finally {
-            service.stopCacheCleanup();
-        }
-    });
-
-    test('adds a 292-byte ticket to the next request only after a completed upstream response', async () => {
-        codexTurnStateCache.clear();
+    test('relays client x-codex-turn-state upstream and upstream values downstream without reuse', () => {
+        const service = createService();
         const ticket = `g${'A'.repeat(291)}`;
-        const service = createService({ codexTurnStateReuseEnabled: true, uuid: 'success-ticket-provider', codexAccountKey: 'success-ticket-account' });
-        const makeRequest = () => ({
-            model: 'gpt-5.4-mini',
-            input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
-            [CODEX_FINGERPRINT_CONTEXT_KEY]: {
-                inboundCodexHeaders: {}, callerKeyHash: 'key-success',
-                originalClientSessionId: 'session-success', originalTurnId: 'turn-success'
-            }
-        });
-        axios.request
-            .mockResolvedValueOnce({ status: 200, headers: { 'x-codex-turn-state': ticket }, data: 'data: {"type":"response.completed","response":{"id":"r1","status":"completed","model":"gpt-5.4-mini","output":[]}}\n\n' })
-            .mockResolvedValueOnce({ status: 200, headers: {}, data: 'data: {"type":"response.completed","response":{"id":"r2","status":"completed","model":"gpt-5.4-mini","output":[]}}\n\n' });
+        const context = {
+            inboundCodexHeaders: { 'x-codex-turn-state': 'client-state' },
+            callerKeyHash: 'key-a', originalClientSessionId: 'session-a', originalTurnId: 'turn-a'
+        };
+
         try {
-            await service.generateContent('gpt-5.4-mini', makeRequest());
-            await service.generateContent('gpt-5.4-mini', makeRequest());
-            expect(getHeader(axios.request.mock.calls[0][0].headers, 'x-codex-turn-state')).toBeUndefined();
-            expect(getHeader(axios.request.mock.calls[1][0].headers, 'x-codex-turn-state')).toBe(ticket);
+            // 客户端自带的 x-codex-turn-state 原样透传上游
+            const forwarded = service.buildHeaders(null, false, { inboundHeaders: {}, context, ids: null }, 'gpt-5.5');
+            expect(getHeader(forwarded, 'x-codex-turn-state')).toBe('client-state');
+
+            // 客户端未带头时不注入任何缓存值（复用已停用）
+            const noClient = service.buildHeaders(null, false, {
+                inboundHeaders: {}, context: { ...context, inboundCodexHeaders: {} }, ids: null
+            }, 'gpt-5.5');
+            expect(getHeader(noClient, 'x-codex-turn-state')).toBeUndefined();
+
+            // 上游响应头照常观察并进入 downstreamCodexTurnState 供下游回写
+            const state = { inboundHeaders: {}, context: { ...context, inboundCodexHeaders: {} }, ids: null };
+            const observed = service.observeTurnStateFromResponse({ 'x-codex-turn-state': ticket }, state);
+            expect(observed).toMatchObject({ observed: true, reusable: true, length: 292 });
+            expect(state.context.downstreamCodexTurnState).toBe(ticket);
         } finally {
             service.stopCacheCleanup();
-            codexTurnStateCache.clear();
         }
     });
 
-    test('does not cache a 292-byte header when the upstream body ends in an error', async () => {
-        codexTurnStateCache.clear();
-        const ticket = `g${'B'.repeat(291)}`;
-        const service = createService({
-            codexTurnStateReuseEnabled: true,
-            uuid: 'failed-ticket-provider',
-            codexAccountKey: 'failed-ticket-account',
-            CODEX_OVERLOAD_RETRY_MAX_ATTEMPTS: 0
-        });
-        const context = {
-            inboundCodexHeaders: {}, callerKeyHash: 'key-failed',
-            originalClientSessionId: 'session-failed', originalTurnId: 'turn-failed'
-        };
-        axios.request.mockResolvedValueOnce({
-            status: 200,
-            headers: { 'x-codex-turn-state': ticket },
-            data: 'data: {"type":"error","error":{"code":"server_error","message":"failed"}}\n\n'
-        });
-        try {
-            await expect(service.generateContent('gpt-5.4-mini', {
-                model: 'gpt-5.4-mini', input: [], [CODEX_FINGERPRINT_CONTEXT_KEY]: context
-            })).rejects.toBeTruthy();
-            const headers = service.buildHeaders(null, false, { inboundHeaders: {}, context, ids: null }, 'gpt-5.4-mini');
-            expect(getHeader(headers, 'x-codex-turn-state')).toBeUndefined();
-        } finally {
-            service.stopCacheCleanup();
-            codexTurnStateCache.clear();
-        }
-    });
+    // [turn-state-disabled 2026-09-23] 以下缓存复用用例停用，整体注释保留：
+
+    // test('reuses turn state only inside the same credential model session and turn scope', () => {
+    //     let now = 1_000;
+    //     const cache = new CodexTurnStateCache({ now: () => now, idleTtlMs: 5_000, maxEntries: 2 });
+    //     const config = { codexTurnStateReuseEnabled: true, uuid: 'credential-a', providerConfigRevision: 7 };
+    //     const context = {
+    //         callerKeyHash: 'key-a', originalClientSessionId: 'session-a', originalTurnId: 'turn-a', inboundCodexHeaders: {}
+    //     };
+    //     const first = resolveCodexTurnStateForRequest({ config, context, model: 'gpt-5.5', cache });
+    //     expect(first).toMatchObject({ source: 'none', skipReason: 'cache_miss' });
+    //     const reusableState = 'x'.repeat(292);
+    //     expect(cache.capture(first.scope, reusableState)).toBe(true);
+    //     expect(resolveCodexTurnStateForRequest({ config, context, model: 'gpt-5.5', cache })).toMatchObject({
+    //         value: reusableState, source: 'cache'
+    //     });
+    //     expect(resolveCodexTurnStateForRequest({
+    //         config,
+    //         context: { ...context, originalTurnId: 'turn-b' },
+    //         model: 'gpt-5.5',
+    //         cache
+    //     }).value).toBeNull();
+    //     expect(resolveCodexTurnStateForRequest({ config, context, model: 'gpt-5.6-sol', cache }).value).toBeNull();
+    //     now += 5_001;
+    //     expect(resolveCodexTurnStateForRequest({ config, context, model: 'gpt-5.5', cache }).value).toBeNull();
+    // });
+
+    // test('client turn state wins while invalid or oversized values are rejected', () => {
+    //     const cache = new CodexTurnStateCache();
+    //     const config = { codexTurnStateReuseEnabled: true, uuid: 'credential-a' };
+    //     const context = {
+    //         callerKeyHash: 'key-a', originalClientSessionId: 'session-a', originalTurnId: 'turn-a',
+    //         inboundCodexHeaders: { 'x-codex-turn-state': 'client-state' }
+    //     };
+    //     const result = resolveCodexTurnStateForRequest({ config, context, model: 'gpt-5.5', cache });
+    //     cache.capture(result.scope, 'x'.repeat(292));
+    //     expect(result).toMatchObject({ value: 'client-state', source: 'client' });
+    //     expect(normalizeCodexTurnState('bad\r\nheader')).toBeNull();
+    //     expect(normalizeCodexTurnState('x'.repeat(8193))).toBeNull();
+    // });
+
+    // test('returns any upstream turn state downstream but caches only successful 292-byte tickets', () => {
+    //     const service = createService({ codexTurnStateReuseEnabled: true });
+    //     const context = {
+    //         inboundCodexHeaders: {}, callerKeyHash: 'key-a', originalClientSessionId: 'session-a', originalTurnId: 'turn-a'
+    //     };
+    //     const state = { inboundHeaders: {}, context, ids: null };
+    //     try {
+    //         service.buildHeaders(null, false, state, 'gpt-5.5');
+    //         const observed = service.observeTurnStateFromResponse({ 'x-codex-turn-state': 'short-opaque-state' }, state);
+    //         expect(observed).toMatchObject({ observed: true, reusable: false, length: 18 });
+    //         expect(context.downstreamCodexTurnState).toBe('short-opaque-state');
+    //         expect(service.captureObservedTurnState(state, 'gpt-5.5')).toMatchObject({ captured: false, reason: 'length_mismatch' });
+    //         expect(getHeader(service.buildHeaders(null, false, { inboundHeaders: {}, context: { ...context, downstreamCodexTurnState: null }, ids: null }, 'gpt-5.5'), 'x-codex-turn-state')).toBeUndefined();
+
+    //         const ticket = `g${'A'.repeat(291)}`;
+    //         expect(service.observeTurnStateFromResponse({ 'x-codex-turn-state': ticket }, state)).toMatchObject({ reusable: true, length: 292 });
+    //         expect(service.captureObservedTurnState(state, 'gpt-5.5')).toMatchObject({ captured: true, length: 292 });
+    //         const next = service.buildHeaders(null, false, { inboundHeaders: {}, context, ids: null }, 'gpt-5.5');
+    //         expect(getHeader(next, 'x-codex-turn-state')).toBe(ticket);
+    //     } finally {
+    //         service.stopCacheCleanup();
+    //     }
+    // });
+
+    // test('adds a 292-byte ticket to the next request only after a completed upstream response', async () => {
+    //     codexTurnStateCache.clear();
+    //     const ticket = `g${'A'.repeat(291)}`;
+    //     const service = createService({ codexTurnStateReuseEnabled: true, uuid: 'success-ticket-provider', codexAccountKey: 'success-ticket-account' });
+    //     const makeRequest = () => ({
+    //         model: 'gpt-5.4-mini',
+    //         input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
+    //         [CODEX_FINGERPRINT_CONTEXT_KEY]: {
+    //             inboundCodexHeaders: {}, callerKeyHash: 'key-success',
+    //             originalClientSessionId: 'session-success', originalTurnId: 'turn-success'
+    //         }
+    //     });
+    //     axios.request
+    //         .mockResolvedValueOnce({ status: 200, headers: { 'x-codex-turn-state': ticket }, data: 'data: {"type":"response.completed","response":{"id":"r1","status":"completed","model":"gpt-5.4-mini","output":[]}}\n\n' })
+    //         .mockResolvedValueOnce({ status: 200, headers: {}, data: 'data: {"type":"response.completed","response":{"id":"r2","status":"completed","model":"gpt-5.4-mini","output":[]}}\n\n' });
+    //     try {
+    //         await service.generateContent('gpt-5.4-mini', makeRequest());
+    //         await service.generateContent('gpt-5.4-mini', makeRequest());
+    //         expect(getHeader(axios.request.mock.calls[0][0].headers, 'x-codex-turn-state')).toBeUndefined();
+    //         expect(getHeader(axios.request.mock.calls[1][0].headers, 'x-codex-turn-state')).toBe(ticket);
+    //     } finally {
+    //         service.stopCacheCleanup();
+    //         codexTurnStateCache.clear();
+    //     }
+    // });
+
+    // test('does not cache a 292-byte header when the upstream body ends in an error', async () => {
+    //     codexTurnStateCache.clear();
+    //     const ticket = `g${'B'.repeat(291)}`;
+    //     const service = createService({
+    //         codexTurnStateReuseEnabled: true,
+    //         uuid: 'failed-ticket-provider',
+    //         codexAccountKey: 'failed-ticket-account',
+    //         CODEX_OVERLOAD_RETRY_MAX_ATTEMPTS: 0
+    //     });
+    //     const context = {
+    //         inboundCodexHeaders: {}, callerKeyHash: 'key-failed',
+    //         originalClientSessionId: 'session-failed', originalTurnId: 'turn-failed'
+    //     };
+    //     axios.request.mockResolvedValueOnce({
+    //         status: 200,
+    //         headers: { 'x-codex-turn-state': ticket },
+    //         data: 'data: {"type":"error","error":{"code":"server_error","message":"failed"}}\n\n'
+    //     });
+    //     try {
+    //         await expect(service.generateContent('gpt-5.4-mini', {
+    //             model: 'gpt-5.4-mini', input: [], [CODEX_FINGERPRINT_CONTEXT_KEY]: context
+    //         })).rejects.toBeTruthy();
+    //         const headers = service.buildHeaders(null, false, { inboundHeaders: {}, context, ids: null }, 'gpt-5.4-mini');
+    //         expect(getHeader(headers, 'x-codex-turn-state')).toBeUndefined();
+    //     } finally {
+    //         service.stopCacheCleanup();
+    //         codexTurnStateCache.clear();
+    //     }
+    // });
 
     test('uses configured Codex identity headers before client values and defaults', () => {
         const service = createService({
@@ -343,20 +375,20 @@ describe('Codex proxy quality gates', () => {
         }
     });
 
-    test('shares opaque turn state through the bounded master IPC cache without logging it', () => {
-        codexTurnStateCache.clear();
-        try {
-            const ticket = `g${'A'.repeat(291)}`;
-            expect(handleCodexTurnStateIpcMessage({
-                type: 'codex_turn_state_request', action: 'capture', payload: { scope: 'scope-a', value: ticket }
-            })).toEqual({ captured: true });
-            expect(handleCodexTurnStateIpcMessage({
-                type: 'codex_turn_state_request', action: 'get', payload: { scope: 'scope-a' }
-            })).toEqual({ value: ticket });
-        } finally {
-            codexTurnStateCache.clear();
-        }
-    });
+    // [turn-state-disabled 2026-09-23] test('shares opaque turn state through the bounded master IPC cache without logging it', () => {
+    //     codexTurnStateCache.clear();
+    //     try {
+    //         const ticket = `g${'A'.repeat(291)}`;
+    //         expect(handleCodexTurnStateIpcMessage({
+    //             type: 'codex_turn_state_request', action: 'capture', payload: { scope: 'scope-a', value: ticket }
+    //         })).toEqual({ captured: true });
+    //         expect(handleCodexTurnStateIpcMessage({
+    //             type: 'codex_turn_state_request', action: 'get', payload: { scope: 'scope-a' }
+    //         })).toEqual({ value: ticket });
+    //     } finally {
+    //         codexTurnStateCache.clear();
+    //     }
+    // });
 
     test('preserves prompt_cache_options byte-for-byte through Codex body preparation', async () => {
         const service = createService();

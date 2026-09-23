@@ -14,8 +14,9 @@ function safeMetadata(metadata = {}) {
         'requestId', 'method', 'path', 'model', 'providerType', 'stream',
         'requestBodyBytes', 'responseStatus',
         'geminiSelection', 'geminiRetryCount', 'geminiFallbackCount', 'geminiFinalProviderUuidHash', 'clientAborted',
-        'codexTurnStateEnabled', 'codexTurnStateSource', 'codexTurnStateLength', 'codexTurnStateSkipReason',
-        'codexTurnStateCaptured', 'codexTurnStateResponseLength', 'upstreamResponseModel'
+        // [turn-state-disabled 2026-09-23] 'codexTurnStateEnabled', 'codexTurnStateSource', 'codexTurnStateLength', 'codexTurnStateSkipReason',
+        // 'codexTurnStateCaptured', 'codexTurnStateResponseLength',
+        'upstreamResponseModel'
     ];
     return Object.fromEntries(allowed
         .filter(name => metadata[name] !== undefined && metadata[name] !== null)

@@ -4,6 +4,8 @@ This branch adds three related capabilities without storing business prompts or 
 
 ## Codex turn state
 
+> **[turn-state-disabled 2026-09-23]** The same-turn Turn-State cache reuse feature has been disabled in source (commented out in place, greppable via `[turn-state-disabled 2026-09-23]`). The `codexTurnStateReuseEnabled` credential flag no longer has any effect. Only transparent relaying remains active: a client-supplied `X-Codex-Turn-State` header is forwarded upstream unchanged, and the upstream response's `X-Codex-Turn-State` header is returned to the client unchanged. Nothing is captured, cached, injected, or audited. The description below is kept for historical reference and recovery.
+
 `X-Codex-Turn-State` is accepted from the client, forwarded upstream, captured from the upstream HTTP response, and returned to the client. Client values are forwarded even when server reuse is disabled.
 
 Set `codexTurnStateReuseEnabled: true` on an individual `openai-codex-oauth` credential to enable server reuse. The cache key includes the caller key hash, credential identity and configuration revision, outbound model, original session, and original turn ID. Requests without both an original session and turn ID are pass-through only. Client and response values may be up to 8 KiB and are still relayed opaquely, but the server cache accepts a value only after a successful upstream response and only when its UTF-8 byte length is exactly 292. Cached values stay in bounded memory for 30 idle minutes and are shared between local workers through non-durable IPC. Their length is observable; their value is never written to request audit records or logs.

@@ -172,10 +172,10 @@ function normalizeAttempts(context = {}) {
             upstreamResponseModel: attempt.upstreamResponseModel || null,
             reasoningEffort: attempt.reasoningEffort || null,
             serviceTier: attempt.serviceTier || null,
-            turnStateEnabled: attempt.turnStateEnabled === true,
-            turnStateSource: attempt.turnStateSource || null,
-            turnStateRequestLength: toNumber(attempt.turnStateRequestLength),
-            turnStateSkipReason: attempt.turnStateSkipReason || null,
+            // [turn-state-disabled 2026-09-23] turnStateEnabled: attempt.turnStateEnabled === true,
+            // turnStateSource: attempt.turnStateSource || null,
+            // turnStateRequestLength: toNumber(attempt.turnStateRequestLength),
+            // turnStateSkipReason: attempt.turnStateSkipReason || null,
             stream: attempt.stream === true,
             status: attempt.status || 'unknown',
             httpStatus: Number.isFinite(Number(attempt.httpStatus)) ? Number(attempt.httpStatus) : null,
@@ -364,19 +364,20 @@ export function buildRequestAuditEvent(context = {}) {
             metadataHash: context.cache?.metadataHash || null,
             workerId: context.cache?.workerId || null
         },
-        turnState: {
-            enabled: lastAttempt?.turnStateEnabled === true,
-            source: lastAttempt?.turnStateSource || null,
-            requestLength: toNumber(lastAttempt?.turnStateRequestLength),
-            responseLength: toNumber(
-                context.codexEvidence?.turnStateResponseLength
-                || (codexContext.downstreamCodexTurnState ? Buffer.byteLength(codexContext.downstreamCodexTurnState, 'utf8') : 0)
-                || context.runtime?.metadata?.codexTurnStateResponseLength
-            ),
-            skipReason: lastAttempt?.turnStateSkipReason || null,
-            cacheOutcome: context.codexEvidence?.turnStateCacheOutcome || codexContext.turnStateCacheOutcome || null,
-            captured: context.codexEvidence?.turnStateCacheCaptured === true || codexContext.turnStateCacheCaptured === true
-        },
+        // [turn-state-disabled 2026-09-23] 审计事件中的 turnState 投影停用（缓存复用已下线）：
+        // turnState: {
+        //     enabled: lastAttempt?.turnStateEnabled === true,
+        //     source: lastAttempt?.turnStateSource || null,
+        //     requestLength: toNumber(lastAttempt?.turnStateRequestLength),
+        //     responseLength: toNumber(
+        //         context.codexEvidence?.turnStateResponseLength
+        //         || (codexContext.downstreamCodexTurnState ? Buffer.byteLength(codexContext.downstreamCodexTurnState, 'utf8') : 0)
+        //         || context.runtime?.metadata?.codexTurnStateResponseLength
+        //     ),
+        //     skipReason: lastAttempt?.turnStateSkipReason || null,
+        //     cacheOutcome: context.codexEvidence?.turnStateCacheOutcome || codexContext.turnStateCacheOutcome || null,
+        //     captured: context.codexEvidence?.turnStateCacheCaptured === true || codexContext.turnStateCacheCaptured === true
+        // },
         parameters: {
             requestedReasoningEffort: context.originalRequestBody?.reasoning?.effort || context.originalRequestBody?.reasoning_effort || null,
             effectiveReasoningEffort: lastAttempt?.reasoningEffort || null,

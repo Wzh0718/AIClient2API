@@ -475,17 +475,18 @@ function getProviderTypeFields(providerType) {
             }
         ],
         'openai-codex-oauth': [
-            {
-                id: 'codexTurnStateReuseEnabled',
-                label: t('modal.provider.codexTurnStateReuseEnabled'),
-                type: 'select',
-                value: 'false',
-                options: [
-                    { value: 'false', label: t('modal.provider.disabled') },
-                    { value: 'true', label: t('modal.provider.enabled') }
-                ],
-                help: t('modal.provider.codexTurnStateReuseHelp')
-            },
+            // [turn-state-disabled 2026-09-23] 同轮 Turn-State 缓存复用已停用，设置项下线
+            // {
+            //     id: 'codexTurnStateReuseEnabled',
+            //     label: t('modal.provider.codexTurnStateReuseEnabled'),
+            //     type: 'select',
+            //     value: 'false',
+            //     options: [
+            //         { value: 'false', label: t('modal.provider.disabled') },
+            //         { value: 'true', label: t('modal.provider.enabled') }
+            //     ],
+            //     help: t('modal.provider.codexTurnStateReuseHelp')
+            // },
             {
                 id: 'codexFingerprintMode',
                 label: t('modal.provider.codexFingerprintMode'),

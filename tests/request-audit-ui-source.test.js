@@ -30,7 +30,7 @@ describe('request audit workspace source', () => {
     expect(html).toContain('上游失败 ${escapeHtml(upstreamStatus)}');
     expect(html).toContain('上游错误原文');
     expect(html).toContain('attempt.errorMessage');
-    expect(html).toContain('Turn-State');
+    // [turn-state-disabled 2026-09-23] expect(html).toContain('Turn-State');
     expect(html).toContain('路由、计费与安全元数据');
     expect(html).not.toContain('colspan="13"');
   });
