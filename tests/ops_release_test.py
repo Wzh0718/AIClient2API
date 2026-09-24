@@ -14,12 +14,13 @@ OPS = Path(__file__).resolve().parents[1] / 'scripts' / 'ops'
 sys.path.insert(0, str(OPS))
 import release
 import release_backup as backup
+import release_maintenance as maintenance
 
 
 def healthy(epoch='old'):
     return {'status': 'healthy', 'coordination': 'redis', 'controlWorkers': 1,
             'executionWorkers': 3, 'readyWorkers': 4, 'providerConfig': {'pendingWorkerCount': 0},
-            'epoch': epoch, 'persistenceBacklog': 0,
+            'epoch': epoch, 'persistenceBacklog': 0, 'metrics': {'inFlight': 0},
             'runtimeHooks': {'available': True, 'dropped': 0, 'backpressured': 0, 'consumerLag': 0, 'spooled': 0}}
 
 
@@ -100,7 +101,7 @@ class FakeDocker:
 
     def __call__(self, args):
         self.calls.append(args)
-        if args[:2] == ['nginx', '-t']:
+        if args[:2] in (['nginx', '-t'], ['nginx', '-s']):
             if self.fail_nginx:
                 raise RuntimeError('nginx invalid')
             return ''
@@ -156,7 +157,7 @@ class ReleaseTests(unittest.TestCase):
         self.config.mkdir()
         (self.config / 'config.json').write_text('{}')
         self.nginx = self.root / 'nginx.conf'
-        self.nginx.write_text('# fixture')
+        self.nginx.write_text('server {\n  server_name example.test;\n}\nserver {\n  server_name example.test;\n}\n')
         self.directory = self.root / 'releases' / 'release-20260924-010000'
         self.specfile = self.root / 'spec.json'
         self.spec = {'revision': 'a' * 40, 'image': 'fixture:new', 'activeContainer': 'aiclient2api',
@@ -168,6 +169,8 @@ class ReleaseTests(unittest.TestCase):
             'finalArgs': []}
         self.specfile.write_text(json.dumps(self.spec))
         self.docker = FakeDocker(self.config)
+        self.active_in_flight = 0
+        self.active_spooled = 0
         self.r = release.Release(self.specfile, self.directory, self.docker, self.probe)
         self.addCleanup(patch.stopall)
         patch('release.time.sleep', lambda _: None).start()
@@ -177,11 +180,20 @@ class ReleaseTests(unittest.TestCase):
             return {'status': 'ok'}
         obj = self.docker.lookup('candidate' if ':13001' in url else 'aiclient2api')
         env = dict(v.split('=', 1) for v in obj['Config']['Env'])
-        return healthy(env.get('RUNTIME_DEPLOYMENT_EPOCH', 'old'))
+        result = healthy(env.get('RUNTIME_DEPLOYMENT_EPOCH', 'old'))
+        if ':13001' not in url:
+            result['metrics']['inFlight'] = self.active_in_flight
+            result['runtimeHooks']['spooled'] = self.active_spooled
+        return result
 
     def ready(self):
         self.r.run('preflight', True)
         self.r.run('prepare', True)
+        gate = maintenance.MaintenanceGate(self.r, lambda _: 503 if maintenance.MARKER in self.nginx.read_text() else 401)
+        gate.arm()
+
+    def disarm(self):
+        maintenance.MaintenanceGate(self.r, lambda _: 401).disarm()
 
     def test_dry_run_writes_nothing(self):
         self.r.run('preflight')
@@ -191,8 +203,9 @@ class ReleaseTests(unittest.TestCase):
     def test_success_keeps_old_and_defers_compression(self):
         self.ready()
         self.assertTrue(self.docker.objects['old']['State']['Running'])
-        self.r.run('cutover', True, True)
+        self.r.run('cutover', True, True, True)
         self.assertFalse((self.directory / 'backup' / 'configs.tar.gz').exists())
+        self.disarm()
         self.r.run('verify', True)
         self.assertEqual(self.r.state['phase'], 'complete')
         self.assertEqual(self.r.state['report']['businessValidation'], 'not_run')
@@ -205,7 +218,7 @@ class ReleaseTests(unittest.TestCase):
         self.ready()
         self.docker.fail_start = True
         with self.assertRaisesRegex(RuntimeError, 'start failure'):
-            self.r.run('cutover', True, True)
+            self.r.run('cutover', True, True, True)
         self.assertTrue(self.docker.objects['old']['State']['Running'])
         self.assertEqual(self.docker.objects['old']['Name'], '/aiclient2api')
         self.assertEqual(self.r.state['phase'], 'rolled_back')
@@ -215,7 +228,7 @@ class ReleaseTests(unittest.TestCase):
         self.ready()
         self.docker.unclean_stop = True
         with self.assertRaisesRegex(ValueError, 'not clean'):
-            self.r.run('cutover', True, True)
+            self.r.run('cutover', True, True, True)
         self.assertTrue(self.docker.objects['old']['State']['Running'])
         self.assertFalse((self.directory / 'backup').exists())
 
@@ -223,7 +236,7 @@ class ReleaseTests(unittest.TestCase):
         self.ready()
         self.docker.fail_nginx = True
         with self.assertRaisesRegex(RuntimeError, 'nginx'):
-            self.r.run('cutover', True, True)
+            self.r.run('cutover', True, True, True)
         self.assertTrue(self.docker.objects['old']['State']['Running'])
 
     def test_phase_replay_and_unpaused_writes_refused(self):
@@ -251,7 +264,7 @@ class ReleaseTests(unittest.TestCase):
         self.ready()
         self.docker.objects['final']['HostConfig']['Memory'] = 1024
         with self.assertRaisesRegex(ValueError, 'drift'):
-            self.r.run('cutover', True, True)
+            self.r.run('cutover', True, True, True)
         self.assertTrue(self.docker.objects['old']['State']['Running'])
 
     def test_global_lock_blocks_competing_release(self):
@@ -269,7 +282,8 @@ class ReleaseTests(unittest.TestCase):
 
     def test_backup_failure_keeps_verified_new_service(self):
         self.ready()
-        self.r.run('cutover', True, True)
+        self.r.run('cutover', True, True, True)
+        self.disarm()
         with patch('release.finalize', side_effect=ValueError('archive corrupted')):
             with self.assertRaisesRegex(ValueError, 'archive corrupted'):
                 self.r.run('verify', True)
@@ -282,7 +296,8 @@ class ReleaseTests(unittest.TestCase):
 
     def test_retention_only_removes_registered_oldest_recovery_point(self):
         self.ready()
-        self.r.run('cutover', True, True)
+        self.r.run('cutover', True, True, True)
+        self.disarm()
         self.r.run('verify', True)
         unrelated = self.directory.parent / 'unrelated'
         unrelated.mkdir()
@@ -307,12 +322,99 @@ class ReleaseTests(unittest.TestCase):
 
     def test_missing_retained_backup_blocks_retention(self):
         self.ready()
-        self.r.run('cutover', True, True)
+        self.r.run('cutover', True, True, True)
+        self.disarm()
         self.r.run('verify', True)
         (self.directory / 'backup' / 'configs.tar.gz').write_bytes(b'corrupt')
         with self.assertRaisesRegex(ValueError, 'archive changed'):
             self.r.run('cleanup', True)
         self.assertIn('old', self.docker.objects)
+
+    def test_maintenance_gate_is_reversible_and_validated(self):
+        self.r.run('preflight', True)
+        self.r.run('prepare', True)
+        original = self.nginx.read_bytes()
+        gate = maintenance.MaintenanceGate(self.r, lambda _: 503 if maintenance.MARKER in self.nginx.read_text() else 401)
+        self.assertEqual(gate.arm()['publicApiStatus'], 503)
+        self.assertTrue(self.r.state['maintenanceActive'])
+        self.assertIn('if ($uri !~', self.nginx.read_text())
+        gate.disarm()
+        self.assertEqual(self.nginx.read_bytes(), original)
+        self.assertFalse(self.r.state['maintenanceActive'])
+
+    def test_maintenance_probe_failure_restores_nginx_without_stopping_old(self):
+        self.r.run('preflight', True)
+        self.r.run('prepare', True)
+        before = self.nginx.read_bytes()
+        gate = maintenance.MaintenanceGate(self.r, lambda _: 401)
+        with self.assertRaisesRegex(ValueError, 'did not enter maintenance'):
+            gate.arm()
+        self.assertEqual(self.nginx.read_bytes(), before)
+        self.assertTrue(self.docker.objects['old']['State']['Running'])
+
+    def test_active_service_can_be_healthy_with_live_audit_backlog(self):
+        self.r.run('preflight', True)
+        self.active_spooled = 12
+        result = self.r.health('old', self.spec['activeUrl'])
+        self.assertEqual(result['spooled'], 12)
+
+    def test_busy_traffic_prevents_stop_and_keeps_prepared_release(self):
+        self.ready()
+        self.active_in_flight = 4
+        self.r.spec['drainTimeoutSeconds'] = 0
+        with self.assertRaisesRegex(RuntimeError, 'inFlight=4'):
+            self.r.run('cutover', True, True, True)
+        self.assertEqual(self.r.state['phase'], 'prepared')
+        self.assertTrue(self.docker.objects['old']['State']['Running'])
+        self.assertFalse(any(c[1] == 'stop' for c in self.docker.calls))
+
+    def test_force_requires_small_inflight_and_stable_zero_persistence(self):
+        self.ready()
+        self.active_in_flight = 2
+        now = [0]
+        def wait(seconds):
+            now[0] += seconds
+        result = self.r.wait_for_drain(timeout=4, max_forced_in_flight=3,
+                                       clock=lambda: now[0], wait=wait)
+        self.assertTrue(result['forced'])
+        self.assertEqual(result['inFlight'], 2)
+        self.active_in_flight = 4
+        now[0] = 0
+        with self.assertRaisesRegex(RuntimeError, 'inFlight=4'):
+            self.r.wait_for_drain(timeout=4, max_forced_in_flight=3,
+                                  clock=lambda: now[0], wait=wait)
+        self.active_in_flight = 1
+        self.active_spooled = 1
+        now[0] = 0
+        with self.assertRaisesRegex(RuntimeError, 'spooled=1'):
+            self.r.wait_for_drain(timeout=4, max_forced_in_flight=3,
+                                  clock=lambda: now[0], wait=wait)
+
+    def test_authorized_force_allows_non_oom_137_and_records_possible_interruptions(self):
+        self.ready()
+        self.docker.unclean_stop = True
+        with patch.object(self.r, 'wait_for_drain', return_value={'forced': True, 'inFlight': 1,
+                'backlog': 0, 'spooled': 0}):
+            self.r.run('cutover', True, True, True, drain_timeout=4, max_forced_in_flight=3)
+        self.disarm()
+        self.r.run('verify', True)
+        self.assertEqual(self.r.state['oldExit']['exitCode'], 137)
+        self.assertTrue(self.r.state['report']['forcedCutover'])
+        self.assertEqual(self.r.state['report']['possibleInterruptedRequestsUpperBound'], 1)
+
+    def test_unclean_stop_without_force_still_rolls_back(self):
+        self.ready()
+        self.docker.unclean_stop = True
+        with self.assertRaisesRegex(ValueError, 'not clean'):
+            self.r.run('cutover', True, True, True, drain_timeout=4, max_forced_in_flight=0)
+        self.assertTrue(self.docker.objects['old']['State']['Running'])
+        self.assertEqual(self.r.state['phase'], 'rolled_back')
+
+    def test_cutover_requires_ingress_pause(self):
+        self.ready()
+        with self.assertRaisesRegex(ValueError, 'pause new public API'):
+            self.r.run('cutover', True, True)
+        self.assertTrue(self.docker.objects['old']['State']['Running'])
 
 
 if __name__ == '__main__':

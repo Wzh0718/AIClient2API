@@ -1,6 +1,6 @@
 """Single-writer release phases. Dry-run by default; requires an explicit private spec."""
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 import os
@@ -92,6 +92,8 @@ class Release:
         require(s.get('databaseChange') == 'none', 'database migration requires a separate recovery plan')
         require(s.get('expectedHost') and s.get('dockerId'), 'explicit host and Docker daemon identity required')
         require(isinstance(s.get('executionWorkers'), int) and s['executionWorkers'] > 0, 'executionWorkers required')
+        require(isinstance(s.get('drainTimeoutSeconds', 20), int)
+                and 0 <= s.get('drainTimeoutSeconds', 20) <= 180, 'drain timeout must be 0..180 seconds')
         require(Path(s['configDir']).is_absolute(), 'configDir must be absolute')
         config = Path(s['configDir']).resolve()
         require(self.directory != config and config not in self.directory.parents, 'release state must be outside configs')
@@ -151,7 +153,6 @@ class Release:
 
     def health(self, container, url, epoch=None, timeout=180):
         deadline = time.monotonic() + timeout
-        previous = None
         while True:
             try:
                 obj = self.inspect(container)
@@ -161,14 +162,46 @@ class Release:
                 self.probe(url + '/api/health')
                 value = self.probe(url + '/runtime/health')
                 metrics = runtime_check(value, self.spec['executionWorkers'], epoch)
-                if previous is not None and metrics['spooled'] == 0 and metrics['backlog'] <= previous:
-                    return metrics
-                previous = metrics['backlog']
+                return metrics
             except (ValueError, OSError, RuntimeError):
-                previous = None
+                pass
             if time.monotonic() >= deadline:
-                raise RuntimeError('health/topology/backlog did not converge before deadline')
+                raise RuntimeError('container health or worker topology did not converge before deadline')
             time.sleep(2)
+
+    def wait_for_drain(self, timeout=20, stable_samples=3, max_forced_in_flight=0,
+                       clock=None, wait=None):
+        """Only call after new API traffic has been stopped at the edge."""
+        clock = clock or time.monotonic
+        wait = wait or time.sleep
+        deadline = clock() + timeout
+        stable = 0
+        persistence_stable = 0
+        last = None
+        observed = 0
+        while True:
+            value = self.probe(self.spec['activeUrl'] + '/runtime/health')
+            metrics = runtime_check(value, self.spec['executionWorkers'])
+            in_flight = value.get('metrics', {}).get('inFlight')
+            require(isinstance(in_flight, int) and in_flight >= 0, 'runtime in-flight count unavailable')
+            last = {'inFlight': in_flight, **metrics}
+            persistence_clear = metrics['backlog'] == 0 and metrics['spooled'] == 0
+            persistence_stable = persistence_stable + 1 if persistence_clear else 0
+            stable = stable + 1 if in_flight == 0 and persistence_clear else 0
+            if observed % 3 == 0:
+                print(f'stage=drain inFlight={in_flight} backlog={metrics["backlog"]} '
+                      f'spooled={metrics["spooled"]} stable={stable}/{stable_samples}', flush=True)
+            observed += 1
+            if stable >= stable_samples:
+                return {**last, 'forced': False}
+            if clock() >= deadline:
+                if (0 < in_flight <= max_forced_in_flight and persistence_stable >= stable_samples):
+                    print(f'stage=drain forced=true inFlight={in_flight} '
+                          'backlog=0 spooled=0', flush=True)
+                    return {**last, 'forced': True}
+                raise RuntimeError('traffic has not drained; active service unchanged: '
+                                   f'inFlight={in_flight} backlog={metrics["backlog"]} spooled={metrics["spooled"]}')
+            wait(2)
 
     def preflight(self):
         require(not self.state, 'preflight already recorded; use its next phase')
@@ -239,24 +272,36 @@ class Release:
         require(not final['State']['Running'], 'precreated final must not run')
         self.save(phase='prepared')
 
-    def cutover(self, writes_paused=False):
+    def cutover(self, writes_paused=False, ingress_paused=False, drain_timeout=None,
+                max_forced_in_flight=0):
         require(self.state['phase'] == 'prepared', 'cutover requires prepared state')
         require(writes_paused, 'pause management/OAuth writes before --writes-paused')
+        require(ingress_paused, 'pause new public API requests before --ingress-paused')
         require(self.inspect(self.spec['activeContainer'])['Id'] == self.state['oldId'], 'active container changed')
-        require(digest(self.spec['nginxConfig']) == self.state['nginxHash'], 'Nginx config changed')
+        self.verify_ingress_gate()
         self.runner(['nginx', '-t'])
         self.health(self.state['candidateId'], self.spec['candidateUrl'], self.state['candidateEpoch'])
         self.health(self.state['oldId'], self.spec['activeUrl'])
         compatible(self.inspect(self.state['oldId']), self.owned(self.state['finalId'], 'final'))
-        self.save(phase='cutover')
+        timeout = self.spec.get('drainTimeoutSeconds', 20) if drain_timeout is None else drain_timeout
+        require(isinstance(timeout, int) and 0 <= timeout <= 180, 'drain timeout must be 0..180 seconds')
+        require(isinstance(max_forced_in_flight, int) and 0 <= max_forced_in_flight <= 10,
+                'forced in-flight limit must be 0..10')
+        drain = self.wait_for_drain(timeout=timeout, max_forced_in_flight=max_forced_in_flight)
+        self.save(phase='cutover', drainDecision=drain,
+                  forcedCutover=drain['forced'],
+                  interruptedRequestsUpperBound=drain['inFlight'] if drain['forced'] else 0)
         # Each mutation is a distinct argv call. Old objects are never deleted here.
         self.runner(['docker', 'stop', '--time', '120', self.state['candidateId']])
         self.save(cutoverStarted=time.time())
-        self.runner(['docker', 'stop', '--time', '120', self.state['oldId']])
+        stop_timeout = '30' if drain['forced'] else '120'
+        self.runner(['docker', 'stop', '--timeout', stop_timeout, self.state['oldId']])
         stopped = self.inspect(self.state['oldId'])
         self.save(oldExit={'exitCode': stopped['State']['ExitCode'], 'oomKilled': stopped['State']['OOMKilled']})
         require(not stopped['State']['Running'], 'old writer has not stopped')
-        require(stopped['State']['ExitCode'] == 0 and not stopped['State']['OOMKilled'],
+        require(not stopped['State']['OOMKilled'], 'old container was OOM-killed')
+        forced_exit = drain['forced'] and stopped['State']['ExitCode'] == 137
+        require(stopped['State']['ExitCode'] == 0 or forced_exit,
                 'old shutdown was not clean; restore old service and investigate drain/spool')
         snapshot(self.spec['configDir'], self.spec['configFiles'], self.directory / 'backup')
         self.runner(['docker', 'rename', self.state['oldId'], self.state['rollbackName']])
@@ -265,8 +310,22 @@ class Release:
         self.health(self.state['finalId'], self.spec['activeUrl'], self.state['epoch'])
         self.save(phase='active', interruptionSeconds=round(time.time() - self.state['cutoverStarted'], 3))
 
+    def verify_ingress_gate(self):
+        require(self.state.get('maintenanceActive') is True, 'tracked Nginx maintenance gate is not active')
+        require(digest(self.spec['nginxConfig']) == self.state.get('maintenanceHash'),
+                'Nginx maintenance gate changed')
+        self.runner(['nginx', '-t'])
+
+    def ensure_candidate(self):
+        require(self.state.get('phase') == 'prepared', 'candidate resume requires prepared state')
+        candidate = self.owned(self.state['candidateId'], 'candidate')
+        if not candidate['State'].get('Running'):
+            self.runner(['docker', 'start', candidate['Id']])
+        return self.health(candidate['Id'], self.spec['candidateUrl'], self.state['candidateEpoch'])
+
     def verify(self):
         require(self.state['phase'] in ('active', 'verified'), 'verify requires active state')
+        require(self.state.get('maintenanceActive') is not True, 'restore public ingress before final verification')
         require(self.inspect(self.spec['activeContainer'])['Id'] == self.state['finalId'], 'active identity changed')
         self.owned(self.state['finalId'], 'final')
         revision = self.runner(['docker', 'exec', self.state['finalId'], 'cat', '/app/REVISION'])
@@ -280,7 +339,9 @@ class Release:
         # the healthy active service in place and retain all recovery objects.
         self.save(phase='verified', runtimeMetrics=metrics)
         archive = finalize(self.directory / 'backup')
-        report = self.state['report'] | {'productionRuntime': 'passed', 'businessValidation': 'not_run'}
+        report = self.state['report'] | {'productionRuntime': 'passed', 'businessValidation': 'not_run',
+                                        'forcedCutover': bool(self.state.get('forcedCutover')),
+                                        'possibleInterruptedRequestsUpperBound': self.state.get('interruptedRequestsUpperBound', 0)}
         self.save(phase='complete', completedAt=time.time(), archive=archive, report=report)
 
     def rollback(self):
@@ -301,7 +362,8 @@ class Release:
             self.runner(['docker', 'start', old['Id']])
         # This workflow keeps the same upstream/ports and never overwrites configs
         # or Nginx. Unexpected external route changes need manual reconciliation.
-        require(digest(self.spec['nginxConfig']) == self.state['nginxHash'], 'service restored; external Nginx drift needs review')
+        expected_hash = self.state.get('maintenanceHash') if self.state.get('maintenanceActive') else self.state['nginxHash']
+        require(digest(self.spec['nginxConfig']) == expected_hash, 'service restored; external Nginx drift needs review')
         self.runner(['nginx', '-t'])
         self.health(old['Id'], self.spec['activeUrl'])
         self.save(phase='rolled_back', rolledBackAt=time.time())
@@ -354,14 +416,15 @@ class Release:
             record['retired'] = True
             write_json(directory / 'state.json', record)
 
-    def run(self, phase, apply=False, writes_paused=False):
+    def run(self, phase, apply=False, writes_paused=False, ingress_paused=False, lock=True,
+            drain_timeout=None, max_forced_in_flight=0):
         self.identity()
         self.image()
         if not apply:
             return {'dryRun': True, 'phase': phase, 'revision': self.spec['revision'],
                     'backup': estimate(self.spec['configDir'], self.spec['configFiles']),
                     'recordedPhase': self.state.get('phase', 'none')}
-        with deployment_lock(self.directory.parent):
+        with deployment_lock(self.directory.parent) if lock else nullcontext():
             state_path = self.directory / 'state.json'
             if state_path.exists():
                 require(json.loads(state_path.read_text(encoding='utf-8')) == self.state,
@@ -369,7 +432,7 @@ class Release:
             started = time.monotonic()
             try:
                 if phase == 'cutover':
-                    self.cutover(writes_paused)
+                    self.cutover(writes_paused, ingress_paused, drain_timeout, max_forced_in_flight)
                 else:
                     getattr(self, phase)()
             except Exception:
@@ -412,9 +475,10 @@ def main():
     parser.add_argument('--phase', choices=PHASES, default='preflight')
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--writes-paused', action='store_true')
+    parser.add_argument('--ingress-paused', action='store_true')
     args = parser.parse_args()
     release = Release(args.spec, args.state_dir)
-    print(json.dumps(release.run(args.phase, args.apply, args.writes_paused), ensure_ascii=False))
+    print(json.dumps(release.run(args.phase, args.apply, args.writes_paused, args.ingress_paused), ensure_ascii=False))
 
 
 if __name__ == '__main__':

@@ -4,6 +4,52 @@
 这是单写者交接，不是双活。日常 `backup-configs.sh CONFIG_DIR BACKUP_DIR KEEP`
 及其 cron 保持原行为；数据库迁移不走此流程。
 
+## 固定配置后的快捷入口
+
+首次核对生产容器的网络、端口、挂载、环境文件及备份清单后，在仓库外保存限权的私有 profile。
+之后对已经更新并验证的本地主容器，只需一个 PowerShell 调用：
+
+```powershell
+./scripts/ops/quick-release.ps1 -Profile <private-profile.json> -Revision <full-commit> -Mode Prepare -Apply
+./scripts/ops/quick-release.ps1 -Profile <private-profile.json> -Revision <full-commit> -Mode Deploy -Maintenance -Apply
+```
+
+第一条自动复用镜像或构建、核对本地主容器、传输镜像、复制运维工具、从上次私有 spec
+生成新 spec，并完成生产 preflight/prepare；遇到已有发布记录会继续同一阶段。
+第二条临时将公网 API 切为 503，验证维护入口实际生效，等待在途请求、审计积压与 spool
+连续清零，再执行单写者切换、恢复入口和 postcheck。执行前应选择允许短时 503 的维护窗口。
+默认不加 `-Apply` 时只显示计划；`Deploy` 还必须显式加 `-Maintenance`。
+排空默认最多等待 20 秒；若已知存在较长流式请求，可在有维护窗口时显式增加
+`-MaxDrainSeconds 60`（允许范围 0–180），期间每隔数秒输出在途请求和持久化队列计数。
+仅在明确允许中断少量剩余请求时，加 `-MaxDrainSeconds 180 -MaxForcedInFlight 3`：
+三分钟后仍有 1–3 个在途请求、但积压和 spool 连续三次为零，才使用 30 秒停止上限。
+此模式会使剩余请求失败；旧容器 exit 137 仅在记录了该强制决策且非 OOM 时允许继续。
+
+profile 只保存路径与主机身份，不保存密钥内容。示例字段：
+
+```json
+{
+  "target": "root@verified-host",
+  "expectedHost": "verified-hostname",
+  "identityFile": "C:/absolute/path/to/existing-ssh-key",
+  "releaseBase": "/root/aiclient2api-releases",
+  "remoteToolsDir": "/root/aiclient2api-release-tools",
+  "previousSpec": "/root/previous-release/private/spec.json",
+  "previousState": "/root/previous-release/state/rel-previous",
+  "localActiveContainer": "aiclient2api"
+}
+```
+
+新发布会重用上次核过的容器参数与配置清单，重新校验实际容器、引用文件、Nginx 和镜像身份；
+不会把已失败发布的容器改名或删除。运行记录保存在 profile 同目录的 `.run.json`。
+出现旧版本停机异常或流量无法排空时，工具恢复旧服务与 Nginx，保留记录供复查。
+若 SSH/执行进程意外中断，先只读检查 state.json、活动容器和 Nginx 文件；
+当状态仍标记 `maintenanceActive=true` 时，可运行
+`release_maintenance.py --spec <本次私有spec> --state-dir <本次state目录> --phase disarm --apply`
+恢复原始站点文件并重新加载 Nginx，随后再核对公网与容器健康。
+本地主容器版本不匹配时入口立即停止：本地容器更新仍遵循独立候选、逐项 Docker
+状态变更和真实请求验证，不会仅凭镜像构建成功就发布生产。
+
 ## 构建一次，复用基础镜像
 
 在 Git Bash/Linux Bash 中，从仓库根目录执行：
@@ -110,20 +156,23 @@ python3 scripts/ops/release.py --spec /root/private-release/spec.json \
 | --- | --- |
 | preflight | 核对主机、daemon、镜像 revision、旧服务、挂载、Nginx、清单与预算；保存原容器 ID 和限权恢复资料 |
 | prepare | 配置快照、启动隔离候选、检查 worker/Redis/积压；预创建最终容器并比较设置，旧服务继续运行 |
-| cutover | 重新校验，要求 `--writes-paused` 表示已暂停管理/OAuth 写入；停止候选及旧服务，抓取最终配置，改名并启动新服务 |
+| cutover | 重新校验已启用的维护入口，要求 `--writes-paused --ingress-paused`；在途请求、积压和 spool 连续清零后才停止旧服务 |
 | verify | 检查 active ID、镜像、REVISION、epoch、worker、Redis、spool、积压趋势、公网和 Nginx；服务恢复后压缩并逐文件校验备份 |
 | rollback | 按原 ID 恢复旧容器；先停止新写入者，不删除旧容器，不覆盖数据库或整卷配置 |
 | cleanup | 成功发布且备份校验通过后清理停止的候选；保留两次成功发布的备份与回滚点，只删除登记且复核一致的对象 |
 
-普通发布复用固定端口，Nginx 配置不变；无需将候选端口安装为生产 upstream。
-Nginx/edge-auth/网络拓扑调整需要单独方案。本脚本不自动启用 EDGE_ADMISSION_REQUIRED。
+普通发布复用固定端口，不把候选端口安装为生产 upstream。维护模式临时改动经 SHA-256
+核对的站点文件，先 `nginx -t` 再 reload；失败则恢复原件。切换后先恢复 Nginx 再做最终验收。
+Nginx/edge-auth/网络拓扑的永久调整需要单独方案。本脚本不自动启用 EDGE_ADMISSION_REQUIRED。
 部分 prepare 失败保留证据，不自动重跑创建；检查后清理精确的本次候选对象并使用新 release 目录。
 cutover/active 验证失败尝试回滚，回滚失败明确记录 manual_attention_required。
 备份压缩失败只阻止完成/清理，不把已验证健康的服务切回旧版，可重跑 verify。
 
+在线健康允许短时正常积压。停服前的独立排空门槛要求 `metrics.inFlight=0`、
+`persistenceBacklog=0`、`runtimeHooks.spooled=0` 连续三次采样；未满足时报告计数并保持旧服务。
 120 秒 stop 超时、exit 137、OOM 或非正常退出均阻断继续交接并恢复旧服务，保留退出状态。
-不缩短 timeout，不把进程停止等同于事件持久化成功。历史超时原因仍需结合 master/worker
-日志、PID 1 信号传递及 spool/Redis 状态单独定位；本轮不修改应用关闭行为。
+回滚检查确认旧服务健康和 worker 收敛，不要求活跃服务的 spool 永远为零。
+不缩短 stop timeout，不把进程停止等同于事件持久化成功。
 
 ## 代码验证、推送和结果
 
