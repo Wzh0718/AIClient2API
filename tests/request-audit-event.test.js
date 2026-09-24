@@ -235,6 +235,63 @@ describe('request audit event', () => {
     expect(event.response.durationMs).toBeNull();
   });
 
+  test('uses runtime duration when response and context durations are absent', () => {
+    const event = buildRequestAuditEvent({
+      requestId: 'req-runtime-duration-fallback',
+      response: { httpStatus: 200, completed: true },
+      runtime: { durationMs: 842 }
+    });
+
+    expect(event.response.durationMs).toBe(842);
+  });
+
+  test('prefers response duration, then context duration, then runtime duration', () => {
+    const responseDuration = buildRequestAuditEvent({
+      requestId: 'req-response-duration-precedence',
+      response: { httpStatus: 200, completed: true, durationMs: 123 },
+      durationMs: 456,
+      runtime: { durationMs: 789 }
+    });
+    const contextDuration = buildRequestAuditEvent({
+      requestId: 'req-context-duration-precedence',
+      response: { httpStatus: 200, completed: true },
+      durationMs: 456,
+      runtime: { durationMs: 789 }
+    });
+
+    expect(responseDuration.response.durationMs).toBe(123);
+    expect(contextDuration.response.durationMs).toBe(456);
+  });
+
+  test('preserves zero duration and falls back past invalid higher-priority values', () => {
+    const zeroDuration = buildRequestAuditEvent({
+      requestId: 'req-zero-duration',
+      response: { httpStatus: 200, completed: true, durationMs: 0 },
+      durationMs: 456,
+      runtime: { durationMs: 789 }
+    });
+    const runtimeFallback = buildRequestAuditEvent({
+      requestId: 'req-invalid-duration-fallback',
+      response: { httpStatus: 200, completed: true, durationMs: -1 },
+      durationMs: Infinity,
+      runtime: { durationMs: 789 }
+    });
+
+    expect(zeroDuration.response.durationMs).toBe(0);
+    expect(runtimeFallback.response.durationMs).toBe(789);
+  });
+
+  test('keeps duration null when every source is missing or invalid', () => {
+    const event = buildRequestAuditEvent({
+      requestId: 'req-no-valid-duration',
+      response: { httpStatus: 200, completed: true, durationMs: -1 },
+      durationMs: 'bad',
+      runtime: { durationMs: Infinity }
+    });
+
+    expect(event.response.durationMs).toBeNull();
+  });
+
   test('records cache coordination evidence without raw identifiers', () => {
     const event = buildRequestAuditEvent({
       requestId: 'req-cache-v4',

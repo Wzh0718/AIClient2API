@@ -124,8 +124,7 @@ function normalizeResponse(context = {}) {
     const rawStatus = source.httpStatus ?? context.httpStatus;
     const httpStatus = Number.isInteger(Number(rawStatus)) ? Number(rawStatus) : null;
     const rawImageResult = source.hasImageResult ?? context.hasImageResult;
-    const rawDuration = source.durationMs ?? context.durationMs;
-    const durationMs = Number.isFinite(Number(rawDuration)) && Number(rawDuration) >= 0 ? Number(rawDuration) : null;
+    const durationMs = normalizeDurationMs(source.durationMs, context.durationMs, context.runtime?.durationMs);
     const errorCode = sanitizeDiagnosticCode(source.errorCode ?? context.errorCode);
     return {
         httpStatus,
@@ -136,6 +135,16 @@ function normalizeResponse(context = {}) {
         durationMs,
         errorCode
     };
+}
+
+function normalizeDurationMs(...candidates) {
+    for (const candidate of candidates) {
+        if (typeof candidate !== 'number' && typeof candidate !== 'string') continue;
+        if (typeof candidate === 'string' && candidate.trim() === '') continue;
+        const durationMs = Number(candidate);
+        if (Number.isFinite(durationMs) && durationMs >= 0) return durationMs;
+    }
+    return null;
 }
 
 function normalizeRuntime(runtime = {}) {
