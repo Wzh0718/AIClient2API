@@ -1,7 +1,33 @@
 import fs from 'fs';
 import path from 'path';
+import vm from 'vm';
 
 describe('provider modal source regressions', () => {
+    test('provider select rendering matches boolean config values to string options', () => {
+        const source = fs.readFileSync(path.join(process.cwd(), 'static/app/modal.js'), 'utf8').replace(/\r\n/g, '\n');
+        const helperStart = source.indexOf('function isProviderConfigSelectOptionSelected(');
+        const helperEnd = source.indexOf('\n}', helperStart) + 2;
+        expect(helperStart).toBeGreaterThanOrEqual(0);
+        expect(helperEnd).toBeGreaterThan(helperStart);
+
+        const context = {};
+        vm.runInNewContext(
+            `${source.slice(helperStart, helperEnd)}\nthis.isProviderConfigSelectOptionSelected = isProviderConfigSelectOptionSelected;`,
+            context
+        );
+
+        const renderStart = source.indexOf("} else if (field1Def.type === 'select') {");
+        const renderEnd = source.indexOf("} else if (field1Def.type === 'boolean') {", renderStart);
+        const selectRendering = source.slice(renderStart, renderEnd);
+        expect(selectRendering).toContain('field1Value ?? field1Def.value ?? \'session\'');
+        expect(selectRendering).toContain('isProviderConfigSelectOptionSelected(actualValue, option.value)');
+
+        expect(context.isProviderConfigSelectOptionSelected(true, 'true')).toBe(true);
+        expect(context.isProviderConfigSelectOptionSelected(false, 'false')).toBe(true);
+        expect(context.isProviderConfigSelectOptionSelected('gpt-6-luna', 'gpt-6-luna')).toBe(true);
+        expect(context.isProviderConfigSelectOptionSelected('gpt-6-luna', 'gpt-6-sol')).toBe(false);
+    });
+
     test('OAuth file path field rendering does not reference the next field definition', () => {
         const source = fs.readFileSync(path.join(process.cwd(), 'static/app/modal.js'), 'utf8').replace(/\r\n/g, '\n');
         const branchStart = source.indexOf('} else if (field1IsOAuthFilePath) {');

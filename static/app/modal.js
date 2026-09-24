@@ -1461,6 +1461,10 @@ function renderProviderList(providers) {
     }
 }
 
+function isProviderConfigSelectOptionSelected(actualValue, optionValue) {
+    return String(actualValue) === String(optionValue);
+}
+
 /**
  * 渲染提供商配置
  * @param {Object} provider - 提供商对象
@@ -1576,12 +1580,12 @@ function renderProviderConfig(provider) {
         if (field1Def.type === 'proxy-select') {
             html += renderProxySelectField(field1Key, field1Label, field1Value, true);
         } else if (field1Def.type === 'select') {
-            const actualValue = field1Value || field1Def.value || 'session';
+            const actualValue = field1Value ?? field1Def.value ?? 'session';
             html += `
                 <div class="config-item">
                     <label>${field1Label}</label>
                     <select class="form-control" data-config-key="${field1Key}" data-config-value="${actualValue}" disabled>
-                        ${(field1Def.options || []).map(option => `<option value="${option.value}" ${actualValue === option.value ? 'selected' : ''}>${option.label}</option>`).join('')}
+                        ${(field1Def.options || []).map(option => `<option value="${option.value}" ${isProviderConfigSelectOptionSelected(actualValue, option.value) ? 'selected' : ''}>${option.label}</option>`).join('')}
                     </select>
                     ${field1Def.help ? `<small class="form-text">${field1Def.help}</small>` : ''}
                 </div>
