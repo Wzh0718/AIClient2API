@@ -10,7 +10,7 @@ describe('stable image build operations', () => {
     test('build script enables reproducible proxy, retries and stage timing', () => {
         const script = read('scripts/ops/build-image.sh');
 
-        expect(script).toContain('BUILD_HTTP_PROXY=${BUILD_HTTP_PROXY:-http://192.168.4.242:7890}');
+        expect(script).toContain('BUILD_HTTP_PROXY=${BUILD_HTTP_PROXY-http://192.168.4.242:7890}');
         expect(script).toContain('BUILD_RETRIES=${BUILD_RETRIES:-2}');
         expect(script).toContain('stage_start()');
         expect(script).toContain('build attempt');
@@ -37,7 +37,8 @@ describe('stable image build operations', () => {
 
         expect(script).toContain('aiclient2api:node20-alpine-build-base');
         expect(script).toContain('docker build --progress=plain');
-        expect(dockerfile).toContain('FROM node:20-alpine');
+        expect(dockerfile).toContain('ARG NODE_BASE_IMAGE=node:20-alpine');
+        expect(dockerfile).toContain('FROM ${NODE_BASE_IMAGE}');
         expect(dockerfile).toContain('python3 make g++');
         expect(dockerfile).toContain('git tar procps');
         expect(dockerfile).toContain('ALPINE_MIRROR');

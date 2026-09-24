@@ -14,6 +14,13 @@
 #   logs/           可再生
 set -eu
 
+# Explicit release profile; the positional daily/cron interface stays unchanged.
+if [ "${1:-}" = "--profile" ]; then
+  [ "${2:-}" = "release" ] || { echo "unknown backup profile" >&2; exit 2; }
+  shift 2
+  exec python3 "$(dirname "$0")/release_backup.py" "$@"
+fi
+
 CONFIG_DIR=${1:-/root/ai_client_configs}
 BACKUP_DIR=${2:-/root/backups/aiclient2api-configs}
 KEEP=${3:-14}

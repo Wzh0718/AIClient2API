@@ -1,5 +1,25 @@
 # 可选内部 Node 基础镜像；默认保持官方镜像兼容。
 ARG NODE_BASE_IMAGE=node:20-alpine
+ARG NODE_BUILD_IMAGE=node:20-alpine
+
+# Stable native dependency stage. An internal build base supplies the toolchain;
+# the official image remains a supported cold-build fallback.
+FROM ${NODE_BUILD_IMAGE} AS node-dependencies
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG ALPINE_MIRROR=mirrors.aliyun.com
+WORKDIR /app
+RUN missing=""; \
+    sed -i "s#dl-cdn.alpinelinux.org#$ALPINE_MIRROR#g" /etc/apk/repositories; \
+    for pair in python3:python3 make:make g++:g++; do \
+      command -v "${pair%%:*}" >/dev/null 2>&1 || missing="$missing ${pair#*:}"; \
+    done; \
+    if [ -n "$missing" ]; then apk add --no-cache $missing; fi
+COPY package*.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm_config_proxy="$HTTP_PROXY" npm_config_https_proxy="$HTTPS_PROXY" npm ci --omit=dev \
+    && node -e "require('better-sqlite3')(':memory:').close(); console.log('better-sqlite3 runtime ok')" \
+    && node -e "import('sharp').then(() => console.log('sharp runtime ok'))"
 
 # ── Stage 1: 编译 Go TLS sidecar ──
 FROM golang:1.22-alpine AS sidecar-builder
@@ -35,15 +55,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM ${NODE_BASE_IMAGE}
 
 ARG ALPINE_MIRROR=mirrors.aliyun.com
-ARG APP_REVISION=unknown
-ARG APP_BUILD_DATE=unknown
 
 # 设置标签
 LABEL maintainer="AIClient2API Team"
 LABEL description="Docker image for AIClient2API server"
-LABEL yyn.base_commit=$APP_REVISION
-LABEL yyn.build_date=$APP_BUILD_DATE
-LABEL yyn.build_source=git-archive
 
 # 代理参数仅用于构建时，不持久化到最终镜像
 ARG HTTP_PROXY
@@ -60,19 +75,12 @@ RUN missing=""; \
 # 设置工作目录
 WORKDIR /app
 
-RUN printf '%s\n' "$APP_REVISION" > /app/REVISION
-
 # 复制package.json和package-lock.json（如果存在）
 COPY package*.json ./
 
 # 构建时代理（如果提供了的话）。better-sqlite3 在 Alpine 上可能需要本地编译，
 # 安装失败时不能跳过 lifecycle scripts，否则镜像会构建成功但 control worker 无法启动。
-RUN --mount=type=cache,target=/root/.npm \
-    apk add --no-cache --virtual .native-build-deps python3 make g++ \
-    && npm_config_proxy="$HTTP_PROXY" npm_config_https_proxy="$HTTPS_PROXY" npm ci --omit=dev \
-    && node -e "require('better-sqlite3')(':memory:').close(); console.log('better-sqlite3 runtime ok')" \
-    && node -e "import('sharp').then(() => console.log('sharp runtime ok'))" \
-    && apk del .native-build-deps
+COPY --from=node-dependencies /app/node_modules ./node_modules
 
 # 构建代理只用于依赖下载，不得进入运行时环境。
 ENV HTTP_PROXY="" HTTPS_PROXY="" http_proxy="" https_proxy=""
@@ -89,6 +97,15 @@ USER root
 
 # 创建目录用于存储日志和系统提示文件
 RUN mkdir -p /app/logs
+
+# Release metadata is deliberately last: changing a commit/date must not evict
+# system packages, npm dependencies or the sidecar build from the cache.
+ARG APP_REVISION=unknown
+ARG APP_BUILD_DATE=unknown
+LABEL yyn.base_commit=$APP_REVISION
+LABEL yyn.build_date=$APP_BUILD_DATE
+LABEL yyn.build_source=git-archive
+RUN printf '%s\n' "$APP_REVISION" > /app/REVISION
 
 # 暴露端口
 EXPOSE 3000 8085 8086 19876-19880

@@ -2,6 +2,10 @@
 
 This documents the two standing ops scripts under `scripts/ops/`. Both target the production Linux server. Do not commit generated backups, archives, or any credential files.
 
+For ordinary releases use [the fast release workflow](ops-release-fast-path.md).
+`backup-configs.sh --profile release` selects an explicit file allowlist and excludes databases;
+the daily positional interface below intentionally remains unchanged.
+
 ## Daily Config Backup
 
 `scripts/ops/backup-configs.sh` archives the config volume to a directory outside the volume and keeps the most recent N archives.
@@ -34,13 +38,17 @@ The build helper defaults to the project Docker build proxy `http://192.168.4.24
 
 The Dockerfile mounts BuildKit caches for Go modules, Go compilation, and npm's cache. Keep BuildKit enabled. The first cold build can still spend several minutes downloading Alpine packages and compiling native modules; subsequent builds should reuse those layers unless the base image, package manifests, or native-tool layer changes. Do not hide dependency failures with `|| true`; a missing Go checksum or native module must fail the build.
 
-For machines that build frequently, prepare the optional internal base once:
+The build helper now resolves and reuses a content-keyed internal **build-stage** base automatically.
+Its key includes the cached parent image ID, platform and base Dockerfile; it is rebuilt only when missing or changed.
+The final runtime uses the official Node parent and copies production dependencies from the build stage.
+To prepare a base manually for diagnostics:
 
 ```bash
 ./scripts/ops/build-base-image.sh aiclient2api:node20-alpine-build-base
-NODE_BASE_IMAGE=aiclient2api:node20-alpine-build-base ./scripts/ops/build-image.sh
 ```
 
-This preinstalls `git`, `tar`, `procps`, `python3`, `make`, and `g++`. It mainly improves cold-build and cache-reset scenarios; normal warm builds already reuse Docker layers. The application image remains compatible with the official `node:20-alpine` default when `NODE_BASE_IMAGE` is not set. The trade-off is maintaining and periodically rebuilding the internal base when the Node/Alpine security baseline changes.
+This preinstalls `git`, `tar`, `procps`, `python3`, `make`, and `g++` for compilation only.
+Do not set NODE_BASE_IMAGE to the compiler image: NODE_BASE_IMAGE selects the runtime parent.
+Review and deliberately update the parent security baseline separately from ordinary deployments.
 
 Labels `yyn.base_commit`, `yyn.build_source=git-archive`, and `yyn.build_date` are stamped for container source verification. Rollout still follows the AGENTS.md remote ops protocol: record current image/health, rename the old container as a timestamped backup, start the new one, verify Docker health and `/health`.

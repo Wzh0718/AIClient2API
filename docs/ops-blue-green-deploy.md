@@ -1,5 +1,9 @@
 # AIClient2API 轻量蓝绿部署设计
 
+普通代码发布现可使用[分阶段发布工具](ops-release-fast-path.md)。
+原 `--image/--revision/--phase prepare` 候选入口继续兼容；完整发布使用 `--release-spec`。
+该流程维持固定 upstream/端口，正式交接不需要安装候选 upstream；下文人工步骤仍供拓扑变更时参考。
+
 ## 目标与边界
 
 本方案先解决当前“停旧容器后才启动新容器”造成的长时间 502：候选镜像在备用主 API 端口完成启动、版本和健康预检，确认可用后才进入正式交接。

@@ -4,6 +4,13 @@
 # 本工具不自动执行有状态切换，也不发布 OAuth 固定端口。
 set -eu
 
+# Opt into the recorded full release workflow; legacy candidate-only CLI remains.
+if [ "${1:-}" = "--release-spec" ]; then
+  spec=${2:?missing release spec}
+  shift 2
+  exec python3 "$(dirname "$0")/release.py" --spec "$spec" "$@"
+fi
+
 APPLY=0
 PHASE=plan
 IMAGE=""
@@ -136,7 +143,7 @@ prepare_candidate() {
   # writing, so copying it both wastes disk and yields a torn database: the
   # candidate then dies at startup with SQLITE_CORRUPT. The candidate creates a
   # fresh store instead; durable usage data stays with the active container.
-  SNAPSHOT_EXCLUDES="--exclude=request-audit --exclude=app-logs --exclude=usage-events"
+  SNAPSHOT_EXCLUDES="--exclude=request-audit --exclude=app-logs --exclude=usage-events --exclude=logs --exclude=permanent-usage-ledger --exclude=*spool* --exclude=backups --exclude=*.sqlite* --exclude=*.db --exclude=*.db-wal --exclude=*.db-shm"
   # shellcheck disable=SC2086
   SNAPSHOT_REQUIRED_BYTES=$(du -sb $SNAPSHOT_EXCLUDES "$CONFIG_DIR" | awk '{print $1}')
   snapshot_available_bytes=$(df -B1 --output=avail "$STATE_DIR" 2>/dev/null | tail -1 | tr -d ' ')
