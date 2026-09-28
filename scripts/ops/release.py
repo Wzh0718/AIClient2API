@@ -487,9 +487,13 @@ def main():
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--writes-paused', action='store_true')
     parser.add_argument('--ingress-paused', action='store_true')
+    parser.add_argument('--drain-timeout', type=int)
+    parser.add_argument('--max-forced-in-flight', type=int, default=0)
     args = parser.parse_args()
     release = Release(args.spec, args.state_dir)
-    print(json.dumps(release.run(args.phase, args.apply, args.writes_paused, args.ingress_paused), ensure_ascii=False))
+    print(json.dumps(release.run(args.phase, args.apply, args.writes_paused, args.ingress_paused,
+                                 drain_timeout=args.drain_timeout,
+                                 max_forced_in_flight=args.max_forced_in_flight), ensure_ascii=False))
 
 
 if __name__ == '__main__':
