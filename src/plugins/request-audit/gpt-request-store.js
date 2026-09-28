@@ -2,6 +2,31 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { captureStatus } from './capture-status.js';
 
+const GLM_HISTORY_DAYS = 35;
+const GLM_USAGE_FIELDS = ['promptTokens', 'completionTokens', 'cachedTokens', 'totalTokens'];
+
+function beijingDate(value) {
+    return new Date(new Date(value).getTime() + 8 * 3600_000).toISOString().slice(0, 10);
+}
+
+function dateBefore(date, days) {
+    return new Date(Date.parse(`${date}T00:00:00Z`) - days * 86400_000).toISOString().slice(0, 10);
+}
+
+function glmUsageProjection(event) {
+    if (event?.request?.toProvider !== 'glm-coding-plan' || !event.requestId || !event.timestamp) return null;
+    const usage = event.usage || {};
+    const known = Number(usage.totalTokens) > 0;
+    return {
+        eventId: event.eventId || `request:${event.requestId}`,
+        date: event.beijingDate || beijingDate(event.timestamp),
+        credentialHash: event.account?.providerUuidHash || '',
+        outcome: event.status?.outcome === 'success' ? 'success' : 'failure',
+        known: known ? 1 : 0,
+        ...Object.fromEntries(GLM_USAGE_FIELDS.map(field => [field, known ? Number(usage[field] || 0) : 0]))
+    };
+}
+
 const CAPTURE_FAILURE_SQL = `COALESCE((
     json_extract(payload_json, '$.capture.status') = 'failed'
     OR (outcome = 'success'
@@ -74,6 +99,22 @@ export class GptRequestStore {
                 payload_json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_gpt_attempts_request ON gpt_request_attempts(request_id, sequence);
+            CREATE TABLE IF NOT EXISTS glm_usage_events (
+                event_id TEXT PRIMARY KEY, date TEXT NOT NULL, credential_hash TEXT NOT NULL,
+                outcome TEXT NOT NULL, known INTEGER NOT NULL,
+                prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL,
+                cached_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_glm_usage_events_day ON glm_usage_events(date, credential_hash);
+            CREATE TABLE IF NOT EXISTS glm_usage_daily (
+                date TEXT NOT NULL, credential_hash TEXT NOT NULL,
+                request_count INTEGER NOT NULL, success_count INTEGER NOT NULL,
+                failure_count INTEGER NOT NULL, unknown_token_requests INTEGER NOT NULL,
+                prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL,
+                cached_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL,
+                PRIMARY KEY(date, credential_hash)
+            );
+            CREATE TABLE IF NOT EXISTS glm_usage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         `);
         this.statements = {
             request: this.db.prepare(`INSERT OR REPLACE INTO gpt_requests (
@@ -94,10 +135,71 @@ export class GptRequestStore {
             pruneAttempts: this.db.prepare('DELETE FROM gpt_request_attempts WHERE request_id IN (SELECT request_id FROM gpt_requests WHERE timestamp < ?)'),
             pruneRequests: this.db.prepare('DELETE FROM gpt_requests WHERE timestamp < ?')
         };
+        this.glmStatements = {
+            getEvent: this.db.prepare(`SELECT date, credential_hash credentialHash, outcome, known,
+                prompt_tokens promptTokens, completion_tokens completionTokens,
+                cached_tokens cachedTokens, total_tokens totalTokens FROM glm_usage_events WHERE event_id = ?`),
+            upsertEvent: this.db.prepare(`INSERT OR REPLACE INTO glm_usage_events
+                (event_id, date, credential_hash, outcome, known, prompt_tokens, completion_tokens, cached_tokens, total_tokens)
+                VALUES (@eventId, @date, @credentialHash, @outcome, @known, @promptTokens, @completionTokens, @cachedTokens, @totalTokens)`),
+            addDay: this.db.prepare(`INSERT INTO glm_usage_daily
+                (date, credential_hash, request_count, success_count, failure_count,
+                    unknown_token_requests, prompt_tokens, completion_tokens, cached_tokens, total_tokens)
+                VALUES (@date, @credentialHash, @requestCount, @successCount, @failureCount,
+                    @unknownTokenRequests, @promptTokens, @completionTokens, @cachedTokens, @totalTokens)
+                ON CONFLICT(date, credential_hash) DO UPDATE SET
+                    request_count = request_count + excluded.request_count,
+                    success_count = success_count + excluded.success_count,
+                    failure_count = failure_count + excluded.failure_count,
+                    unknown_token_requests = unknown_token_requests + excluded.unknown_token_requests,
+                    prompt_tokens = prompt_tokens + excluded.prompt_tokens,
+                    completion_tokens = completion_tokens + excluded.completion_tokens,
+                    cached_tokens = cached_tokens + excluded.cached_tokens,
+                    total_tokens = total_tokens + excluded.total_tokens`),
+            deleteEmptyDay: this.db.prepare('DELETE FROM glm_usage_daily WHERE date = ? AND credential_hash = ? AND request_count <= 0'),
+            coverage: this.db.prepare("SELECT value FROM glm_usage_meta WHERE key = 'coverage_start'"),
+            setCoverage: this.db.prepare("INSERT OR IGNORE INTO glm_usage_meta(key, value) VALUES ('coverage_start', ?)")
+        };
         this.writeTransaction = this.db.transaction(events => {
             for (const event of events) this._append(event);
         });
+        const existingCount = this.db.prepare('SELECT COUNT(*) AS count FROM gpt_requests').get().count;
+        const coverageStart = existingCount ? new Date(Date.now() - this.retentionDays * 86400_000).toISOString() : new Date().toISOString();
+        this.glmStatements.setCoverage.run(coverageStart);
+        if (this.db.prepare('SELECT COUNT(*) AS count FROM glm_usage_events').get().count === 0) {
+            const backfillPage = this.db.prepare("SELECT payload_json FROM gpt_requests WHERE provider = 'glm-coding-plan' ORDER BY timestamp, event_id LIMIT 500 OFFSET ?");
+            this.db.transaction(() => {
+                for (let offset = 0; ; offset += 500) {
+                    const rows = backfillPage.all(offset);
+                    for (const row of rows) this._upsertGlmUsage(JSON.parse(row.payload_json));
+                    if (rows.length < 500) break;
+                }
+            })();
+        }
         return this;
+    }
+
+    _upsertGlmUsage(event) {
+        const next = glmUsageProjection(event);
+        if (!next) return;
+        const previous = this.glmStatements.getEvent.get(next.eventId);
+        if (previous && ['date', 'credentialHash', 'outcome', 'known', ...GLM_USAGE_FIELDS]
+            .every(field => previous[field] === next[field])) return;
+        if (previous) this._addGlmDay(previous, -1);
+        this.glmStatements.upsertEvent.run(next);
+        this._addGlmDay(next, 1);
+    }
+
+    _addGlmDay(row, sign) {
+        this.glmStatements.addDay.run({
+            date: row.date, credentialHash: row.credentialHash,
+            requestCount: sign,
+            successCount: sign * Number(row.outcome === 'success'),
+            failureCount: sign * Number(row.outcome !== 'success'),
+            unknownTokenRequests: sign * Number(row.known === 0),
+            ...Object.fromEntries(GLM_USAGE_FIELDS.map(field => [field, sign * row[field]]))
+        });
+        if (sign < 0) this.glmStatements.deleteEmptyDay.run(row.date, row.credentialHash);
     }
 
     _append(event) {
@@ -105,7 +207,7 @@ export class GptRequestStore {
         const provider = String(event.request?.toProvider || '');
         const models = [event.request?.requestedModel, event.request?.plannedModel, event.request?.outboundModel, event.request?.upstreamResponseModel];
         const codexPath = /^\/openai-codex-oauth\/v1\/(?:responses|chat\/completions)$/.test(String(event.request?.path || ''));
-        if (!codexPath && !/openai|codex/i.test(provider) && !models.some(model => /^gpt[-_]/i.test(String(model || '')))) return;
+        if (!codexPath && provider !== 'glm-coding-plan' && !/openai|codex/i.test(provider) && !models.some(model => /^gpt[-_]/i.test(String(model || '')))) return;
         this.statements.request.run({
             eventId: event.eventId || `request:${event.requestId}`,
             requestId: event.requestId,
@@ -132,6 +234,33 @@ export class GptRequestStore {
                 status: attempt.status, httpStatus: attempt.httpStatus, payloadJson: JSON.stringify(attempt)
             });
         }
+        this._upsertGlmUsage(event);
+    }
+
+    queryGlmUsage(now = new Date()) {
+        const today = beijingDate(now);
+        const starts = { today, week: dateBefore(today, 6), month: dateBefore(today, 29) };
+        const coverageStart = this.glmStatements.coverage.get()?.value || now.toISOString();
+        const rows = this.db.prepare('SELECT * FROM glm_usage_daily WHERE date >= ? AND date <= ? ORDER BY date, credential_hash').all(starts.month, today);
+        const empty = () => ({ requestCount: 0, successCount: 0, failureCount: 0, unknownTokenRequests: 0,
+            promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0 });
+        const credentials = {};
+        const total = { today: empty(), week: empty(), month: empty() };
+        for (const row of rows) {
+            const periods = credentials[row.credential_hash] ||= { today: empty(), week: empty(), month: empty() };
+            for (const [period, start] of Object.entries(starts)) {
+                if (row.date < start) continue;
+                for (const bucket of [periods[period], total[period]]) {
+                    for (const [target, source] of [['requestCount', 'request_count'], ['successCount', 'success_count'],
+                        ['failureCount', 'failure_count'], ['unknownTokenRequests', 'unknown_token_requests'],
+                        ['promptTokens', 'prompt_tokens'], ['completionTokens', 'completion_tokens'],
+                        ['cachedTokens', 'cached_tokens'], ['totalTokens', 'total_tokens']]) bucket[target] += row[source];
+                }
+            }
+        }
+        const coverage = Object.fromEntries(Object.entries(starts).map(([period, start]) =>
+            [period, Date.parse(coverageStart) > Date.parse(`${start}T00:00:00+08:00`)]));
+        return { today, coverage, total, credentials };
     }
 
     append(event) { if (!this.db) return false; this.writeTransaction([event]); return true; }
@@ -276,7 +405,13 @@ export class GptRequestStore {
 
     cleanup(now = new Date()) {
         const cutoff = new Date(now.getTime() - this.retentionDays * 86400_000).toISOString();
-        this.db.transaction(() => { this.statements.pruneAttempts.run(cutoff); this.statements.pruneRequests.run(cutoff); })();
+        const glmCutoff = dateBefore(beijingDate(now), GLM_HISTORY_DAYS);
+        this.db.transaction(() => {
+            this.statements.pruneAttempts.run(cutoff);
+            this.statements.pruneRequests.run(cutoff);
+            this.db.prepare('DELETE FROM glm_usage_events WHERE date < ?').run(glmCutoff);
+            this.db.prepare('DELETE FROM glm_usage_daily WHERE date < ?').run(glmCutoff);
+        })();
     }
 
     close() { this.db?.close(); this.db = null; }

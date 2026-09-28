@@ -89,6 +89,30 @@
     overflow: hidden;
 }
 
+.glm-usage-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+}
+.glm-usage-content { padding: 0.75rem 1rem 1rem; }
+.glm-usage-source { margin: 0 0 0.75rem; color: var(--text-secondary); font-size: 0.75rem; }
+.glm-usage-node { padding: 0.85rem; margin-top: 0.65rem; border: 1px solid var(--border-color); border-radius: 0.5rem; background: var(--bg-secondary); }
+.glm-usage-node-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.7rem; overflow-wrap: anywhere; }
+.glm-usage-node-heading strong { color: var(--text-primary); font-size: 0.85rem; }
+.glm-usage-node-heading span, .glm-usage-empty { color: var(--text-secondary); font-size: 0.72rem; }
+.glm-usage-node .account-usage-period-value { font-size: 1rem; }
+@media (max-width: 600px) {
+    .glm-usage-group .usage-group-header { align-items: flex-start; flex-direction: column; gap: 0.5rem; }
+    .glm-usage-node .account-usage-period-grid { grid-template-columns: 1fr; }
+}
+
 .usage-group-header {
     display: flex;
     align-items: center;
@@ -1116,4 +1140,9 @@
 [data-theme="dark"] .extra-usage-info.official-token-note { background: var(--info-bg); color: var(--info-text); border-color: var(--info-border); }
 [data-theme="dark"] .pagination-container { background: var(--bg-tertiary); }
 [data-theme="dark"] .page-btn { background: var(--bg-primary); border-color: var(--border-color); color: var(--text-primary); }
+
+@media (max-width: 600px) {
+    .glm-usage-group .usage-group-actions { width: 100%; justify-content: space-between; }
+    .glm-usage-group .provider-last-update { max-width: none; white-space: normal; overflow: visible; text-overflow: clip; }
+}
 [data-theme="dark"] .page-jump-input { background: var(--bg-primary); border-color: var(--border-color); color: var(--text-primary); }

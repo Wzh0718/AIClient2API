@@ -107,6 +107,16 @@ describe('GLM Coding Plan adapter', () => {
         await expect((async () => { for await (const event of service.generateContentStream('gpt-6-sol', { input: 'hi' })) events.push(event); })()).rejects.toMatchObject({ code: 'GLM_INCOMPLETE_STREAM' });
         expect(events).toHaveLength(1);
     });
+    test('a GLM response.incomplete event never passes as a completed stream', async () => {
+        const service = new GlmCodingPlanAdapter({ GLM_API_KEY: 'test-key', MODEL_PROVIDER: 'glm-coding-plan' });
+        service.client.request = async () => ({ data: Readable.from([
+            'data: {"type":"response.incomplete","response":{"status":"incomplete"}}\n\n',
+            'data: [DONE]\n\n'
+        ]) });
+        await expect((async () => {
+            for await (const _event of service.generateContentStream('gpt-6-sol', { input: 'hi' })) { /* inspect terminal */ }
+        })()).rejects.toMatchObject({ code: 'GLM_INCOMPLETE_STREAM' });
+    });
     test('stream preserves the GPT alias and accepts a completed tool call', async () => {
         const service = new GlmCodingPlanAdapter({ GLM_API_KEY: 'test-key', MODEL_PROVIDER: 'glm-coding-plan' });
         service.client.request = async () => ({ data: Readable.from([

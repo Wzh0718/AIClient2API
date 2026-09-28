@@ -95,9 +95,9 @@ export async function handleGlmProtocolTest(req, res, currentConfig, manager, uu
     }
     const adapter = new GlmCodingPlanAdapter({ ...currentConfig, ...provider, MODEL_PROVIDER: 'glm-coding-plan', GLM_TIMEOUT_MS: 30000 });
     const cases = [
-        ['chat', { model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'Reply ok.' }], max_tokens: 16 }],
-        ['responses', { model: 'glm-5.3-flash', input: 'Reply ok.', max_output_tokens: 16 }],
-        ['tools', { model: 'glm-5.3-flash', input: 'Call probe with value ok.', max_output_tokens: 64,
+        ['chat', { model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'Reply ok.' }], max_tokens: 1024 }],
+        ['responses', { model: 'glm-5.3-flash', input: 'Reply ok.', max_output_tokens: 1024 }],
+        ['tools', { model: 'glm-5.3-flash', input: 'Call probe with value ok.', max_output_tokens: 1024,
             tools: [{ type: 'function', name: 'probe', description: 'Test tool routing', parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] } }],
             tool_choice: 'required' }]
     ];
@@ -105,8 +105,10 @@ export async function handleGlmProtocolTest(req, res, currentConfig, manager, uu
     for (const [name, body] of cases) {
         try {
             const response = await adapter.generateContent('glm-5.3-flash', body);
-            const terminal = name === 'chat' ? Boolean(response?.choices?.[0]?.message?.content)
-                : response?.status === 'completed' && Array.isArray(response?.output);
+            const terminal = name === 'chat'
+                ? response?.choices?.[0]?.finish_reason === 'stop' && Boolean(response.choices[0].message?.content)
+                : response?.status === 'completed' && Array.isArray(response?.output)
+                    && (name === 'tools' || response.output.some(item => item.type === 'message' && item.content?.some(part => part.type === 'output_text' && part.text)));
             const toolCall = name !== 'tools' || response?.output?.some(item => item.type === 'function_call' && item.name === 'probe' && item.call_id && item.arguments);
             results.push({ name, success: terminal && toolCall, code: terminal && toolCall ? null : 'GLM_INVALID_RESPONSE' });
         } catch (error) { results.push({ name, success: false, code: error.code || 'GLM_TEST_FAILED', status: error.status || null }); }
