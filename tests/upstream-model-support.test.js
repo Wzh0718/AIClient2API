@@ -21,13 +21,9 @@ function loadEnsureToolCallIds() {
 }
 
 describe('upstream model registrations', () => {
-    test('no longer advertises Gemini 3.5 Flash for Antigravity', () => {
-        // Antigravity does not host these; advertising them produced tens of
-        // thousands of upstream 404s before the list was converged.
-        expect(getProviderModels('gemini-antigravity')).toEqual(expect.not.arrayContaining([
-            'gemini-3.5-flash',
-            'gemini-3.5-flash-lite'
-        ]));
+    test('advertises Gemini 3.5 Flash-Lite but not retired Gemini 3.5 Flash for Antigravity', () => {
+        expect(getProviderModels('gemini-antigravity')).toContain('gemini-3.5-flash-lite');
+        expect(getProviderModels('gemini-antigravity')).not.toContain('gemini-3.5-flash');
     });
 
     test('registers current Grok CLI OAuth models', () => {
