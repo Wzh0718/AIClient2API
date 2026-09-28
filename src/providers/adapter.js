@@ -1,4 +1,5 @@
 import { OpenAIResponsesApiService } from './openai/openai-responses-core.js';
+import { GlmCodingPlanAdapter } from './glm/coding-plan-adapter.js';
 import { GeminiApiService } from './gemini/gemini-core.js';
 import { AntigravityApiService } from './gemini/antigravity-core.js';
 import { OpenAIApiService } from './openai/openai-core.js';
@@ -754,6 +755,7 @@ registerAdapter(MODEL_PROVIDER.GEMINI_CLI, GeminiApiServiceAdapter);
 registerAdapter(MODEL_PROVIDER.ANTIGRAVITY, AntigravityApiServiceAdapter);
 registerAdapter(MODEL_PROVIDER.KIRO_API, KiroApiServiceAdapter);
 registerAdapter(MODEL_PROVIDER.CODEX_API, CodexApiServiceAdapter);
+registerAdapter(MODEL_PROVIDER.GLM_CODING_PLAN, GlmCodingPlanAdapter);
 registerAdapter(MODEL_PROVIDER.GROK_WEB, GrokApiServiceAdapter);
 registerAdapter(MODEL_PROVIDER.GROK_CLI, GrokCliApiServiceAdapter);
 // registerAdapter(MODEL_PROVIDER.FORWARD_API, ForwardApiServiceAdapter);

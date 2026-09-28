@@ -5,10 +5,11 @@ import path from 'path';
 import crypto from 'crypto';
 import { CONFIG } from '../core/config-manager.js';
 import { serviceInstances } from '../providers/adapter.js';
-import { initApiService } from '../services/service-manager.js';
+import { initApiService, getProviderPoolManager } from '../services/service-manager.js';
 import { getRequestBody } from '../utils/common.js';
 import { broadcastEvent } from '../ui-modules/event-broadcast.js';
 import { HEALTH_CHECK, PASSWORD, NETWORK, RETRY } from '../utils/constants.js';
+import { MODEL_PROVIDER } from '../utils/constants.js';
 import { withFileLock, atomicWriteFile } from '../utils/file-lock.js';
 import { validateCredentials } from './auth.js';
 import { ANTIGRAVITY_ELASTIC_MODEL_ORDER } from '../providers/antigravity-model-order.js';
@@ -176,6 +177,7 @@ export async function handleGetConfig(req, res, currentConfig) {
         IMAGE_SIZE_MAX_PIXELS: currentConfig.IMAGE_SIZE_MAX_PIXELS ?? 8388608,
         CODEX_FINGERPRINT_ENABLED: currentConfig.CODEX_FINGERPRINT_ENABLED === true,
         CODEX_POTLUCK_STICKY_PROVIDER_ENABLED: currentConfig.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED,
+        GLM_SESSION_ROUTING_ENABLED: currentConfig.GLM_SESSION_ROUTING_ENABLED === true,
         CODEX_PREWARM_ENABLED: currentConfig.CODEX_PREWARM_ENABLED,
         CODEX_PREWARM_TIMES: currentConfig.CODEX_PREWARM_TIMES,
         CODEX_PREWARM_ATTEMPTS: currentConfig.CODEX_PREWARM_ATTEMPTS,
@@ -244,7 +246,13 @@ export async function handleUpdateConfig(req, res, currentConfig) {
 async function _handleUpdateConfig(req, res, currentConfig, body) {
     try {
         const newConfig = body;
+        if (parseBooleanConfig(newConfig.GLM_SESSION_ROUTING_ENABLED) && !process.env.REDIS_URL) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'REDIS_URL is required for GLM session affinity' } }));
+            return true;
+        }
         const previousProxyRuntimeConfig = snapshotProxyRuntimeConfig(currentConfig);
+        const previousGlmRoutingEnabled = currentConfig.GLM_SESSION_ROUTING_ENABLED === true;
 
         // Update config values in memory（含类型校验）
         if (newConfig.REQUIRED_API_KEY !== undefined) {
@@ -326,6 +334,7 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
         }
         if (newConfig.CODEX_FINGERPRINT_ENABLED !== undefined) currentConfig.CODEX_FINGERPRINT_ENABLED = parseBooleanConfig(newConfig.CODEX_FINGERPRINT_ENABLED);
         if (newConfig.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED !== undefined) currentConfig.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED = parseBooleanConfig(newConfig.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED);
+        if (newConfig.GLM_SESSION_ROUTING_ENABLED !== undefined) currentConfig.GLM_SESSION_ROUTING_ENABLED = parseBooleanConfig(newConfig.GLM_SESSION_ROUTING_ENABLED);
         if (newConfig.CODEX_PREWARM_ENABLED !== undefined) currentConfig.CODEX_PREWARM_ENABLED = parseBooleanConfig(newConfig.CODEX_PREWARM_ENABLED);
         if (newConfig.CODEX_PREWARM_TIMES !== undefined) {
             currentConfig.CODEX_PREWARM_TIMES = Array.isArray(newConfig.CODEX_PREWARM_TIMES)
@@ -446,7 +455,7 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
                 enabled: nowEnabled,
                 startupRun: incoming?.startupRun !== false,
                 interval: newInterval,
-                providerTypes: Array.isArray(incoming?.providerTypes) ? incoming.providerTypes : []
+                providerTypes: Array.isArray(incoming?.providerTypes) ? incoming.providerTypes.filter(type => type !== MODEL_PROVIDER.GLM_CODING_PLAN) : []
             };
 
             // 处理 timer 状态变化
@@ -544,6 +553,7 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
                     IMAGE_SIZE_MAX_PIXELS: currentConfig.IMAGE_SIZE_MAX_PIXELS,
                     CODEX_FINGERPRINT_ENABLED: currentConfig.CODEX_FINGERPRINT_ENABLED,
                     CODEX_POTLUCK_STICKY_PROVIDER_ENABLED: currentConfig.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED,
+                    GLM_SESSION_ROUTING_ENABLED: currentConfig.GLM_SESSION_ROUTING_ENABLED === true,
                 CODEX_PREWARM_ENABLED: currentConfig.CODEX_PREWARM_ENABLED,
                 CODEX_PREWARM_TIMES: currentConfig.CODEX_PREWARM_TIMES,
                 CODEX_PREWARM_ATTEMPTS: currentConfig.CODEX_PREWARM_ATTEMPTS,
@@ -610,6 +620,15 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
 
         // Update the global CONFIG object to reflect changes immediately
         Object.assign(CONFIG, currentConfig);
+        let glmSyncRevision = null;
+        if (newConfig.GLM_SESSION_ROUTING_ENABLED !== undefined && previousGlmRoutingEnabled !== (currentConfig.GLM_SESSION_ROUTING_ENABLED === true)) {
+            const manager = getProviderPoolManager();
+            const sync = manager?.publishProviderConfig(MODEL_PROVIDER.GLM_CODING_PLAN, manager.providerPools[MODEL_PROVIDER.GLM_CODING_PLAN] || [], {
+                action: 'glm_routing_switch',
+                glmRoutingEnabled: currentConfig.GLM_SESSION_ROUTING_ENABLED === true
+            });
+            glmSyncRevision = sync?.revision || null;
+        }
         if (hasProxyRuntimeConfigChanged(previousProxyRuntimeConfig, currentConfig)) {
             invalidateServiceInstancesForProxyChange();
         }
@@ -617,6 +636,7 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             success: true,
+            glmSyncRevision,
             message: 'Configuration updated successfully',
             details: 'Configuration has been updated in both memory and config.json file'
         }));

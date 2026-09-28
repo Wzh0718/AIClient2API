@@ -201,6 +201,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         CODEX_FINGERPRINT_ENABLED: false, // Codex OAuth 出站设备指纹收敛总开关，默认关闭；需全局和凭据双重显式启用
         IMAGE_SIZE_MAX_PIXELS: 8388608, // 后处理允许的最大目标总像素（约 4K UHD）
         CODEX_POTLUCK_STICKY_PROVIDER_ENABLED: false, // API Potluck 分发 Key 是否固定到同一个 Codex 账号
+        GLM_SESSION_ROUTING_ENABLED: false,
         CODEX_STICKY_HOT_SHARD_ENABLED: true, // Codex sticky 热 key 是否自动拆分到多个账号
         CODEX_STICKY_HOT_SHARD_WINDOW_MS: 3600000, // 热 key 统计窗口，默认60分钟
         CODEX_STICKY_HOT_SHARD_MIN_REQUESTS: 100, // 窗口内达到多少次请求后开始分片

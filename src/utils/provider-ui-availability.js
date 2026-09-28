@@ -28,6 +28,9 @@ function hasKnownExhaustedQuota(provider = {}) {
  * concurrency/capacity flags such as isAtCapacity and hasCapacity.
  */
 export function getProviderUiAvailability(provider = {}) {
+    if (provider.glmVerified === false) {
+        return { uiAvailable: false, uiUnavailableReason: 'unverified' };
+    }
     if (provider.isDisabled === true) {
         return { uiAvailable: false, uiUnavailableReason: 'disabled' };
     }

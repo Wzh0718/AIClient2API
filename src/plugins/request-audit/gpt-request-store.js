@@ -135,6 +135,7 @@ export class GptRequestStore {
         bind('keyHash', filters.keyHash, 'key_hash = @keyHash');
         bind('credentialHash', filters.credential, 'credential_hash = @credentialHash');
         bind('provider', filters.provider, 'provider = @provider');
+        bind('glmRouting', filters.glmRouting, "json_extract(payload_json, '$.routing.glm.result') = @glmRouting");
         bind('model', filters.model, '(requested_model = @model OR planned_model = @model OR outbound_model = @model OR upstream_response_model = @model)');
         bind('outcome', filters.outcome, 'outcome = @outcome');
         bind('requestId', filters.requestId, 'request_id = @requestId');

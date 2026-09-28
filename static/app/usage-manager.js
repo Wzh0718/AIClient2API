@@ -160,6 +160,7 @@ async function loadSupportedProviders() {
  * 加载用量数据
  */
 export async function loadUsage() {
+    loadGlmAuditUsage();
     const loadingEl = document.getElementById('usageLoading');
     const errorEl = document.getElementById('usageError');
     const contentEl = document.getElementById('usageContent');
@@ -187,6 +188,23 @@ export async function loadUsage() {
             document.getElementById('usageErrorMessage').textContent = error.message;
         }
     }
+}
+
+async function loadGlmAuditUsage() {
+    const target = document.getElementById('glmUsageSummary');
+    if (!target) return;
+    try {
+        const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const response = await fetch(`/api/request-audit/summary?provider=glm-coding-plan&since=${encodeURIComponent(since)}`, { headers: getAuthHeaders() });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        const data = payload.data || {};
+        const usage = data.summary || {};
+        const outcomes = data.outcomeCounts || {};
+        const tokenUsageUnknown = Number(usage.requestCount || 0) > 0 && Number(usage.totalTokens || 0) === 0;
+        const shown = value => tokenUsageUnknown ? t('usage.glm.unknown') : value ?? t('usage.glm.unknown');
+        target.textContent = t('usage.glm.summary', { requests: usage.requestCount ?? t('usage.glm.unknown'), success: outcomes.success ?? 0, failures: Object.entries(outcomes).filter(([key]) => key !== 'success').reduce((sum, [, count]) => sum + Number(count || 0), 0), input: shown(usage.promptTokens), output: shown(usage.completionTokens), cached: shown(usage.cachedTokens) });
+    } catch (error) { target.textContent = t('usage.glm.unavailable', { error: error.message }); }
 }
 
 /**

@@ -380,6 +380,7 @@ export function createRequestHandler(config, providerPoolManager) {
                     if (modelProviderHeader) {
                         if (isRegisteredProvider(modelProviderHeader)) {
                             currentConfig.MODEL_PROVIDER = modelProviderHeader;
+                            currentConfig._explicitProviderSelection = true;
                             logger.info(`[Config] MODEL_PROVIDER overridden by header to: ${currentConfig.MODEL_PROVIDER}`);
                         } else {
                             logger.warn(`[Config] Provider ${modelProviderHeader} in header is not available.`);
@@ -398,6 +399,7 @@ export function createRequestHandler(config, providerPoolManager) {
 
                         if (firstSegment && (isValidProvider || isAutoMode)) {
                             currentConfig.MODEL_PROVIDER = firstSegment;
+                            currentConfig._explicitProviderSelection = true;
                             logger.info(`[Config] MODEL_PROVIDER overridden by path segment to: ${currentConfig.MODEL_PROVIDER}`);
                             pathSegments.shift();
                             path = '/' + pathSegments.join('/');

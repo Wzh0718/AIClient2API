@@ -18,6 +18,7 @@ import * as customModelsApi from '../ui-modules/custom-models-api.js';
 import * as accessApi from '../ui-modules/access-api.js';
 import * as eventBroadcast from '../ui-modules/event-broadcast.js';
 import * as proxyPoolApi from '../ui-modules/proxy-pool-api.js';
+import { countGlmBindings } from './glm-session-routing.js';
 import { HELP_DATA, API_GUIDE_DATA, API_EXAMPLES, formatHelpText, formatApiGuideText } from '../utils/docs-data.js';
 
 // Re-export from event-broadcast module
@@ -127,6 +128,28 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
     if (method === 'GET' && pathParam === '/api/config') {
         return await configApi.handleGetConfig(req, res, currentConfig);
     }
+    if (method === 'GET' && pathParam === '/api/glm-routing/status') {
+        const nodes = (providerPoolManager?.providerStatus?.['glm-coding-plan'] || []).map(item => ({
+            uuid: item.uuid || item.config?.uuid,
+            name: item.config?.customName || item.uuid,
+            weight: Number(item.config?.providerWeight || 1),
+            healthy: item.config?.isHealthy === true && item.config?.glmVerified === true,
+            verified: item.config?.glmVerified === true,
+            disabled: item.config?.isDisabled === true
+        }));
+        try {
+            const counts = await Promise.all(nodes.map(node => countGlmBindings(node.uuid)));
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify({ enabled: currentConfig.GLM_SESSION_ROUTING_ENABLED === true,
+                nodes: nodes.map((node, index) => ({ ...node, boundSessions: counts[index] })),
+                sync: globalThis.providerConfigSyncStatus || (process.env.RUNTIME_MULTI_WORKER_ENABLED === 'true'
+                    ? null : { currentRevision: providerPoolManager?.providerConfigRevision || 0, pendingWorkerCount: 0 }) }));
+        } catch (error) {
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: `GLM binding status unavailable: ${error.message}` } }));
+        }
+        return true;
+    }
 
     if (method === 'GET' && pathParam === '/api/proxy-pools') {
         return await proxyPoolApi.handleGetProxyPools(req, res, currentConfig);
@@ -221,6 +244,12 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         const providerType = decodeURIComponent(detectModelsMatch[1]);
         const providerUuid = detectModelsMatch[2];
         return await providerApi.handleDetectProviderModels(req, res, currentConfig, providerPoolManager, providerType, providerUuid);
+    }
+
+    // Perform health check for a specific provider node
+    const glmTestMatch = pathParam.match(/^\/api\/providers\/glm-coding-plan\/([^/]+)\/protocol-test$/);
+    if (method === 'POST' && glmTestMatch) {
+        return await providerApi.handleGlmProtocolTest(req, res, currentConfig, providerPoolManager, glmTestMatch[1]);
     }
 
     // Perform health check for a specific provider node

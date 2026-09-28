@@ -296,6 +296,7 @@ function parseQuery(requestUrl) {
         until: requestUrl.searchParams.get('until') || undefined,
         model: requestUrl.searchParams.get('model') || undefined,
         provider: requestUrl.searchParams.get('provider') || undefined,
+        glmRouting: requestUrl.searchParams.get('glmRouting') || undefined,
         outcome: requestUrl.searchParams.get('outcome') || undefined,
         credential: requestUrl.searchParams.get('credential') || undefined,
         modelMismatch: requestUrl.searchParams.get('modelMismatch') || undefined,

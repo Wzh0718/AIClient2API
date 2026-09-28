@@ -247,6 +247,7 @@ export class RequestAuditStore {
         if (filters.path && event?.request?.path !== filters.path) return false;
         if (filters.model && event?.request?.model !== filters.model) return false;
         if (filters.provider && event?.request?.toProvider !== filters.provider) return false;
+        if (filters.glmRouting && event?.routing?.glm?.result !== filters.glmRouting) return false;
         if (filters.outcome && event?.status?.outcome !== filters.outcome) return false;
         return true;
     }

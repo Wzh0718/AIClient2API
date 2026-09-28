@@ -24,6 +24,7 @@ const PROXY_POOL_PROVIDER_LABELS = {
     'gemini-cli-oauth': 'Gemini CLI',
     'claude-kiro-oauth': 'Kiro',
     'openai-codex-oauth': 'Codex',
+    'glm-coding-plan': 'GLM Coding Plan',
     'grok-cli-oauth': 'Grok CLI',
     'grok-web': 'Grok Web'
 };
@@ -709,16 +710,16 @@ async function showProviderManagerModal(data, initialSearchTerm = '') {
                         <button class="btn btn-secondary" onclick="window.showProxyPoolManager()">
                             <i class="fas fa-network-wired"></i> <span data-i18n="modal.proxyPool.title">${t('modal.proxyPool.title')}</span>
                         </button>
-                        <button class="btn btn-warning" onclick="window.resetAllProvidersHealth('${providerType}')" data-i18n="modal.provider.resetHealth" title="将所有节点的健康状态重置为健康">
+                        <button class="btn btn-warning" onclick="window.resetAllProvidersHealth('${providerType}')" data-i18n="modal.provider.resetHealth" title="将所有节点的健康状态重置为健康" ${providerType === 'glm-coding-plan' ? 'style="display:none"' : ''}>
                             <i class="fas fa-heartbeat"></i> 重置为健康
                         </button>
-                        <button class="btn btn-info" onclick="window.performHealthCheck('${providerType}')" data-i18n="modal.provider.healthCheck" title="对不健康节点执行健康检测">
+                        <button class="btn btn-info" onclick="window.performHealthCheck('${providerType}')" data-i18n="modal.provider.healthCheck" title="对不健康节点执行健康检测" ${providerType === 'glm-coding-plan' ? 'style="display:none"' : ''}>
                             <i class="fas fa-stethoscope"></i> 检测不健康
                         </button>
-                        <button class="btn btn-secondary" onclick="window.refreshUnhealthyUuids('${providerType}')" data-i18n="modal.provider.refreshUnhealthyUuids" title="刷新不健康节点的UUID">
+                        <button class="btn btn-secondary" onclick="window.refreshUnhealthyUuids('${providerType}')" data-i18n="modal.provider.refreshUnhealthyUuids" title="刷新不健康节点的UUID" ${providerType === 'glm-coding-plan' ? 'style="display:none"' : ''}>
                             <i class="fas fa-sync-alt"></i> <span data-i18n="modal.provider.refreshUnhealthyUuidsBtn">刷新UUID</span>
                         </button>
-                        <button class="btn btn-danger" onclick="window.deleteUnhealthyProviders('${providerType}')" data-i18n="modal.provider.deleteUnhealthy" title="删除不健康节点">
+                        <button class="btn btn-danger" onclick="window.deleteUnhealthyProviders('${providerType}')" data-i18n="modal.provider.deleteUnhealthy" title="删除不健康节点" ${providerType === 'glm-coding-plan' ? 'style="display:none"' : ''}>
                             <i class="fas fa-trash-alt"></i> <span data-i18n="modal.provider.deleteUnhealthyBtn">删除不健康</span>
                         </button>
                     </div>
@@ -1289,7 +1290,7 @@ function closeProviderModal(button) {
  */
 function renderProviderDetailList(providers) {
     return providers.map(provider => {
-        const isHealthy = provider.isHealthy;
+        const isHealthy = currentProviderType === 'glm-coding-plan' ? provider.isHealthy && provider.glmVerified === true : provider.isHealthy;
         const isDisabled = provider.isDisabled || false;
         const isRefreshing = provider.needsRefresh === true && !isDisabled;
         const lastSuccessfulUse = provider.lastSuccessTime || provider.lastUsed;
@@ -1301,10 +1302,12 @@ function renderProviderDetailList(providers) {
         const healthIcon = isRefreshing
             ? 'fas fa-sync-alt fa-spin text-warning'
             : (isHealthy ? 'fas fa-check-circle text-success' : 'fas fa-exclamation-triangle text-warning');
-        const healthText = isRefreshing
+        const healthText = currentProviderType === 'glm-coding-plan' && provider.glmVerified !== true
+            ? t('modal.glm.unverified') : isRefreshing
             ? t('providers.status.needsRefresh')
             : (isHealthy ? t('modal.provider.status.healthy') : t('modal.provider.status.unhealthy'));
-        const healthI18nKey = isRefreshing
+        const healthI18nKey = currentProviderType === 'glm-coding-plan' && provider.glmVerified !== true
+            ? 'modal.glm.unverified' : isRefreshing
             ? 'providers.status.needsRefresh'
             : (isHealthy ? 'modal.provider.status.healthy' : 'modal.provider.status.unhealthy');
         const toggleButtonText = isDisabled ? t('modal.provider.enabled') : t('modal.provider.disabled');
@@ -1357,8 +1360,10 @@ function renderProviderDetailList(providers) {
                                 <span>${lastHealthCheckModel}</span>
                             </span>
                             ${proxyBadgeHtml}
+                            ${currentProviderType === 'glm-coding-plan' ? `<span class="provider-meta-chip">GLM-5.3-Flash · ${escapeHtml(t('modal.glm.weight', { weight: provider.providerWeight ?? 1 }))} · ${escapeHtml(provider.glmLastTestAt || t('modal.glm.neverTested'))}</span>` : ''}
                         </div>
                         ${errorInfoHtml}
+                        ${currentProviderType === 'glm-coding-plan' && Array.isArray(provider.glmLastTestResults) ? `<small class="form-text">${provider.glmLastTestResults.map(item => `${escapeHtml(item.name)}: ${escapeHtml(item.success ? t('modal.glm.passed') : item.code || t('modal.glm.failed'))}`).join(' · ')}</small>` : ''}
                     </div>
                     <div class="provider-actions-group">
                         <button class="btn-small ${toggleButtonClass}" onclick="window.toggleProviderStatus('${provider.uuid}', event)" title="${toggleButtonText}此提供商">
@@ -1367,9 +1372,10 @@ function renderProviderDetailList(providers) {
                         <button class="btn-small btn-edit" onclick="window.editProvider('${provider.uuid}', event)">
                             <i class="fas fa-edit"></i> <span data-i18n="modal.provider.edit">编辑</span>
                         </button>
-                        <button class="btn-small btn-info btn-provider-health-check" onclick="window.performSingleHealthCheck('${provider.uuid}', event)" title="${t('modal.provider.healthCheckCurrentTitle')}">
+                        <button class="btn-small btn-info btn-provider-health-check" onclick="window.performSingleHealthCheck('${provider.uuid}', event)" title="${t('modal.provider.healthCheckCurrentTitle')}" ${currentProviderType === 'glm-coding-plan' ? 'style="display:none"' : ''}>
                             <i class="fas fa-stethoscope"></i> <span data-i18n="modal.provider.healthCheck">${t('modal.provider.healthCheck')}</span>
                         </button>
+                        ${currentProviderType === 'glm-coding-plan' ? `<button class="btn-small btn-info" onclick="window.testGlmProtocol('${provider.uuid}', event)" title="${t('modal.glm.protocolTestTitle')}">${t('modal.glm.protocolTest')}</button>` : ''}
                         <button class="btn-small btn-info btn-refresh-token" onclick="window.refreshProviderToken('${provider.uuid}', event)" title="${t('modal.provider.refreshTokenTitle')}">
                             <i class="fas fa-redo-alt"></i> <span data-i18n="modal.provider.refreshToken">${t('modal.provider.refreshToken')}</span>
                         </button>
@@ -1400,7 +1406,7 @@ function renderProviderDetailList(providers) {
 function renderProviderCardList(providers) {
     let html = '<div class="provider-cards-grid">';
     html += providers.map(provider => {
-        const isHealthy = provider.isHealthy;
+        const isHealthy = currentProviderType === 'glm-coding-plan' ? provider.isHealthy && provider.glmVerified === true : provider.isHealthy;
         const isDisabled = provider.isDisabled || false;
         const isRefreshing = provider.needsRefresh === true && !isDisabled;
         const healthClass = isRefreshing ? 'refreshing' : (isHealthy ? 'healthy' : 'unhealthy');
@@ -2029,9 +2035,10 @@ function cancelEdit(uuid, event) {
         <button class="btn-small btn-edit" onclick="window.editProvider('${uuid}', event)">
             <i class="fas fa-edit"></i> <span data-i18n="modal.provider.edit">${t('modal.provider.edit')}</span>
         </button>
-        <button class="btn-small btn-info btn-provider-health-check" onclick="window.performSingleHealthCheck('${uuid}', event)" title="${t('modal.provider.healthCheckCurrentTitle')}">
+        <button class="btn-small btn-info btn-provider-health-check" onclick="window.performSingleHealthCheck('${uuid}', event)" title="${t('modal.provider.healthCheckCurrentTitle')}" ${currentProviderType === 'glm-coding-plan' ? 'style="display:none"' : ''}>
             <i class="fas fa-stethoscope"></i> <span data-i18n="modal.provider.healthCheck">${t('modal.provider.healthCheck')}</span>
         </button>
+        ${currentProviderType === 'glm-coding-plan' ? `<button class="btn-small btn-info" onclick="window.testGlmProtocol('${uuid}', event)" title="${t('modal.glm.protocolTestTitle')}">${t('modal.glm.protocolTest')}</button>` : ''}
         <button class="btn-small btn-info btn-refresh-token" onclick="window.refreshProviderToken('${uuid}', event)" title="${t('modal.provider.refreshTokenTitle')}">
             <i class="fas fa-redo-alt"></i> <span data-i18n="modal.provider.refreshToken">${t('modal.provider.refreshToken')}</span>
         </button>
@@ -2241,6 +2248,11 @@ function showAddProviderForm(providerType) {
     
     // 添加动态配置字段
     addDynamicConfigFields(form, providerType);
+    if (providerType === 'glm-coding-plan') {
+        const fixedModel = form.querySelector('#newCheckModelName');
+        fixedModel.value = 'glm-5.3-flash';
+        fixedModel.readOnly = true;
+    }
     
     // 为添加表单中的密码切换按钮绑定事件监听器
     bindAddFormPasswordToggleListeners(form);
@@ -2525,9 +2537,16 @@ async function toggleProviderStatus(uuid, event) {
     // 获取当前提供商信息
     const isCurrentlyDisabled = currentProvider.classList.contains('disabled');
     const action = isCurrentlyDisabled ? 'enable' : 'disable';
-    const confirmMessage = isCurrentlyDisabled ?
+    let affected = '';
+    if (providerType === 'glm-coding-plan' && !isCurrentlyDisabled) {
+        try {
+            const status = await window.apiClient.get('/glm-routing/status');
+            affected = t('modal.glm.disableImpact', { count: status.nodes?.find(node => node.uuid === uuid)?.boundSessions ?? 0 });
+        } catch { affected = t('modal.glm.disableImpactUnknown'); }
+    }
+    const confirmMessage = (isCurrentlyDisabled ?
         t('modal.provider.enableConfirm') :
-        t('modal.provider.disableConfirm');
+        t('modal.provider.disableConfirm')) + affected;
     
     if (!confirm(confirmMessage)) {
         return;
@@ -2952,6 +2971,19 @@ window.toggleProviderStatus = toggleProviderStatus;
 window.resetAllProvidersHealth = resetAllProvidersHealth;
 window.performHealthCheck = performHealthCheck;
 window.performSingleHealthCheck = performSingleHealthCheck;
+window.testGlmProtocol = async (uuid, event) => {
+    event?.stopPropagation();
+    const button = event?.currentTarget;
+    if (button) button.disabled = true;
+    try {
+        const response = await window.apiClient.post(`/providers/glm-coding-plan/${encodeURIComponent(uuid)}/protocol-test`, {});
+        const summary = (response.results || []).map(item => `${item.name}: ${item.success ? t('modal.glm.passed') : item.code || t('modal.glm.failed')}`).join(' · ');
+        showToast(response.verified ? t('common.success') : t('common.warning'), summary, response.verified ? 'success' : 'warning');
+        await refreshProviderConfig('glm-coding-plan');
+    } catch (error) {
+        showToast(t('common.error'), error.message, 'error');
+    } finally { if (button) button.disabled = false; }
+};
 window.refreshProviderToken = refreshProviderToken;
 window.deleteUnhealthyProviders = deleteUnhealthyProviders;
 window.refreshUnhealthyUuids = refreshUnhealthyUuids;

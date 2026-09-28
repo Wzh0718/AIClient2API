@@ -16,6 +16,8 @@ import { normalizeProviderConfigFields } from '../utils/provider-config-normaliz
 import { normalizeCodexFingerprintProviderConfig } from '../utils/codex-fingerprint-migration.js';
 import { getCodexFingerprintAudit } from '../providers/openai/codex-fingerprint-audit.js';
 import { getProviderUiAvailability } from '../utils/provider-ui-availability.js';
+import { countGlmBindings } from '../services/glm-session-routing.js';
+import { GlmCodingPlanAdapter } from '../providers/glm/coding-plan-adapter.js';
 
 
 
@@ -25,6 +27,7 @@ import { getProviderUiAvailability } from '../utils/provider-ui-availability.js'
 // 安全净化：移除用户输入字段中的危险内容，并可选地过滤敏感 API 密钥
 function sanitizeProviderData(provider, maskSensitive = false) {
     if (!provider || typeof provider !== 'object') return provider;
+    if (Object.hasOwn(provider, 'GLM_API_KEY')) maskSensitive = true;
     const sanitized = { ...provider };
     
     // 1. 过滤敏感字段（API Keys, Tokens 等）
@@ -79,6 +82,65 @@ function sanitizeProviderPools(pools, maskSensitive = false) {
             : providers;
     }
     return sanitized;
+}
+
+// Explicit live verification. Six calls consume a small amount of the
+// user's Coding Plan quota and are only made from the dedicated UI action.
+export async function handleGlmProtocolTest(req, res, currentConfig, manager, uuid) {
+    const provider = manager?.providerPools?.['glm-coding-plan']?.find(item => item.uuid === uuid);
+    if (!provider) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'GLM node not found' } }));
+        return true;
+    }
+    const adapter = new GlmCodingPlanAdapter({ ...currentConfig, ...provider, MODEL_PROVIDER: 'glm-coding-plan', GLM_TIMEOUT_MS: 30000 });
+    const cases = [
+        ['chat', { model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'Reply ok.' }], max_tokens: 16 }],
+        ['responses', { model: 'glm-5.3-flash', input: 'Reply ok.', max_output_tokens: 16 }],
+        ['tools', { model: 'glm-5.3-flash', input: 'Call probe with value ok.', max_output_tokens: 64,
+            tools: [{ type: 'function', name: 'probe', description: 'Test tool routing', parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] } }],
+            tool_choice: 'required' }]
+    ];
+    const results = [];
+    for (const [name, body] of cases) {
+        try {
+            const response = await adapter.generateContent('glm-5.3-flash', body);
+            const terminal = name === 'chat' ? Boolean(response?.choices?.[0]?.message?.content)
+                : response?.status === 'completed' && Array.isArray(response?.output);
+            const toolCall = name !== 'tools' || response?.output?.some(item => item.type === 'function_call' && item.name === 'probe' && item.call_id && item.arguments);
+            results.push({ name, success: terminal && toolCall, code: terminal && toolCall ? null : 'GLM_INVALID_RESPONSE' });
+        } catch (error) { results.push({ name, success: false, code: error.code || 'GLM_TEST_FAILED', status: error.status || null }); }
+    }
+    for (const [name, body] of cases) {
+        const streamName = `${name}_stream`;
+        try {
+            let sawTerminal = false;
+            let sawTool = false;
+            for await (const event of adapter.generateContentStream('glm-5.3-flash', body)) {
+                if (event.type === 'response.completed' || event.choices?.some(choice => choice.finish_reason)) sawTerminal = true;
+                if (event.type === 'response.output_item.done' && event.item?.type === 'function_call') sawTool = true;
+                if (event.choices?.some(choice => choice.delta?.tool_calls?.length)) sawTool = true;
+            }
+            const success = sawTerminal && (name !== 'tools' || sawTool);
+            results.push({ name: streamName, success, code: success ? null : 'GLM_INVALID_STREAM' });
+        } catch (error) { results.push({ name: streamName, success: false, code: error.code || 'GLM_TEST_FAILED', status: error.status || null }); }
+    }
+    const verified = results.every(item => item.success);
+    const filePath = getProviderPoolsFilePath(currentConfig);
+    await withFileLock(filePath, async () => {
+        const pools = JSON.parse(readFileSync(filePath, 'utf-8'));
+        const node = pools['glm-coding-plan']?.find(item => item.uuid === uuid);
+        if (!node || node.GLM_API_KEY !== provider.GLM_API_KEY) throw new Error('GLM node changed during test');
+        node.glmVerified = verified;
+        node.isHealthy = verified;
+        node.glmLastTestAt = new Date().toISOString();
+        node.glmLastTestResults = results;
+        await atomicWriteFile(filePath, JSON.stringify(pools, null, 2), 'utf-8');
+        manager.publishProviderConfig('glm-coding-plan', pools['glm-coding-plan'], { action: 'glm_protocol_test', changedUuids: [uuid] });
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: verified, verified, results }));
+    return true;
 }
 
 /**
@@ -315,7 +377,7 @@ export async function handleGetProviderType(req, res, currentConfig, providerPoo
             ...getProviderUiAvailability(p)
         })), // 详情页也进行打码，确保即便点击显示也是脱敏数据
         totalCount: providers.length,
-        healthyCount: providers.filter(p => p.isHealthy).length
+        healthyCount: providers.filter(p => p.isHealthy && (providerType !== 'glm-coding-plan' || p.glmVerified === true)).length
     }));
     return true;
 }
@@ -490,6 +552,11 @@ async function _handleAddProvider(req, res, currentConfig, providerPoolManager, 
             res.end(JSON.stringify({ error: { message: 'providerType and providerConfig are required' } }));
             return true;
         }
+        if (providerType === 'glm-coding-plan' && (!String(providerConfig.GLM_API_KEY || '').trim() || !Number.isFinite(Number(providerConfig.providerWeight ?? 1)) || !(Number(providerConfig.providerWeight ?? 1) > 0))) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'GLM Coding Plan key and positive weight are required' } }));
+            return true;
+        }
 
         // Generate UUID if not provided
         if (!providerConfig.uuid) {
@@ -503,6 +570,11 @@ async function _handleAddProvider(req, res, currentConfig, providerPoolManager, 
         providerConfig.usageCount = providerConfig.usageCount || 0;
         providerConfig.errorCount = providerConfig.errorCount || 0;
         providerConfig.lastErrorTime = providerConfig.lastErrorTime || null;
+        if (providerType === 'glm-coding-plan') {
+            providerConfig.glmVerified = false;
+            providerConfig.checkModelName = 'glm-5.3-flash';
+        }
+        if (providerType === 'glm-coding-plan') providerConfig.isHealthy = false;
 
         const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
         let providerPools = {};
@@ -527,6 +599,8 @@ async function _handleAddProvider(req, res, currentConfig, providerPoolManager, 
             providerType,
             normalizeProviderConfigFields(filterMaskedData(providerConfig))
         );
+        if (providerType === 'glm-coding-plan' && !String(providerConfig.GLM_API_KEY || '').trim()) delete filteredConfig.GLM_API_KEY;
+        if (providerType === 'glm-coding-plan' && filteredConfig.GLM_API_KEY) filteredConfig.glmVerified = false;
         if (usesManagedModelList(providerType)) {
             filteredConfig.supportedModels = normalizeModelIds(filteredConfig.supportedModels);
             filteredConfig.notSupportedModels = [];
@@ -631,6 +705,10 @@ async function _handleUpdateProvider(req, res, currentConfig, providerPoolManage
             providerType,
             normalizeProviderConfigFields(filterMaskedData(providerConfig))
         );
+        if (providerType === 'glm-coding-plan' && !String(providerConfig.GLM_API_KEY || '').trim()) delete filteredConfig.GLM_API_KEY;
+        if (providerType === 'glm-coding-plan' && filteredConfig.GLM_API_KEY && filteredConfig.GLM_API_KEY !== existingProvider.GLM_API_KEY) filteredConfig.glmVerified = false;
+        if (providerType === 'glm-coding-plan' && filteredConfig.glmVerified === false) filteredConfig.isHealthy = false;
+        if (providerType === 'glm-coding-plan') filteredConfig.checkModelName = 'glm-5.3-flash';
         if (usesManagedModelList(providerType)) {
             filteredConfig.supportedModels = normalizeModelIds(filteredConfig.supportedModels);
             filteredConfig.notSupportedModels = [];
@@ -721,6 +799,25 @@ async function _handleDeleteProvider(req, res, currentConfig, providerPoolManage
         }
 
         const deletedProvider = providers[providerIndex];
+        if (providerType === 'glm-coding-plan') {
+            let boundCount;
+            try { boundCount = await countGlmBindings(providerUuid); }
+            catch (error) {
+                res.writeHead(503, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: { message: `Cannot verify GLM session bindings: ${error.message}` } }));
+                return true;
+            }
+            if (boundCount > 0) {
+                res.writeHead(409, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: { message: `${boundCount} GLM sessions are still bound to this node` } }));
+                return true;
+            }
+        }
+        if (providerType === 'glm-coding-plan' && providerConfig.providerWeight !== undefined && (!Number.isFinite(Number(providerConfig.providerWeight)) || !(Number(providerConfig.providerWeight) > 0))) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'GLM provider weight must be positive' } }));
+            return true;
+        }
         providers.splice(providerIndex, 1);
 
         // Remove the entire provider type if no providers left

@@ -13,6 +13,7 @@ export function createProviderConfigEvent(providerType, providers, options = {})
         providers: structuredClone(providers),
         changedUuids: [...new Set(options.changedUuids || providers.map(provider => provider?.uuid).filter(Boolean))],
         action: String(options.action || 'sync'),
+        ...(options.glmRoutingEnabled !== undefined ? { glmRoutingEnabled: options.glmRoutingEnabled === true } : {}),
         occurredAt: new Date().toISOString()
     };
 }
