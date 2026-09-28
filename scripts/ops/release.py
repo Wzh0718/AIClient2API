@@ -46,8 +46,10 @@ def runtime_check(value, workers, epoch=None):
         require(value.get('epoch') == epoch, 'deployment epoch mismatch')
     hooks = value.get('runtimeHooks', {})
     require(hooks.get('available') is True, 'runtime hook transport unavailable or missing')
-    for key in ('dropped', 'backpressured', 'consumerLag'):
-        require(hooks.get(key) == 0, 'runtime hook errors: ' + key)
+    require(hooks.get('dropped') == 0, 'runtime hook events were dropped')
+    for key in ('backpressured', 'consumerLag'):
+        require(isinstance(hooks.get(key), (int, float)) and hooks[key] >= 0,
+                'missing runtime hook metric: ' + key)
     require(isinstance(value.get('persistenceBacklog'), (int, float)), 'missing persistence backlog')
     require(isinstance(hooks.get('spooled'), (int, float)), 'missing spool metric')
     return {'backlog': value['persistenceBacklog'], 'spooled': hooks['spooled']}

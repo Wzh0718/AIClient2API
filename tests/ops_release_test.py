@@ -280,6 +280,15 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 release.runtime_check(healthy() | change, 3)
 
+    def test_cumulative_backpressure_does_not_block_health_or_weaken_drain(self):
+        value = healthy()
+        value['runtimeHooks']['backpressured'] = 169
+        value['runtimeHooks']['consumerLag'] = 2
+        self.assertEqual(release.runtime_check(value, 3), {'backlog': 0, 'spooled': 0})
+        value['runtimeHooks']['dropped'] = 1
+        with self.assertRaisesRegex(ValueError, 'dropped'):
+            release.runtime_check(value, 3)
+
     def test_config_drift_before_cutover(self):
         self.ready()
         self.docker.objects['final']['HostConfig']['Memory'] = 1024
