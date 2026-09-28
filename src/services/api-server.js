@@ -175,6 +175,7 @@ let usageEventMaintenanceTimerId = null;
 let runtimeHookPollPromise = null;
 let runtimeHookPollStopped = false;
 let runtimeHookStreamStatus = { pending: 0, consumerLag: 0, available: true, error: null };
+let masterBacklog = { value: Number.POSITIVE_INFINITY, receivedAt: 0 };
 let startupPromise = Promise.resolve();
 const requestActivityTracker = createAsyncActivityTracker();
 const heartbeatActivityTracker = createAsyncActivityTracker();
@@ -273,6 +274,9 @@ function getRuntimeHookSnapshot() {
         streamPending,
         dropped: Number(bridgeSnapshot.dropped || 0),
         backpressured: Number(bridgeSnapshot.backpressured || 0),
+        pendingRequests: Number(bridgeSnapshot.pendingRequests || 0),
+        pendingEvicted: Number(bridgeSnapshot.pendingEvicted || 0),
+        pendingExpired: Number(bridgeSnapshot.pendingExpired || 0),
         spooled: Number(bridgeSnapshot.spooled || streamSnapshot.spooled || 0),
         spoolBytes: Number(bridgeSnapshot.spoolBytes || streamSnapshot.spoolBytes || 0),
         spoolMaxBytes: Number(bridgeSnapshot.spoolMaxBytes || streamSnapshot.spoolMaxBytes || 0),
@@ -543,6 +547,17 @@ async function startServer() {
         CONFIG._potluckKeyConfigEpoch = `${process.env.RUNTIME_DEPLOYMENT_EPOCH || 'default'}:${process.pid}:${Date.now()}`;
         CONFIG._potluckKeyConfigEventSink = event => sendToMaster(event);
     }
+    Object.defineProperty(CONFIG, '_requestAuditRuntimeHookBacklog', {
+        value: async () => {
+            if (RUNTIME_WORKER_ROLE === 'control' && process.env.RUNTIME_MULTI_WORKER_ENABLED === 'true') {
+                return Date.now() - masterBacklog.receivedAt <= 15000
+                    ? masterBacklog.value : Number.POSITIVE_INFINITY;
+            }
+            const hooks = getRuntimeHookSnapshot();
+            return Number(hooks.pending || 0) + Number(hooks.spooled || 0);
+        },
+        configurable: true
+    });
     await pluginManager.initAll(CONFIG);
     if (IS_WORKER_PROCESS && ['execution', 'control'].includes(RUNTIME_WORKER_ROLE)) {
         runtimeHookStream = createRuntimeHookStreamFromEnv({
@@ -954,6 +969,13 @@ const shutdownHandlers = registerWorkerShutdownHandlers({
     isRetryableNetworkError,
     logger,
     onRuntimeMessage: message => {
+        if (message.type === 'runtime_backlog' && RUNTIME_WORKER_ROLE === 'control') {
+            masterBacklog = {
+                value: Math.max(0, Number(message.backlog) || 0),
+                receivedAt: Date.now()
+            };
+            return true;
+        }
         if (message.type === 'provider_state' && message.event) {
             getProviderPoolManager()?.applyRemoteProviderState?.(message.event);
             return true;

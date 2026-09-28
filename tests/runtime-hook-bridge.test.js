@@ -338,6 +338,88 @@ describe('RuntimeHookBridge', () => {
         });
     });
 
+    test('completion retains observed stream identity and usage when content hook is missing', async () => {
+        const messages = [];
+        const bridge = new RuntimeHookBridge({ send: message => messages.push(message) });
+        await bridge.handle('onStreamChunk', {
+            requestId: 'fallback-request',
+            model: 'gpt-6-astra',
+            toProvider: 'openai-codex-oauth',
+            providerUuid: 'credential-a',
+            accountEmail: 'owner@example.com',
+            nativeChunk: { usage: { input_tokens: 120, output_tokens: 9, total_tokens: 129 }, data: 'private output' }
+        });
+        await bridge.handle('onStreamChunk', {
+            requestId: 'other-request',
+            model: 'gpt-6-luna',
+            accountEmail: 'other@example.com',
+            nativeChunk: { usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 } }
+        });
+        await bridge.handle('onRequestCompleted', {
+            requestId: 'fallback-request',
+            _requestAuditLifecycle: true,
+            response: { httpStatus: 200, completed: true }
+        });
+
+        expect(messages).toHaveLength(1);
+        expect(messages[0].args[0]).toMatchObject({
+            model: 'gpt-6-astra',
+            toProvider: 'openai-codex-oauth',
+            providerUuid: 'credential-a',
+            accountEmail: 'owner@example.com',
+            _runtimeUsage: { prompt_tokens: 120, completion_tokens: 9, total_tokens: 129 }
+        });
+        expect(JSON.stringify(messages)).not.toContain('private output');
+        expect(messages[0].args[0].accountEmail).not.toBe('other@example.com');
+        expect(bridge.pending.has('fallback-request')).toBe(false);
+        expect(bridge.pending.has('other-request')).toBe(true);
+    });
+
+    test('completion is self-contained when the earlier content event is spooled', async () => {
+        const messages = [];
+        const bridge = new RuntimeHookBridge({ send: message => messages.push(message) });
+        await bridge.handle('onStreamChunk', {
+            requestId: 'spooled-request',
+            nativeChunk: { usage: { input_tokens: 80, output_tokens: 4, total_tokens: 84 } }
+        });
+        await bridge.handle('onContentGenerated', {
+            requestId: 'spooled-request',
+            _requestAuditLifecycle: true,
+            model: 'gpt-6-astra',
+            accountEmail: 'owner@example.com'
+        });
+        expect(bridge.pending.has('spooled-request')).toBe(true);
+        await bridge.handle('onRequestCompleted', {
+            requestId: 'spooled-request',
+            _requestAuditLifecycle: true,
+            response: { httpStatus: 200, completed: true }
+        });
+
+        expect(messages.map(message => message.hookName)).toEqual(['onContentGenerated', 'onRequestCompleted']);
+        expect(messages[1].args[0]).toMatchObject({
+            model: 'gpt-6-astra',
+            accountEmail: 'owner@example.com',
+            _runtimeUsage: { prompt_tokens: 80, completion_tokens: 4, total_tokens: 84 }
+        });
+        expect(bridge.pending.has('spooled-request')).toBe(false);
+    });
+
+    test('bounds and expires request snapshots without mixing request identities', async () => {
+        jest.useFakeTimers({ now: new Date('2026-09-28T00:00:00Z') });
+        try {
+            const bridge = new RuntimeHookBridge({ send: jest.fn(), pendingRequestLimit: 2, pendingRequestTtlMs: 1000 });
+            for (const requestId of ['a', 'b', 'c']) {
+                await bridge.handle('onStreamChunk', { requestId, model: requestId, nativeChunk: { usage: { total_tokens: 1 } } });
+            }
+            expect(bridge.pending.has('a')).toBe(false);
+            expect(bridge.snapshot()).toMatchObject({ pendingRequests: 2, pendingEvicted: 1 });
+            jest.advanceTimersByTime(1001);
+            expect(bridge.snapshot()).toMatchObject({ pendingRequests: 0, pendingExpired: 2 });
+        } finally {
+            jest.useRealTimers();
+        }
+    });
+
     test('preserves safe final route identity and requested model metadata across workers', async () => {
         const messages = [];
         const bridge = new RuntimeHookBridge({ send: message => messages.push(message) });

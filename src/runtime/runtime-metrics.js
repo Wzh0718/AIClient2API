@@ -1,4 +1,5 @@
 import { monitorEventLoopDelay, performance } from 'perf_hooks';
+import { getHeapStatistics } from 'node:v8';
 
 function readNonNegativeNumber(value, fallback) {
     const number = Number(value);
@@ -72,6 +73,9 @@ export class RuntimeMetrics {
             return {
                 rss: memory.rss,
                 heapUsed: memory.heapUsed,
+                heapTotal: memory.heapTotal,
+                external: memory.external,
+                heapLimit: getHeapStatistics().heap_size_limit,
                 eventLoopUtilization: performance.eventLoopUtilization().utilization
             };
         });

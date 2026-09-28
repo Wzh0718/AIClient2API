@@ -713,6 +713,8 @@
     .card-head h2, .request-header h2 { margin: 0; font-size: 17px; }
     .request-card { overflow: hidden; }
     .request-header { padding: 18px 20px; border-bottom: 1px solid var(--border-color); }
+    .capture-failures { padding: 12px 20px; border-bottom: 1px solid var(--border-color); background: #fff4e8; color: #7c3c0b; font-size: 12px; line-height: 1.6; }
+    .capture-failures[hidden] { display: none; }
     .request-table-wrap { overflow-x: auto; }
     .request-table { width: 100%; min-width: 1120px; table-layout: fixed; border-collapse: collapse; font-variant-numeric: tabular-nums; }
     .request-table th { padding: 10px 10px; background: var(--bg-secondary); color: var(--text-secondary); font-size: 12px; font-weight: 500; text-align: left; }
@@ -880,6 +882,7 @@
 
         <section class="request-card" aria-label="逐请求明细">
           <div class="request-header"><div><h2>最近请求</h2><p class="muted mini">点击请求打开安全详情；无需开启原始请求采集。</p></div><span id="requestCountLabel" class="pill">0 条</span></div>
+          <div id="captureFailures" class="capture-failures" role="status" hidden></div>
           <div class="request-table-wrap">
             <table class="request-table">
               <thead><tr><th class="time-col">时间</th><th class="key-col">Key</th><th class="provider-col">Provider / 账号</th><th class="model-col">模型</th><th class="input-col" title="总输入包含缓存命中的 Tokens">输入（含缓存）</th><th class="number-col">输出</th><th class="number-col">成本</th><th class="timing-col">耗时</th><th class="status-col">状态</th></tr></thead>
@@ -1484,7 +1487,7 @@
         const models = listModel(event);
         const cost = costDisplay(event.cost);
         const costNote = cost.missing || Number(event.cost?.estimatedUsd || 0) > 0 ? cost.sub : '';
-        const account = event.account?.providerNameDisplay || event.account?.accountEmail || '未知账号';
+        const account = event.account?.accountEmail || event.account?.providerNameDisplay || '未知账号';
         const provider = event.request?.toProvider || '—';
         const key = event.potluckKey?.name || event.potluckKey?.prefix || '未命名';
         const providerHtml = `<div class="audit-cell"><span class="audit-truncate" title="${escapeHtml(account)}">${escapeHtml(account)}</span><small class="audit-truncate" title="${escapeHtml(provider)}">${escapeHtml(provider)}</small></div>`;
@@ -1570,6 +1573,17 @@
       document.getElementById(kind === 'list' ? 'retryList' : 'retrySummary').hidden = !error;
     }
 
+    function renderCaptureFailures(result = {}) {
+      const panel = document.getElementById('captureFailures');
+      const count = Number(result.count || 0);
+      panel.hidden = count === 0;
+      if (!count) { panel.textContent = ''; return; }
+      const examples = (result.requests || []).slice(0, 5).map(item =>
+        `${escapeHtml(item.requestId || '无请求 ID')}（${escapeHtml((item.missingFields || []).join('、') || '字段缺失')}）`
+      );
+      panel.innerHTML = `<strong>Codex 审计采集故障 ${fmt(count)} 条</strong>。这些请求不计入完整明细；请按请求 ID 排查。${examples.length ? `<br>${examples.join(' · ')}` : ''}`;
+    }
+
     function updatePager() {
       document.getElementById('previousPage').disabled = listBusy || !pageReady || pageIndex === 0 || !paginationSupported;
       document.getElementById('nextPage').disabled = listBusy || !pageReady || !nextCursor || !paginationSupported;
@@ -1595,6 +1609,7 @@
         const data = response.data || {};
         window.__auditRequests = data.requests || [];
         renderRequests(window.__auditRequests);
+        renderCaptureFailures(data.captureFailures);
         pageIndex = target;
         pageReady = true;
         paginationSupported = data.pagination?.supported ?? Object.hasOwn(data, 'nextCursor');

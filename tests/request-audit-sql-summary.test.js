@@ -5,7 +5,7 @@ const event = (i, durationMs) => ({
   requestId: `req-${String(i).padStart(4, '0')}`, timestamp: '2026-09-23T00:00:00.000Z',
   request: { model: `gpt-${i % 3}`, requestedModel: `gpt-${i % 3}`, toProvider: 'openai-codex-oauth', path: '/v1/responses' },
   potluckKey: { hash: `key-${i % 2}`, prefix: 'prefix' },
-  account: i % 3 ? { providerNameDisplay: 'account', providerUuidHash: 'credential' } : { accountEmail: 'redacted:test' },
+  account: i % 3 ? { accountEmail: 'account@example.com', providerNameDisplay: 'account', providerUuidHash: 'credential' } : { accountEmail: 'other@example.com' },
   network: { clientIp: '127.0.0.1' },
   status: { outcome: i % 2 ? 'success' : 'upstream_error' },
   response: { durationMs },
@@ -56,5 +56,37 @@ describe('real SQLite audit aggregation and cursor pagination', () => {
       expect(plan.map(row => row.detail).join(' ')).toContain(`idx_gpt_requests_${index}_time`);
       expect(plan.map(row => row.detail).join(' ')).not.toContain('TEMP B-TREE');
     }
+  });
+
+  test('separates new and historical incomplete Codex successes from complete pages', () => {
+    store.append(event(1, 100));
+    store.append({
+      ...event(3, 200),
+      request: { ...event(3, 200).request, requestedModel: 'unknown' },
+      account: {},
+      usage: { totalTokens: 0 }
+    });
+    store.append({
+      ...event(5, 300),
+      capture: { status: 'failed', missingFields: ['usage'] }
+    });
+    store.append({
+      ...event(7, 400),
+      request: { path: '/openai-codex-oauth/v1/responses', model: 'unknown', requestedModel: 'unknown' },
+      account: {},
+      usage: { totalTokens: 0 },
+      capture: { status: 'failed', missingFields: ['accountEmail', 'requestedModel', 'usage'] }
+    });
+
+    expect(store.query({ limit: 10 }).requests.map(row => row.requestId)).toEqual(['req-0001']);
+    expect(store.queryCaptureFailures()).toMatchObject({
+      count: 3,
+      requests: [
+        { requestId: 'req-0007', missingFields: ['accountEmail', 'requestedModel', 'usage'] },
+        { requestId: 'req-0005', missingFields: ['usage'] },
+        { requestId: 'req-0003', missingFields: ['accountEmail', 'requestedModel', 'usage'] }
+      ]
+    });
+    expect(store.querySummary().summary.requestCount).toBe(1);
   });
 });

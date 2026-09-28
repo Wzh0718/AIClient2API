@@ -4,6 +4,7 @@ import { compactAntigravitySourceAvailability } from '../../utils/gemini-diagnos
 import { getRequestAttempts } from '../../utils/request-attempts.js';
 import { CODEX_FINGERPRINT_CONTEXT_KEY } from '../../providers/openai/codex-fingerprint.js';
 import { estimateUsageCost } from '../api-potluck/cost-estimator.js';
+import { captureStatus } from './capture-status.js';
 import requestContext from '../../utils/context.js';
 
 function toNumber(value) {
@@ -263,7 +264,7 @@ export function buildRequestAuditEvent(context = {}) {
         'availabilityReason', 'candidateGroupId', 'candidateProviderCount', 'unavailableProviderCount'
     ].some(field => Object.prototype.hasOwnProperty.call(routing, field));
 
-    return {
+    const event = {
         schemaVersion: 7,
         eventId: context._runtimeEventId || context.eventId || null,
         timestamp,
@@ -425,4 +426,6 @@ export function buildRequestAuditEvent(context = {}) {
         ...(runtime ? { runtime } : {}),
         usage
     };
+    event.capture = captureStatus(event);
+    return event;
 }

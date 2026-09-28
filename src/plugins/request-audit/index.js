@@ -6,6 +6,7 @@ import { createRequestAuditAnalyzerRunner } from './analyzer-runner.js';
 import { buildBoundedRawCaptureEvent, RequestAuditRawCaptureStore, shouldCaptureRawRequest } from './raw-capture-store.js';
 import { GptRequestStore } from './gpt-request-store.js';
 import { GptDiagnosticsRunner } from './gpt-diagnostics.js';
+import { isCodexTextAudit } from './capture-status.js';
 
 const pendingUsage = new Map();
 const pendingAuditContexts = new Map();
@@ -37,8 +38,10 @@ let backgroundFailureCounts = new Map();
 let runtimeProjectionBatch = null;
 let gptRequestStore = null;
 let gptDiagnosticsRunner = null;
+let captureFailureCount = 0;
 
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+const PENDING_AUDIT_TTL_MS = 15 * 60 * 1000;
 const MAX_AUDIT_QUEUE_EVENTS = 1000;
 const AUDIT_FLUSH_BATCH_SIZE = 5;
 const MAX_PENDING_USAGE_ENTRIES = 10000;
@@ -178,7 +181,7 @@ function hasCapturableRequestBody(context = {}) {
 async function enqueueFinalAudit(context = {}) {
     const requestId = getRequestId(context);
     if (!requestId || finalizedRequestIds.has(requestId)) return;
-    cleanupPendingUsage();
+    cleanupPendingUsage(requestId);
     const pending = pendingUsage.get(requestId) || {};
     const response = {
         ...(context.response || {}),
@@ -191,6 +194,9 @@ async function enqueueFinalAudit(context = {}) {
         usage: pending.usage || {},
         timestamp: new Date().toISOString()
     });
+    if (context._requestAuditLifecycle === true) {
+        event.eventId = `request-audit:${requestId}`;
+    }
     let rawCaptureEvent = null;
     const alreadyCapturedByExecutionWorker = executionCapturedRequestIds.has(requestId);
     if (!alreadyCapturedByExecutionWorker && hasCapturableRequestBody(context) && shouldCaptureRawRequest(rawCaptureOptions, event) && rawCaptureStore) {
@@ -220,10 +226,27 @@ async function enqueueFinalAudit(context = {}) {
     pendingAuditContexts.delete(requestId);
 }
 
-function cleanupPendingUsage() {
-    const cutoff = Date.now() - 10 * 60 * 1000;
+function cleanupPendingUsage(preserveRequestId = null) {
+    const cutoff = Date.now() - PENDING_AUDIT_TTL_MS;
     for (const [requestId, entry] of pendingUsage.entries()) {
-        if ((entry.updatedAt || 0) < cutoff) {
+        if (requestId !== preserveRequestId && (entry.updatedAt || 0) < cutoff) {
+            const context = pendingAuditContexts.get(requestId);
+            if (context && !finalizedRequestIds.has(requestId)) {
+                const event = buildRequestAuditEvent({
+                    ...context,
+                    requestId,
+                    usage: entry.usage || {},
+                    outcome: 'audit_capture_failed',
+                    response: { httpStatus: null, completed: false, clientAborted: false },
+                    timestamp: new Date().toISOString()
+                });
+                if (isCodexTextAudit(event)) {
+                    event.eventId = `request-audit:${requestId}`;
+                    event.capture = { status: 'failed', missingFields: ['terminal_response'] };
+                    enqueueAuditContext({ event });
+                    rememberFinalizedRequest(requestId);
+                }
+            }
             pendingUsage.delete(requestId);
             pendingAuditContexts.delete(requestId);
         }
@@ -282,6 +305,10 @@ async function flushAuditQueue() {
                 const { event, rawCaptureEvent } = work;
                 await store.append(event);
                 gptRequestStore?.append(event);
+                if (event.capture?.status === 'failed') {
+                    captureFailureCount += 1;
+                    logger.error(`[Request Audit] Capture failed requestId=${event.requestId} fields=${event.capture.missingFields.join(',')}`);
+                }
             } catch (error) {
                 recordAuditLoss('persistence failure');
                 logger.warn(`[Request Audit] Failed to write audit event (${error?.code || error?.name || 'Error'})`);
@@ -501,7 +528,11 @@ const requestAuditPlugin = {
     _priority: 8990,
 
     getRuntimeMetrics() {
-        return analyzerRunner?.snapshot?.() || null;
+        return {
+            ...(analyzerRunner?.snapshot?.() || {}),
+            capturePending: pendingAuditContexts.size,
+            captureFailures: captureFailureCount
+        };
     },
 
     beginUsageProjectionBatch() {
@@ -516,6 +547,10 @@ const requestAuditPlugin = {
         await store.appendBatch(batch.map(item => item.event));
         gptRequestStore?.appendBatch(batch.map(item => item.event));
         for (const item of batch) {
+            if (item.event.capture?.status === 'failed') {
+                captureFailureCount += 1;
+                logger.error(`[Request Audit] Capture failed requestId=${item.requestId} fields=${item.event.capture.missingFields.join(',')}`);
+            }
             if (item.rawCaptureEvent && rawCaptureStore) {
                 const result = await rawCaptureStore.capture(item.rawCaptureEvent);
                 if (result?.stopReason) await disableRawCapture(result.stopReason);
@@ -555,6 +590,7 @@ const requestAuditPlugin = {
         destroyPromise = null;
         executionCapturedRequestIds.clear();
         auditLossCounts = new Map();
+        captureFailureCount = 0;
         backgroundFailureCounts = new Map();
         auditQueueBytes = 0;
         rawCaptureStore = config._requestAuditRawCaptureStore || new RequestAuditRawCaptureStore({
@@ -623,6 +659,7 @@ const requestAuditPlugin = {
                 intervalMs: config.REQUEST_AUDIT_ANALYZER_INTERVAL_MS || 60000,
                 lookbackMinutes: config.REQUEST_AUDIT_ANALYZER_LOOKBACK_MINUTES || 180,
                 maxEvents: config.REQUEST_AUDIT_ANALYZER_MAX_EVENTS || 5000,
+                shouldRun: async () => await config._requestAuditRuntimeHookBacklog?.() ?? 0,
                 runOnInit: false
             });
             analyzerRunner.start();
@@ -739,7 +776,7 @@ const requestAuditPlugin = {
         async onContentGenerated(context = {}) {
             if (!enabled || !acceptingAuditContext) return;
             const requestId = getRequestId(context);
-            if (!requestId) return;
+            if (!requestId || finalizedRequestIds.has(requestId)) return;
 
             try {
                 if (context._runtimeUsage) setPendingUsage(requestId, extractUsage(context._runtimeUsage));
@@ -766,6 +803,7 @@ const requestAuditPlugin = {
             const requestId = getRequestId(context);
             if (!requestId || finalizedRequestIds.has(requestId)) return;
             try {
+                if (context._runtimeUsage) setPendingUsage(requestId, extractUsage(context._runtimeUsage));
                 const generatedContext = pendingAuditContexts.get(requestId) || {};
                 await enqueueFinalAudit({ ...generatedContext, ...context, requestId });
             } catch (error) {

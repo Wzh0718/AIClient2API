@@ -148,6 +148,26 @@ class FakeDocker:
         raise AssertionError(args)
 
 
+class CompatibilityTests(unittest.TestCase):
+    def test_only_reviewed_heap_and_revision_changes_are_allowed(self):
+        old = {'HostConfig': {}, 'NetworkSettings': {'Networks': {}},
+               'Config': {'Env': ['NODE_OPTIONS=--max-old-space-size=3072',
+                                  'YYN_EXPECTED_REVISION=old', 'OTHER=unchanged']}}
+        new = copy.deepcopy(old)
+        new['Config']['Env'] = ['NODE_OPTIONS=--max-old-space-size=4096',
+                                'YYN_EXPECTED_REVISION=new', 'OTHER=unchanged']
+        with self.assertRaisesRegex(ValueError, 'environment drift'):
+            release.compatible(old, new)
+        expected = {
+            'NODE_OPTIONS': {'from': '--max-old-space-size=3072', 'to': '--max-old-space-size=4096'},
+            'YYN_EXPECTED_REVISION': {'from': 'old', 'to': 'new'}
+        }
+        release.compatible(old, new, expected)
+        new['Config']['Env'][-1] = 'OTHER=changed'
+        with self.assertRaisesRegex(ValueError, 'environment drift'):
+            release.compatible(old, new, expected)
+
+
 class ReleaseTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -259,6 +279,15 @@ class ReleaseTests(unittest.TestCase):
                        {'providerConfig': {'pendingWorkerCount': 1}}, {'runtimeHooks': {}}]:
             with self.subTest(change=change), self.assertRaises(ValueError):
                 release.runtime_check(healthy() | change, 3)
+
+    def test_cumulative_backpressure_does_not_block_health_or_weaken_drain(self):
+        value = healthy()
+        value['runtimeHooks']['backpressured'] = 169
+        value['runtimeHooks']['consumerLag'] = 2
+        self.assertEqual(release.runtime_check(value, 3), {'backlog': 0, 'spooled': 0})
+        value['runtimeHooks']['dropped'] = 1
+        with self.assertRaisesRegex(ValueError, 'dropped'):
+            release.runtime_check(value, 3)
 
     def test_config_drift_before_cutover(self):
         self.ready()
