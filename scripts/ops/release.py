@@ -53,7 +53,7 @@ def runtime_check(value, workers, epoch=None):
     return {'backlog': value['persistenceBacklog'], 'spooled': hooks['spooled']}
 
 
-def compatible(old, new):
+def compatible(old, new, expected_env_changes=None):
     # Compare the actual pre-created container, not just CLI text. Unsupported
     # changes fail before stopping anything; deployment is not a topology editor.
     for key in ('PortBindings', 'Binds', 'Mounts', 'NetworkMode', 'RestartPolicy',
@@ -66,7 +66,12 @@ def compatible(old, new):
     def env(container):
         return dict(s.split('=', 1) for s in container['Config'].get('Env', [])
                     if not s.startswith('RUNTIME_DEPLOYMENT_EPOCH='))
-    require(env(old) == env(new), 'container environment drift; review the spec before cutover')
+    old_env, new_env = env(old), env(new)
+    for name, values in (expected_env_changes or {}).items():
+        require(name in ('NODE_OPTIONS', 'YYN_EXPECTED_REVISION'), 'unsupported environment change: ' + name)
+        require(old_env.pop(name, None) == values['from'], 'unexpected old environment: ' + name)
+        require(new_env.pop(name, None) == values['to'], 'unexpected new environment: ' + name)
+    require(old_env == new_env, 'container environment drift; review the spec before cutover')
     require(set(old.get('NetworkSettings', {}).get('Networks', {})) ==
             set(new.get('NetworkSettings', {}).get('Networks', {})), 'container network drift')
 
@@ -90,6 +95,10 @@ class Release:
         require(NAME.fullmatch(s['activeContainer']), 'invalid active container name')
         require(NAME.fullmatch(self.directory.name), 'invalid release directory/name (no +timezone)')
         require(s.get('databaseChange') == 'none', 'database migration requires a separate recovery plan')
+        for name, values in s.get('expectedEnvChanges', {}).items():
+            require(name in ('NODE_OPTIONS', 'YYN_EXPECTED_REVISION'), 'unsupported environment change: ' + name)
+            require(isinstance(values, dict) and isinstance(values.get('from'), str)
+                    and isinstance(values.get('to'), str), 'invalid environment change: ' + name)
         require(s.get('expectedHost') and s.get('dockerId'), 'explicit host and Docker daemon identity required')
         require(isinstance(s.get('executionWorkers'), int) and s['executionWorkers'] > 0, 'executionWorkers required')
         require(isinstance(s.get('drainTimeoutSeconds', 20), int)
@@ -268,7 +277,7 @@ class Release:
         self.runner(['docker', 'start', candidate['Id']])
         self.health(candidate['Id'], self.spec['candidateUrl'], self.state['candidateEpoch'])
         final = self.create('final', self.spec['finalArgs'])
-        compatible(self.inspect(self.state['oldId']), final)
+        compatible(self.inspect(self.state['oldId']), final, self.spec.get('expectedEnvChanges'))
         require(not final['State']['Running'], 'precreated final must not run')
         self.save(phase='prepared')
 
@@ -282,7 +291,7 @@ class Release:
         self.runner(['nginx', '-t'])
         self.health(self.state['candidateId'], self.spec['candidateUrl'], self.state['candidateEpoch'])
         self.health(self.state['oldId'], self.spec['activeUrl'])
-        compatible(self.inspect(self.state['oldId']), self.owned(self.state['finalId'], 'final'))
+        compatible(self.inspect(self.state['oldId']), self.owned(self.state['finalId'], 'final'), self.spec.get('expectedEnvChanges'))
         timeout = self.spec.get('drainTimeoutSeconds', 20) if drain_timeout is None else drain_timeout
         require(isinstance(timeout, int) and 0 <= timeout <= 180, 'drain timeout must be 0..180 seconds')
         require(isinstance(max_forced_in_flight, int) and 0 <= max_forced_in_flight <= 10,

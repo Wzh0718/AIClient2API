@@ -105,6 +105,10 @@ Windows PowerShell 7：
   "image": "aiclient2api:release-shortsha",
   "activeContainer": "aiclient2api",
   "databaseChange": "none",
+  "expectedEnvChanges": {
+    "NODE_OPTIONS": {"from": "--max-old-space-size=3072", "to": "--max-old-space-size=4096"},
+    "YYN_EXPECTED_REVISION": {"from": "old-commit", "to": "new-commit"}
+  },
   "executionWorkers": 3,
   "configDir": "/root/ai_client_configs",
   "configFiles": ["config.json", "provider_pools.json", "api-potluck-keys.json", "codex/credential.json"],
@@ -132,7 +136,8 @@ Windows PowerShell 7：
 ```
 
 `finalArgs` 必须包含实际的全部挂载、端口（包括 OAuth）、资源限额、日志、重启策略等。
-脚本在停服前比较旧容器与预创建容器的实际 Docker 设置及环境；只允许 epoch 变化。
+脚本在停服前比较旧容器与预创建容器的实际 Docker 设置及环境；默认只允许 epoch 变化。
+若需调整 heap 或期望 revision，须在 `expectedEnvChanges` 写明这两个字段的旧值和新值；其他环境差异继续阻断切换。
 不支持的拓扑变化直接阻断，不能静默丢弃旧设置。
 候选仅发布 loopback API，必须挂载本次独立快照，不能写 canonical configs。
 

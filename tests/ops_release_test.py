@@ -148,6 +148,26 @@ class FakeDocker:
         raise AssertionError(args)
 
 
+class CompatibilityTests(unittest.TestCase):
+    def test_only_reviewed_heap_and_revision_changes_are_allowed(self):
+        old = {'HostConfig': {}, 'NetworkSettings': {'Networks': {}},
+               'Config': {'Env': ['NODE_OPTIONS=--max-old-space-size=3072',
+                                  'YYN_EXPECTED_REVISION=old', 'OTHER=unchanged']}}
+        new = copy.deepcopy(old)
+        new['Config']['Env'] = ['NODE_OPTIONS=--max-old-space-size=4096',
+                                'YYN_EXPECTED_REVISION=new', 'OTHER=unchanged']
+        with self.assertRaisesRegex(ValueError, 'environment drift'):
+            release.compatible(old, new)
+        expected = {
+            'NODE_OPTIONS': {'from': '--max-old-space-size=3072', 'to': '--max-old-space-size=4096'},
+            'YYN_EXPECTED_REVISION': {'from': 'old', 'to': 'new'}
+        }
+        release.compatible(old, new, expected)
+        new['Config']['Env'][-1] = 'OTHER=changed'
+        with self.assertRaisesRegex(ValueError, 'environment drift'):
+            release.compatible(old, new, expected)
+
+
 class ReleaseTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
