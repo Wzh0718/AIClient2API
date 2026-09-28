@@ -14,8 +14,9 @@ jest.mock('../src/ui-modules/event-broadcast.js', () => ({
 
 const providerType = 'gemini-antigravity';
 const sourceModel = 'gemini-2.5-flash-lite';
-const firstFallback = 'gemini-2.5-flash';
-const secondFallback = 'gemini-3.1-flash-lite';
+const firstFallback = 'gemini-3.1-flash-lite';
+const secondFallback = 'gemini-2.5-flash';
+const liteFallback = 'gemini-3.5-flash-lite';
 const thirdFallback = 'gemini-3-flash';
 const fourthFallback = 'gemini-3.8-flash-low';
 const fifthFallback = 'gemini-3.8-flash-medium';
@@ -74,8 +75,9 @@ describe('Antigravity elastic queue and model fallback', () => {
             'gemini-2.5-flash-lite',
             [
                 'gemini-2.5-flash-lite',
-                'gemini-2.5-flash',
                 'gemini-3.1-flash-lite',
+                'gemini-2.5-flash',
+                'gemini-3.5-flash-lite',
                 'gemini-3-flash',
                 'gemini-3.6-flash-low',
                 'gemini-3.6-flash-medium',
@@ -88,17 +90,26 @@ describe('Antigravity elastic queue and model fallback', () => {
                 'gemini-3.8-flash-high'
             ]
         )).toEqual([
-            'gemini-2.5-flash',
             'gemini-3.1-flash-lite',
+            'gemini-2.5-flash',
+            'gemini-3.5-flash-lite',
             'gemini-3-flash'
         ]);
+    });
+
+    test('only selects fallback models present in the probed model list', () => {
+        const configured = [firstFallback, secondFallback, liteFallback, thirdFallback];
+        expect(getAntigravityElasticFallbackModels(sourceModel, configured, [
+            firstFallback, liteFallback, thirdFallback
+        ])).toEqual([firstFallback, liteFallback, thirdFallback]);
     });
 
     test('stops the chain at gemini-3-flash and never falls into 3.8 effort tiers', () => {
         const configured = [
             'gemini-2.5-flash-lite',
-            'gemini-2.5-flash',
             'gemini-3.1-flash-lite',
+            'gemini-2.5-flash',
+            'gemini-3.5-flash-lite',
             'gemini-3-flash',
             'gemini-3.6-flash-low',
             'gemini-3.6-flash-medium',
@@ -137,15 +148,16 @@ describe('Antigravity elastic queue and model fallback', () => {
         )).toEqual([]);
     });
 
-    test('only falls forward to stronger models when the requested model is in the middle', () => {
-        const configured = [firstFallback, secondFallback, thirdFallback, fourthFallback, fifthFallback];
+    test('only falls forward to later priced models when the requested model is in the middle', () => {
+        const configured = [firstFallback, secondFallback, liteFallback, thirdFallback, fourthFallback, fifthFallback];
         expect(getAntigravityElasticFallbackModels(sourceModel, configured)).toEqual([
-            firstFallback, secondFallback, thirdFallback
+            firstFallback, secondFallback, liteFallback, thirdFallback
         ]);
         expect(getAntigravityElasticFallbackModels(firstFallback, configured)).toEqual([
-            secondFallback, thirdFallback
+            secondFallback, liteFallback, thirdFallback
         ]);
-        expect(getAntigravityElasticFallbackModels(secondFallback, configured)).toEqual([thirdFallback]);
+        expect(getAntigravityElasticFallbackModels(secondFallback, configured)).toEqual([liteFallback, thirdFallback]);
+        expect(getAntigravityElasticFallbackModels(liteFallback, configured)).toEqual([thirdFallback]);
         expect(getAntigravityElasticFallbackModels(thirdFallback, configured)).toEqual([]);
         expect(getAntigravityElasticFallbackModels(fourthFallback, configured)).toEqual([]);
         expect(getAntigravityElasticFallbackModels(fifthFallback, configured)).toEqual([]);

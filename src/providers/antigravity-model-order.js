@@ -2,13 +2,13 @@
  * Single source of truth for the Antigravity elastic fallback chain.
  *
  * The chain used to be duplicated in the pool manager, the config defaults and
- * the config API whitelist. A model that existed in one copy but not upstream
- * (`gemini-3.5-flash-lite`) produced tens of thousands of 404s before it was
- * removed from every copy by hand, so the list lives here as a leaf module that
- * all three can import without creating a cycle.
+ * the config API whitelist. An earlier listing of `gemini-3.5-flash-lite` caused
+ * upstream 404s; it was added back only after a real generation and upstream
+ * model-list check succeeded. Keep the list here so the three consumers stay in sync.
  *
- * Ordering is low tier to high tier: a request only ever falls forward to a
- * stronger model once its own tier is exhausted.
+ * Ordering follows Google's Standard text input/output prices, low to high.
+ * Equal-price 2.5 Flash stays ahead of 3.5 Flash-Lite. A request only falls
+ * forward once its own model is exhausted.
  *
  * The 3.8 effort tiers are deliberately excluded: they remain directly
  * requestable, but are never fallback targets, so an exhausted 3.8 tier cannot
@@ -16,8 +16,9 @@
  */
 export const ANTIGRAVITY_ELASTIC_MODEL_ORDER = Object.freeze([
     'gemini-2.5-flash-lite',
-    'gemini-2.5-flash',
     'gemini-3.1-flash-lite',
+    'gemini-2.5-flash',
+    'gemini-3.5-flash-lite',
     'gemini-3-flash'
 ]);
 

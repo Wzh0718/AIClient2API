@@ -38,7 +38,7 @@ describe('api potluck cost estimator', () => {
         expect(cost.actualUsd).toBeCloseTo(1.065, 6);
         expect(cost.convertedUsd).toBeCloseTo(0.496, 6);
         expect(cost.conversionModel).toBe('gemini-2.5-flash');
-        expect(cost.pricingVersion).toBe('official-2026-09-22-gpt6-sol-luna-r1');
+        expect(cost.pricingVersion).toBe('official-2026-09-28-agy-3.5-flash-lite-r1');
         expect(cost.missingPriceTokens).toBe(0);
     });
 
@@ -54,6 +54,19 @@ describe('api potluck cost estimator', () => {
         const cost = estimateUsageCost(usage, 'gpt-5.4-mini');
 
         expect(cost.usd).toBeCloseTo(((400000 * 0.75) + (600000 * 0.075) + (300000 * 4.50)) / 1000000, 8);
+    });
+
+    test('prices Gemini 3.5 Flash-Lite with official standard rates', () => {
+        const usage = {
+            promptTokens: 1_000_000,
+            cachedTokens: 200_000,
+            completionTokens: 100_000,
+            totalTokens: 1_100_000
+        };
+        const cost = estimateUsageCost(usage, 'gemini-3.5-flash-lite');
+
+        expect(cost.usd).toBeCloseTo(0.496, 8);
+        expect(cost.missingPriceTokens).toBe(0);
     });
 
     test('prices gpt 5.3 codex spark with the gpt 5.4 mini temporary rate', () => {
