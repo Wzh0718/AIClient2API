@@ -1,5 +1,18 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
+import { captureStatus } from './capture-status.js';
+
+const CAPTURE_FAILURE_SQL = `COALESCE((
+    json_extract(payload_json, '$.capture.status') = 'failed'
+    OR (outcome = 'success'
+        AND (provider = 'openai-codex-oauth'
+            OR json_extract(payload_json, '$.request.path') LIKE '/openai-codex-oauth/v1/%')
+        AND (json_extract(payload_json, '$.request.path') LIKE '%/v1/responses'
+            OR json_extract(payload_json, '$.request.path') LIKE '%/v1/chat/completions')
+        AND (requested_model IS NULL OR requested_model = 'unknown'
+            OR NULLIF(json_extract(payload_json, '$.account.accountEmail'), '') IS NULL
+            OR COALESCE(json_extract(payload_json, '$.usage.totalTokens'), 0) <= 0))
+), 0)`;
 
 function encodeCursor(row) {
     return Buffer.from(JSON.stringify([row.timestamp, row.requestId]), 'utf8').toString('base64url');
@@ -91,7 +104,8 @@ export class GptRequestStore {
         if (!event?.requestId || !event?.timestamp) return;
         const provider = String(event.request?.toProvider || '');
         const models = [event.request?.requestedModel, event.request?.plannedModel, event.request?.outboundModel, event.request?.upstreamResponseModel];
-        if (!/openai|codex/i.test(provider) && !models.some(model => /^gpt[-_]/i.test(String(model || '')))) return;
+        const codexPath = /^\/openai-codex-oauth\/v1\/(?:responses|chat\/completions)$/.test(String(event.request?.path || ''));
+        if (!codexPath && !/openai|codex/i.test(provider) && !models.some(model => /^gpt[-_]/i.test(String(model || '')))) return;
         this.statements.request.run({
             eventId: event.eventId || `request:${event.requestId}`,
             requestId: event.requestId,
@@ -123,7 +137,7 @@ export class GptRequestStore {
     append(event) { if (!this.db) return false; this.writeTransaction([event]); return true; }
     appendBatch(events = []) { if (!this.db || events.length === 0) return false; this.writeTransaction(events); return true; }
 
-    buildFilter(filters = {}, { includeCursor = true } = {}) {
+    buildFilter(filters = {}, { includeCursor = true, includeCaptureFailures = false } = {}) {
         const clauses = [];
         const params = {};
         const bind = (name, value, sql) => {
@@ -141,6 +155,7 @@ export class GptRequestStore {
         bind('clientIp', filters.clientIp, "json_extract(payload_json, '$.network.clientIp') = @clientIp");
         bind('path', filters.path, "json_extract(payload_json, '$.request.path') = @path");
         bind('keyPrefix', filters.keyPrefix, "json_extract(payload_json, '$.potluckKey.prefix') = @keyPrefix");
+        if (!includeCaptureFailures) clauses.push(`NOT ${CAPTURE_FAILURE_SQL}`);
         if (['true', '1', true].includes(filters.modelMismatch)) clauses.push('model_mismatch = 1');
         const cursor = includeCursor ? decodeCursor(filters.cursor) : null;
         if (includeCursor && cursor) {
@@ -211,7 +226,7 @@ export class GptRequestStore {
                 'p95',(SELECT duration FROM ranked WHERE rank = MAX(1, (count * 95 + 99) / 100)),
                 'p99',(SELECT duration FROM ranked WHERE rank = MAX(1, (count * 99 + 99) / 100))) FROM timing
         `).all(params);
-        const result = { summary: {}, models: {}, accounts: {}, outcomeCounts: {}, cost: {}, contextSections: {} };
+        const result = { summary: {}, models: {}, accounts: {}, outcomeCounts: {}, cost: {}, contextSections: {}, captureFailureCount: 0 };
         for (const row of rows) {
             const value = row.kind === 'outcomeCounts' ? row.value : JSON.parse(row.value);
             if (row.kind === 'summary' || row.kind === 'models' || row.kind === 'accounts') {
@@ -227,6 +242,27 @@ export class GptRequestStore {
     queryRequestIds(filters = {}) {
         const { clauses, params } = this.buildFilter(filters, { includeCursor: false });
         return this.db.prepare(`SELECT request_id FROM gpt_requests${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''}`).pluck().all(params);
+    }
+
+    queryCaptureFailures(filters = {}) {
+        const { clauses, params } = this.buildFilter(filters, { includeCursor: false, includeCaptureFailures: true });
+        clauses.push(CAPTURE_FAILURE_SQL);
+        const where = ` WHERE ${clauses.join(' AND ')}`;
+        const count = this.db.prepare(`SELECT COUNT(*) count FROM gpt_requests${where}`).get(params).count;
+        const rows = this.db.prepare(`SELECT payload_json FROM gpt_requests${where} ORDER BY timestamp DESC, request_id DESC LIMIT 25`).all(params);
+        return {
+            count,
+            requests: rows.map(row => {
+                const event = JSON.parse(row.payload_json);
+                return {
+                    requestId: event.requestId,
+                    timestamp: event.timestamp,
+                    keyName: event.potluckKey?.name || null,
+                    model: event.request?.outboundModel || event.request?.plannedModel || null,
+                    missingFields: captureStatus(event).missingFields
+                };
+            })
+        };
     }
 
     get(requestId) {

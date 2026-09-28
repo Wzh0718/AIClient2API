@@ -3,6 +3,7 @@ import { RequestAuditAnalysisStore } from './analysis-store.js';
 import { existsSync, readFileSync } from 'fs';
 import { getRequestBody } from '../../utils/common.js';
 import { atomicWriteFile, withFileLock } from '../../utils/file-lock.js';
+import { captureStatus } from './capture-status.js';
 
 let auditStore = null;
 let analysisStore = null;
@@ -113,6 +114,7 @@ export function getAnalysisStore(config = {}) {
 }
 
 export function buildAuditSummary(events = []) {
+    const completeEvents = events.filter(event => captureStatus(event).status !== 'failed');
     const result = {
         summary: {
             requestCount: 0,
@@ -127,7 +129,8 @@ export function buildAuditSummary(events = []) {
         models: {},
         accounts: {},
         contextSections: {},
-        timing: summarizeDurations(events),
+        timing: summarizeDurations(completeEvents),
+        captureFailureCount: events.length - completeEvents.length,
         cost: {
             usd: 0,
             actualUsd: 0,
@@ -140,7 +143,7 @@ export function buildAuditSummary(events = []) {
         }
     };
 
-    for (const event of events) {
+    for (const event of completeEvents) {
         const usage = event.usage || {};
         const outcome = event.status?.outcome || 'unknown';
         result.outcomeCounts[outcome] = (result.outcomeCounts[outcome] || 0) + 1;
@@ -397,14 +400,17 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
         const events = aggregated ? [] : sqliteAvailable
             ? gptRequestStore.queryAll(summaryFilters)
             : await store.query({ ...summaryFilters, limit: 2000 });
-        const ids = aggregated ? gptRequestStore.queryRequestIds(summaryFilters) : requestIds(events);
+        const ids = aggregated ? gptRequestStore.queryRequestIds(summaryFilters) : requestIds(events.filter(event => captureStatus(event).status !== 'failed'));
         const diagnostics = await materialized.readDiagnostics({ requestIds: ids });
         const freshness = await materialized.readFreshness();
+        const captureFailures = gptRequestStore?.queryCaptureFailures?.(summaryFilters)
+            || { count: events.filter(event => captureStatus(event).status === 'failed').length, requests: [] };
         sendJson(res, 200, {
             success: true,
             data: {
                 window: { since: filters.since || null, until: filters.until || null },
                 ...(aggregated || buildAuditSummary(events)),
+                captureFailureCount: captureFailures.count,
                 meta: {
                     source: sqliteAvailable ? 'gpt_requests_sqlite' : 'jsonl_fallback',
                     retentionDays: Number(config.GPT_REQUEST_AUDIT_RETENTION_DAYS || 7),
@@ -420,24 +426,37 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
     if (path === '/api/request-audit/requests') {
         if (gptRequestStore) {
             const result = gptRequestStore.query(filters);
+            const captureFailures = gptRequestStore.queryCaptureFailures?.(filters) || { count: 0, requests: [] };
             const diagnostics = await materialized.readDiagnostics({ requestIds: requestIds(result.requests) });
             sendJson(res, 200, {
                 success: true,
                 data: {
                     requests: result.requests.map(event => ({ ...event, diagnosis: diagnostics[event.requestId] || null })),
                     nextCursor: result.nextCursor,
+                    captureFailures,
                     pagination: { supported: true }
                 }
             });
             return true;
         }
         const events = await store.query(filters);
-        const diagnostics = await materialized.readDiagnostics({ requestIds: requestIds(events) });
+        const completeEvents = events.filter(event => captureStatus(event).status !== 'failed');
+        const diagnostics = await materialized.readDiagnostics({ requestIds: requestIds(completeEvents) });
         sendJson(res, 200, {
             success: true,
             data: {
                 pagination: { supported: false },
-                requests: events.map(event => ({
+                captureFailures: {
+                    count: events.length - completeEvents.length,
+                    requests: events.filter(event => captureStatus(event).status === 'failed').slice(0, 25).map(event => ({
+                        requestId: event.requestId,
+                        timestamp: event.timestamp,
+                        keyName: event.potluckKey?.name || null,
+                        model: event.request?.outboundModel || event.request?.plannedModel || null,
+                        missingFields: captureStatus(event).missingFields
+                    }))
+                },
+                requests: completeEvents.map(event => ({
                     ...event,
                     diagnosis: diagnostics[event.requestId] || null
                 }))

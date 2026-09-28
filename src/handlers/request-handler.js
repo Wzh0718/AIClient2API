@@ -227,13 +227,15 @@ export function createRequestHandler(config, providerPoolManager) {
                 runtimeRequest.setMetadata({ providerType: currentConfig.MODEL_PROVIDER });
                 const auditLifecycle = instrumentResponseForAudit(res, async ({ normalizedPath, response, errorClass }) => {
                     const pluginManager = getPluginManager();
-                    const terminal = requestContext.get('requestAudit')?.terminal || {};
+                    const auditContext = requestContext.get('requestAudit') || {};
+                    const terminal = auditContext.terminal || {};
                     await pluginManager.executeHook('onRequestCompleted', {
                         ...currentConfig,
                         requestId,
                         method: req.method,
                         path: originalPath,
                         normalizedPath,
+                        ...(auditContext.requestedModel ? { originalRequestBody: { model: auditContext.requestedModel } } : {}),
                         ...network,
                         response,
                         runtime: runtimeCompletion || finalizeRuntime(response.httpStatus ?? 499),

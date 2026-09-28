@@ -365,7 +365,14 @@ describe('runtime observability baseline', () => {
                 byWorker: {}
             },
             inFlight: 3,
-            process: { rss: 2200, heapUsed: 1100, maxEventLoopUtilization: 0.3, eventLoopDelay: { p95: 15, p99: 22, max: 30 } },
+            process: {
+                rss: 2200, heapUsed: 1100, heapTotal: 0, external: 0, heapLimit: 0,
+                byWorker: {
+                    'execution-1': { rss: 1000, heapUsed: 500, heapTotal: 0, external: 0, heapLimit: 0 },
+                    'execution-2': { rss: 1200, heapUsed: 600, heapTotal: 0, external: 0, heapLimit: 0 }
+                },
+                maxEventLoopUtilization: 0.3, eventLoopDelay: { p95: 15, p99: 22, max: 30 }
+            },
             imageCapacity: {
                 activeBytes: 0,
                 queued: 0,
@@ -472,6 +479,9 @@ describe('runtime observability baseline', () => {
                 lastScannedFiles: 0,
                 lastScannedBytes: 0,
                 lastEventCount: 0,
+                lastBacklogBytes: 0,
+                capturePending: 0,
+                captureFailures: 0,
                 lastCompletedAt: null,
                 activeWorkers: [],
                 byWorker: {}
@@ -791,7 +801,10 @@ describe('runtime observability baseline', () => {
             lastRunMs: 120,
             lastScannedFiles: 3,
             lastScannedBytes: 5120,
+            lastBacklogBytes: 0,
             lastEventCount: 600,
+            capturePending: 0,
+            captureFailures: 0,
             lastCompletedAt: '2026-08-24T09:01:00.000Z',
             activeWorkers: ['control-1'],
             byWorker: {

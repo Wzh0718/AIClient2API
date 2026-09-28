@@ -4,6 +4,8 @@ import { compactAntigravitySourceAvailability } from '../../utils/gemini-diagnos
 import { getRequestAttempts } from '../../utils/request-attempts.js';
 import { CODEX_FINGERPRINT_CONTEXT_KEY } from '../../providers/openai/codex-fingerprint.js';
 import { estimateUsageCost } from '../api-potluck/cost-estimator.js';
+import { captureStatus } from './capture-status.js';
+import requestContext from '../../utils/context.js';
 
 function toNumber(value) {
     const number = Number(value);
@@ -244,7 +246,8 @@ export function buildRequestAuditEvent(context = {}) {
     const attempts = normalizeAttempts(context);
     const lastAttempt = attempts.at(-1) || null;
     const codexContext = context.processedRequestBody?.[CODEX_FINGERPRINT_CONTEXT_KEY] || {};
-    const upstreamResponseModel = context.codexEvidence?.upstreamResponseModel
+    const upstreamResponseModel = requestContext.get('glmUpstreamResponseModel')
+        || context.codexEvidence?.upstreamResponseModel
         || codexContext.upstreamResponseModel
         || lastAttempt?.upstreamResponseModel
         || null;
@@ -261,7 +264,7 @@ export function buildRequestAuditEvent(context = {}) {
         'availabilityReason', 'candidateGroupId', 'candidateProviderCount', 'unavailableProviderCount'
     ].some(field => Object.prototype.hasOwnProperty.call(routing, field));
 
-    return {
+    const event = {
         schemaVersion: 7,
         eventId: context._runtimeEventId || context.eventId || null,
         timestamp,
@@ -309,6 +312,12 @@ export function buildRequestAuditEvent(context = {}) {
             providerNameDisplay: sanitizeProviderName(context.providerName)
         },
         routing: {
+            ...(context._glmRouting ? { glm: {
+                result: context._glmRouting.reason || null,
+                providerType: context._glmRouting.type || null,
+                providerUuidHash: hashSecret(context._glmRouting.uuid),
+                actualModel: context._glmRouting.type === 'glm-coding-plan' ? 'glm-5.3-flash' : null
+            } } : {}),
             routingMode: ['pool', 'auto', 'fixed'].includes(context._codexRouting?.routingMode)
                 ? context._codexRouting.routingMode
                 : null,
@@ -417,4 +426,6 @@ export function buildRequestAuditEvent(context = {}) {
         ...(runtime ? { runtime } : {}),
         usage
     };
+    event.capture = captureStatus(event);
+    return event;
 }

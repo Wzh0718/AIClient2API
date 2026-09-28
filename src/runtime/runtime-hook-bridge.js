@@ -189,11 +189,15 @@ function compactMetadata(context = {}) {
 }
 
 export class RuntimeHookBridge {
-    constructor({ send, durableTransport = null, maxPending = 1000 }) {
+    constructor({ send, durableTransport = null, maxPending = 1000, pendingRequestLimit = 10000, pendingRequestTtlMs = 15 * 60_000 }) {
         this.send = send;
         this.durableTransport = durableTransport;
         this.pending = new Map();
         this.maxPending = Math.max(1, Number(maxPending) || 1);
+        this.pendingRequestLimit = Math.max(1, Number(pendingRequestLimit) || 1);
+        this.pendingRequestTtlMs = Math.max(1000, Number(pendingRequestTtlMs) || 1000);
+        this.pendingEvicted = 0;
+        this.pendingExpired = 0;
         this.outbound = new Map();
         this.dropped = 0;
         this.backpressured = 0;
@@ -247,13 +251,36 @@ export class RuntimeHookBridge {
         for (const message of this.outbound.values()) this.send(message);
     }
 
+    _sweepPending(now = Date.now()) {
+        for (const [requestId, value] of this.pending) {
+            if (now - Number(value.updatedAt || now) < this.pendingRequestTtlMs) break;
+            this.pending.delete(requestId);
+            this.pendingExpired += 1;
+        }
+    }
+
+    _rememberPending(requestId, value) {
+        if (!requestId) return;
+        this._sweepPending();
+        this.pending.delete(requestId);
+        this.pending.set(requestId, { ...value, updatedAt: Date.now() });
+        while (this.pending.size > this.pendingRequestLimit) {
+            this.pending.delete(this.pending.keys().next().value);
+            this.pendingEvicted += 1;
+        }
+    }
+
     snapshot() {
+        this._sweepPending();
         const oldestCreatedAt = [...this.outbound.values()].map(item => Date.parse(item.createdAt)).filter(Number.isFinite).sort()[0];
         return {
             pending: this.outbound.size,
             dropped: this.dropped,
             backpressured: this.backpressured,
             maxPending: this.maxPending,
+            pendingRequests: this.pending.size,
+            pendingEvicted: this.pendingEvicted,
+            pendingExpired: this.pendingExpired,
             oldestPendingAgeMs: oldestCreatedAt ? Math.max(0, Date.now() - oldestCreatedAt) : 0,
             ...(this.durableTransport?.snapshot?.() || {})
         };
@@ -282,15 +309,16 @@ export class RuntimeHookBridge {
                     workerId: context.workerId || process.env.RUNTIME_WORKER_ID || null
                 }
             };
-            this.pending.set(requestId, current);
+            this._rememberPending(requestId, current);
             return;
         }
         if (hookName === 'onStreamChunk') {
             if (!requestId) return;
             const current = this.pending.get(requestId) || { metadata: compactMetadata(context), usage: {}, hasImage: false };
+            current.metadata = { ...current.metadata, ...compactMetadata(context) };
             current.usage = mergeUsage(current.usage, extractUsage(context.nativeChunk, context.chunkToSend));
             current.hasImage ||= containsImage(context.nativeChunk) || containsImage(context.chunkToSend);
-            this.pending.set(requestId, current);
+            this._rememberPending(requestId, current);
             return;
         }
 
@@ -298,7 +326,7 @@ export class RuntimeHookBridge {
             if (!requestId) return;
             const usage = extractUsage(context.nativeResponse, context.clientResponse);
             const current = this.pending.get(requestId) || { metadata: {}, usage: {}, hasImage: false };
-            this.pending.set(requestId, {
+            this._rememberPending(requestId, {
                 metadata: { ...current.metadata, ...compactMetadata(context) },
                 usage: mergeUsage(current.usage, usage),
                 hasImage: current.hasImage || containsImage(context.nativeResponse) || containsImage(context.clientResponse)
@@ -308,7 +336,6 @@ export class RuntimeHookBridge {
 
         if (hookName === 'onContentGenerated') {
             const pending = this.pending.get(requestId) || { metadata: {}, usage: {}, hasImage: false };
-            this.pending.delete(requestId);
             const metadata = {
                 ...pending.metadata,
                 ...compactMetadata(context),
@@ -316,11 +343,27 @@ export class RuntimeHookBridge {
                 _runtimeHasImage: pending.hasImage
             };
             await this._send({ type: 'runtime_hook', hookName, args: [metadata] });
+            if (context._requestAuditLifecycle === true && requestId) {
+                const { _runtimeUsage, _runtimeHasImage, ...retainedMetadata } = metadata;
+                this._rememberPending(requestId, { ...pending, metadata: retainedMetadata });
+            } else {
+                this.pending.delete(requestId);
+            }
             return;
         }
 
         if (hookName === 'onRequestCompleted') {
-            await this._send({ type: 'runtime_hook', hookName, args: [compactMetadata(context)] });
+            const pending = this.pending.get(requestId);
+            const metadata = {
+                ...(pending?.metadata || {}),
+                ...compactMetadata(context),
+                ...(pending ? {
+                    _runtimeUsage: toWireUsage(pending.usage),
+                    _runtimeHasImage: pending.hasImage
+                } : {})
+            };
+            await this._send({ type: 'runtime_hook', hookName, args: [metadata] });
+            if (pending) this.pending.delete(requestId);
         }
     }
 

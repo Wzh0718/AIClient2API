@@ -37,9 +37,8 @@ services:
       - EDGE_ADMISSION_REQUIRED=false
       - EDGE_AUTH_INTERNAL_URL=http://127.0.0.1:18081
       - RUNTIME_BIG_OBJECT_BUDGET_BYTES=2147483648
-      # Keep each worker below the container memory budget so a runaway request
-      # path is rejected by GC pressure instead of an abrupt SIGABRT.
-      - NODE_OPTIONS=--max-old-space-size=3072
+      # This V8 heap cap applies to each Node process, not to the whole container.
+      - NODE_OPTIONS=--max-old-space-size=4096
     logging:
       driver: json-file
       options:

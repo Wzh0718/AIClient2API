@@ -221,7 +221,7 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             byWorker: {}
         },
         inFlight: 0,
-        process: { rss: 0, heapUsed: 0, maxEventLoopUtilization: 0, eventLoopDelay: { p95: 0, p99: 0, max: 0 } },
+        process: { rss: 0, heapUsed: 0, heapTotal: 0, external: 0, heapLimit: 0, byWorker: {}, maxEventLoopUtilization: 0, eventLoopDelay: { p95: 0, p99: 0, max: 0 } },
         providerCoordination: {
             byWorker: {},
             geminiScheduling: {
@@ -301,7 +301,10 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
             lastRunMs: 0,
             lastScannedFiles: 0,
             lastScannedBytes: 0,
+            lastBacklogBytes: 0,
             lastEventCount: 0,
+            capturePending: 0,
+            captureFailures: 0,
             lastCompletedAt: null,
             activeWorkers: [],
             byWorker: {}
@@ -406,6 +409,16 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         }
         result.process.rss += Number(snapshot?.process?.rss || 0);
         result.process.heapUsed += Number(snapshot?.process?.heapUsed || 0);
+        result.process.heapTotal += Number(snapshot?.process?.heapTotal || 0);
+        result.process.external += Number(snapshot?.process?.external || 0);
+        result.process.heapLimit += Number(snapshot?.process?.heapLimit || 0);
+        result.process.byWorker[workerId] = {
+            rss: Number(snapshot?.process?.rss || 0),
+            heapUsed: Number(snapshot?.process?.heapUsed || 0),
+            heapTotal: Number(snapshot?.process?.heapTotal || 0),
+            external: Number(snapshot?.process?.external || 0),
+            heapLimit: Number(snapshot?.process?.heapLimit || 0)
+        };
         result.process.maxEventLoopUtilization = Math.max(result.process.maxEventLoopUtilization, Number(snapshot?.process?.eventLoopUtilization || 0));
         result.process.eventLoopDelay.p95 = Math.max(result.process.eventLoopDelay.p95, Number(snapshot?.process?.eventLoopDelay?.p95 || 0));
         result.process.eventLoopDelay.p99 = Math.max(result.process.eventLoopDelay.p99, Number(snapshot?.process?.eventLoopDelay?.p99 || 0));
@@ -532,7 +545,7 @@ export function aggregateWorkerMetrics(workerSnapshots = new Map()) {
         }
         if (snapshot?.requestAudit) {
             result.requestAudit.byWorker[workerId] = snapshot.requestAudit;
-            for (const field of ['runs', 'failures', 'skippedRuns', 'lastScannedFiles', 'lastScannedBytes', 'lastEventCount']) {
+            for (const field of ['runs', 'failures', 'skippedRuns', 'lastScannedFiles', 'lastScannedBytes', 'lastBacklogBytes', 'lastEventCount', 'capturePending', 'captureFailures']) {
                 result.requestAudit[field] += Number(snapshot.requestAudit[field] || 0);
             }
             result.requestAudit.lastRunMs = Math.max(
@@ -688,6 +701,7 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
     const epoch = env.RUNTIME_DEPLOYMENT_EPOCH || `local-${Date.now()}`;
     const workers = new Map();
     const workerMetrics = new Map();
+    let lastBacklogBroadcastAt = 0;
     const providerConfigAcks = createProviderConfigAckTracker();
     const rawCaptureConfigAcks = createProviderConfigAckTracker();
     const potluckKeyConfigAcks = createKeyConfigAckTracker();
@@ -814,6 +828,14 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
             }
             if (message?.type === 'runtime_metrics' && message.snapshot) {
                 workerMetrics.set(id, message.snapshot);
+                if (Date.now() - lastBacklogBroadcastAt >= 5000) {
+                    lastBacklogBroadcastAt = Date.now();
+                    const control = workers.get('control-1');
+                    if (control?.child.connected) control.child.send({
+                        type: 'runtime_backlog',
+                        backlog: getPersistenceBacklog(aggregateWorkerMetrics(workerMetrics)).total
+                    });
+                }
                 // A metrics snapshot is emitted immediately before the explicit ready message.
                 // Treat it as equivalent readiness evidence so a lost IPC ready frame cannot
                 // leave a successfully restarted worker stuck in "starting" forever.

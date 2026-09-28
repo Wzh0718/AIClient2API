@@ -1,6 +1,7 @@
 import fs from 'fs';
 import { promises as fsp } from 'fs';
 import path from 'path';
+import { atomicWriteFile } from '../../utils/file-lock.js';
 
 function dateKeyFromTimestamp(value = new Date()) {
     const date = value instanceof Date ? value : new Date(value);
@@ -32,6 +33,38 @@ export class RequestAuditAnalysisStore {
 
     getLatestPath() {
         return path.join(this.dir, 'latest.json');
+    }
+
+    getCheckpointPath() {
+        return path.join(this.dir, 'incremental-checkpoint.json');
+    }
+
+    async readCheckpoint() {
+        try {
+            const state = JSON.parse(await fsp.readFile(this.getCheckpointPath(), 'utf8'));
+            return state?.version === 1 && state.offsets && Array.isArray(state.recent) ? state : null;
+        } catch {
+            return null;
+        }
+    }
+
+    async writeCheckpoint(state) {
+        await fsp.mkdir(this.dir, { recursive: true, mode: 0o700 });
+        await atomicWriteFile(this.getCheckpointPath(), JSON.stringify(state), { encoding: 'utf8', mode: 0o600 });
+    }
+
+    async appendDiagnostics(diagnostics = [], { generatedAt = new Date().toISOString(), complete = true, backlogBytes = 0 } = {}) {
+        await fsp.mkdir(this.dir, { recursive: true, mode: 0o700 });
+        if (diagnostics.length) {
+            const filePath = this.getFilePath(generatedAt);
+            const content = diagnostics.filter(item => item?.requestId)
+                .map(item => JSON.stringify({ ...item, generatedAt })).join('\n');
+            if (content) await fsp.appendFile(filePath, `${content}\n`, { encoding: 'utf8', mode: 0o600 });
+            this.evictFile(filePath);
+        }
+        await atomicWriteFile(this.getLatestPath(), JSON.stringify({
+            generatedAt, count: diagnostics.length, complete, backlogBytes
+        }), { encoding: 'utf8', mode: 0o600 });
     }
 
     async writeDiagnostics(diagnostics = [], { generatedAt = new Date().toISOString() } = {}) {
@@ -125,7 +158,8 @@ export class RequestAuditAnalysisStore {
             return {
                 generatedAt,
                 staleSeconds,
-                status: staleSeconds <= this.freshSeconds ? 'fresh' : 'stale'
+                status: latest.complete === false || staleSeconds > this.freshSeconds ? 'stale' : 'fresh',
+                backlogBytes: Number(latest.backlogBytes || 0)
             };
         } catch (_error) {
             return { status: 'missing', generatedAt: null, staleSeconds: null };

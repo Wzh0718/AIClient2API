@@ -4,17 +4,21 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { addToUsedPaths, isPathUsed, pathsEqual, detectProviderFromPath } from '../utils/provider-utils.js';
 
+const RUNTIME_ARTIFACT_DIRECTORIES = new Set([
+    'app-logs', 'backups', 'gpt-diagnostics', 'import-backups', 'logs',
+    'permanent-usage-ledger', 'repair-output', 'request-audit',
+    'request-audit-analysis', 'request-audit-raw', 'retry-audit',
+    'runtime-hook-spool', 'usage-events', 'usage-ledger'
+]);
+
 /**
  * 扫描和分析配置文件
  * @param {Object} currentConfig - The current configuration object
  * @param {Object} providerPoolManager - Provider pool manager instance
  * @returns {Promise<Array>} Array of configuration file objects
  */
-export async function scanConfigFiles(currentConfig, providerPoolManager) {
+export async function scanConfigFiles(currentConfig, providerPoolManager, { configsPath = path.join(process.cwd(), 'configs') } = {}) {
     const configFiles = [];
-    
-    // 只扫描configs目录
-    const configsPath = path.join(process.cwd(), 'configs');
     
     if (!existsSync(configsPath)) {
         // logger.info('[Config Scanner] configs directory not found, creating empty result');
@@ -55,7 +59,7 @@ export async function scanConfigFiles(currentConfig, providerPoolManager) {
 
     try {
         // 扫描configs目录下的所有子目录和文件
-        const configsFiles = await scanOAuthDirectory(configsPath, usedPaths, currentConfig, providerPools);
+        const configsFiles = await scanOAuthDirectory(configsPath, usedPaths, currentConfig, providerPools, configsPath);
         configFiles.push(...configsFiles);
     } catch (error) {
         logger.warn(`[Config Scanner] Failed to scan configs directory:`, error.message);
@@ -496,7 +500,7 @@ function getFileUsageInfo(relativePath, fileName, usedPaths, currentConfig, prov
  * @param {Object} currentConfig - Current configuration
  * @returns {Promise<Array>} Array of OAuth configuration file objects
  */
-async function scanOAuthDirectory(dirPath, usedPaths, currentConfig, providerPools) {
+async function scanOAuthDirectory(dirPath, usedPaths, currentConfig, providerPools, configsPath) {
     const oauthFiles = [];
     
     try {
@@ -518,11 +522,15 @@ async function scanOAuthDirectory(dirPath, usedPaths, currentConfig, providerPoo
                 if (file.name.startsWith('.') || file.name.includes('migration-backup')) {
                     continue;
                 }
+                if (path.resolve(dirPath) === path.resolve(configsPath)
+                    && RUNTIME_ARTIFACT_DIRECTORIES.has(file.name)) {
+                    continue;
+                }
                 // 递归扫描子目录（限制深度）
-                const relativePath = path.relative(process.cwd(), fullPath);
+                const relativePath = path.relative(configsPath, fullPath);
                 // 最大深度4层，以支持 configs/kiro/{subfolder}/file.json 这样的结构
-                if (relativePath.split(path.sep).length < 4) {
-                    const subFiles = await scanOAuthDirectory(fullPath, usedPaths, currentConfig, providerPools);
+                if (relativePath.split(path.sep).length < 3) {
+                    const subFiles = await scanOAuthDirectory(fullPath, usedPaths, currentConfig, providerPools, configsPath);
                     oauthFiles.push(...subFiles);
                 }
             }

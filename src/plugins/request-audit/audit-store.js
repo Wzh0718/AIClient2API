@@ -187,6 +187,82 @@ export class RequestAuditStore {
         return { ...this.lastQueryStats };
     }
 
+    async readIncremental({ since, offsets = null, maxBytes = 32 * 1024 * 1024, onEvent = () => {} } = {}) {
+        const files = (await this.listFiles({ since: toDate(since) }))
+            .filter(filePath => !filePath.endsWith('.gz'));
+        const snapshots = (await Promise.all(files.map(async filePath => {
+            const stat = await fsp.stat(filePath).catch(() => null);
+            return stat?.isFile() ? {
+                filePath, size: stat.size, mtimeMs: stat.mtimeMs,
+                identity: `${stat.dev}:${stat.ino}`
+            } : null;
+        }))).filter(Boolean).sort((a, b) => a.mtimeMs - b.mtimeMs || a.filePath.localeCompare(b.filePath));
+        if (offsets === null) {
+            return {
+                offsets: Object.fromEntries(snapshots.map(file => [file.filePath, {
+                    offset: file.size, identity: file.identity
+                }])),
+                scannedBytes: 0,
+                remainingBytes: 0,
+                initialized: true
+            };
+        }
+        const nextOffsets = {};
+        const offsetByIdentity = new Map(Object.values(offsets)
+            .filter(item => item && typeof item === 'object' && item.identity)
+            .map(item => [item.identity, Number(item.offset) || 0]));
+        let scannedBytes = 0;
+        let remainingBudget = Math.max(0, Number(maxBytes) || 0);
+        for (const { filePath, size, identity } of snapshots) {
+            const previous = offsets[filePath];
+            const savedOffset = typeof previous === 'object' && previous !== null
+                ? Number(previous.offset) : Number(previous);
+            const matchingOffset = Number.isFinite(savedOffset)
+                ? savedOffset : (offsetByIdentity.get(identity) || 0);
+            let offset = Math.min(Math.max(0, matchingOffset), size);
+            if (matchingOffset > size) offset = 0;
+            if (remainingBudget > 0 && offset < size) {
+                const handle = await fsp.open(filePath, 'r').catch(error => {
+                    if (error.code === 'ENOENT') return null;
+                    throw error;
+                });
+                if (handle) {
+                    try {
+                        let position = offset;
+                        let pending = Buffer.alloc(0);
+                        while (position < size && remainingBudget > 0) {
+                            const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, size - position, remainingBudget));
+                            const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+                            if (!bytesRead) break;
+                            position += bytesRead;
+                            scannedBytes += bytesRead;
+                            remainingBudget -= bytesRead;
+                            pending = Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
+                            let newline;
+                            while ((newline = pending.indexOf(10)) >= 0) {
+                                const line = pending.subarray(0, newline).toString('utf8').trim();
+                                pending = pending.subarray(newline + 1);
+                                offset += newline + 1;
+                                if (!line) continue;
+                                try { onEvent(JSON.parse(line)); } catch (error) {
+                                    if (!(error instanceof SyntaxError)) throw error;
+                                }
+                            }
+                            if (pending.length > 4 * 1024 * 1024) {
+                                throw new Error('Audit analyzer line exceeds 4 MiB');
+                            }
+                        }
+                    } finally {
+                        await handle.close();
+                    }
+                }
+            }
+            nextOffsets[filePath] = { offset, identity };
+        }
+        const remainingBytes = snapshots.reduce((total, file) => total + Math.max(0, file.size - (nextOffsets[file.filePath]?.offset || 0)), 0);
+        return { offsets: nextOffsets, scannedBytes, remainingBytes, initialized: false };
+    }
+
     async rotateIfNeeded(filePath, incomingBytes = 0) {
         const maxFileBytes = Number(this.maxFileBytes);
         if (!Number.isFinite(maxFileBytes) || maxFileBytes <= 0) return;

@@ -102,6 +102,83 @@ describe('request audit plugin', () => {
     });
   });
 
+  test('completion event preserves worker usage when content hook was not delivered', async () => {
+    const auditStore = { append: jest.fn(), cleanup: jest.fn() };
+    await plugin.init({ REQUEST_AUDIT_ENABLED: true, _requestAuditStore: auditStore });
+    await plugin.hooks.onRequestCompleted({
+      requestId: 'completion-only',
+      _runtimeUsage: { prompt_tokens: 120, completion_tokens: 9, total_tokens: 129 },
+      model: 'gpt-6-astra',
+      toProvider: 'openai-codex-oauth',
+      accountEmail: 'owner@example.com',
+      response: { httpStatus: 200, completed: true }
+    });
+
+    await waitFor(() => expect(auditStore.append).toHaveBeenCalledTimes(1));
+    expect(auditStore.append.mock.calls[0][0]).toMatchObject({
+      request: { model: 'gpt-6-astra', toProvider: 'openai-codex-oauth' },
+      account: { accountEmail: 'owner@example.com' },
+      usage: { promptTokens: 120, completionTokens: 9, totalTokens: 129 },
+      status: { outcome: 'success' }
+    });
+  });
+
+  test('late content event cannot overwrite an already complete audit record', async () => {
+    const auditStore = { append: jest.fn(), cleanup: jest.fn() };
+    await plugin.init({ REQUEST_AUDIT_ENABLED: true, _requestAuditStore: auditStore });
+    await plugin.hooks.onRequestCompleted({
+      requestId: 'completion-first',
+      _runtimeUsage: { prompt_tokens: 80, completion_tokens: 4, total_tokens: 84 },
+      model: 'gpt-6-astra',
+      accountEmail: 'owner@example.com',
+      response: { httpStatus: 200, completed: true }
+    });
+    await waitFor(() => expect(auditStore.append).toHaveBeenCalledTimes(1));
+    await plugin.hooks.onContentGenerated({
+      requestId: 'completion-first',
+      _requestAuditLifecycle: true,
+      model: 'unknown'
+    });
+
+    expect(auditStore.append).toHaveBeenCalledTimes(1);
+    expect(auditStore.append.mock.calls[0][0]).toMatchObject({
+      account: { accountEmail: 'owner@example.com' },
+      usage: { totalTokens: 84 }
+    });
+  });
+
+  test('orphaned Codex content is reported as a capture failure', async () => {
+    const auditStore = { append: jest.fn(), cleanup: jest.fn() };
+    await plugin.init({ REQUEST_AUDIT_ENABLED: true, REQUEST_AUDIT_ANALYZER_ENABLED: false, _requestAuditStore: auditStore });
+    await plugin.hooks.onContentGenerated({
+      requestId: 'orphan-content',
+      _requestAuditLifecycle: true,
+      path: '/openai-codex-oauth/v1/responses',
+      model: 'gpt-6-luna',
+      toProvider: 'openai-codex-oauth',
+      accountEmail: 'owner@example.com',
+      _runtimeUsage: { prompt_tokens: 12, total_tokens: 12 }
+    });
+    const now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now + 16 * 60_000);
+    try {
+      await plugin.hooks.onRequestCompleted({
+        requestId: 'cleanup-trigger',
+        path: '/gemini-antigravity/v1/chat/completions',
+        response: { httpStatus: 429, completed: true }
+      });
+    } finally {
+      clock.mockRestore();
+    }
+    await waitFor(() => expect(auditStore.append.mock.calls.some(([event]) => event.requestId === 'orphan-content')).toBe(true));
+    const orphan = auditStore.append.mock.calls.map(([event]) => event).find(event => event.requestId === 'orphan-content');
+    expect(orphan).toMatchObject({
+      eventId: 'request-audit:orphan-content',
+      capture: { status: 'failed', missingFields: ['terminal_response'] },
+      status: { outcome: 'audit_capture_failed' }
+    });
+  });
+
   test('does not block content generation when audit persistence is slow', async () => {
     let resolveAppend;
     const appendPromise = new Promise(resolve => {
