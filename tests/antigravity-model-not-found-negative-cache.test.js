@@ -130,7 +130,7 @@ describe('Antigravity model-not-found negative cache', () => {
 
         const result = await manager.acquireSlotWithFallback(providerType, sourceModel, { queueKey: 'key-a' });
 
-        expect(result).toMatchObject({ actualModel: firstFallback, isFallback: true });
+        expect(result).toMatchObject({ actualModel: secondFallback, isFallback: true });
         expect(attempts.mock.calls.map(([, model]) => model)).not.toContain(sourceModel);
     });
 

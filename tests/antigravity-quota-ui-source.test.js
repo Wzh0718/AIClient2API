@@ -26,6 +26,7 @@ describe('Antigravity quota UI source', () => {
             'gemini-3-flash',
             'gemini-3.1-flash-image',
             'gemini-3.1-flash-lite',
+            'gemini-3.5-flash-lite',
             'gemini-3.1-pro-low',
             'gemini-3.6-flash-high',
             'gemini-3.6-flash-medium',
