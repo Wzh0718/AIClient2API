@@ -9,31 +9,6 @@ import { loadSectionIfActive } from './navigation.js';
 let currentProviderConfigs = null;
 let isCurrentPasswordDefault = false;
 
-async function refreshGlmRoutingSummary(expectedRevision = 0, attempt = 0) {
-    const target = document.getElementById('glmRoutingSummary');
-    if (!target) return;
-    try {
-        const status = await window.apiClient.get('/glm-routing/status');
-        const active = (status.nodes || []).filter(node => node.healthy && !node.disabled);
-        const bound = (status.nodes || []).reduce((sum, node) => sum + Number(node.boundSessions || 0), 0);
-        const weight = active.reduce((sum, node) => sum + node.weight, 0);
-        const revisionBehind = expectedRevision > Number(status.sync?.currentRevision || 0);
-        const pending = Number(status.sync?.pendingWorkerCount || 0);
-        const syncText = !status.sync ? t('config.glm.syncUnknown') : revisionBehind ? t('config.glm.syncing')
-            : pending ? t('config.glm.syncPending', { pending }) : t('config.glm.synced');
-        target.textContent = t('config.glm.summary', { nodes: active.length, weight, bound, sync: syncText });
-        if (!active.length) {
-            const link = document.createElement('a');
-            link.href = '#providers';
-            link.textContent = t('config.glm.noNodes');
-            target.append(link);
-        }
-        if ((revisionBehind || pending) && attempt < 8) setTimeout(() => refreshGlmRoutingSummary(expectedRevision, attempt + 1), 1000);
-    } catch {
-        target.textContent = t('config.glm.statusUnavailable');
-    }
-}
-
 function getSelectedModelProviders() {
     const modelProviderEl = document.getElementById('modelProvider');
     if (!modelProviderEl) {
@@ -552,7 +527,6 @@ async function loadConfiguration() {
         if (codexPotluckStickyProviderEnabledEl) codexPotluckStickyProviderEnabledEl.checked = data.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED || false;
         const glmRoutingEnabledEl = document.getElementById('glmSessionRoutingEnabled');
         if (glmRoutingEnabledEl) glmRoutingEnabledEl.checked = data.GLM_SESSION_ROUTING_ENABLED === true;
-        refreshGlmRoutingSummary();
         
         if (cronNearMinutesEl) cronNearMinutesEl.value = data.CRON_NEAR_MINUTES || 1;
         if (cronRefreshTokenEl) cronRefreshTokenEl.checked = data.CRON_REFRESH_TOKEN || false;
@@ -878,8 +852,7 @@ async function saveConfiguration(options = {}) {
     };
 
     try {
-        const savedConfig = await window.apiClient.post('/config', config);
-        refreshGlmRoutingSummary(Number(savedConfig?.glmSyncRevision || 0));
+        await window.apiClient.post('/config', config);
         
         // 如果输入了新密码，单独保存密码
         let passwordUpdated = false;

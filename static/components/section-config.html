@@ -333,26 +333,26 @@
                     <span data-i18n="config.advanced.codexPotluckStickyProviderTitle">Codex 缓存亲和路由</span>
                     <small data-i18n="config.advanced.codexPotluckStickyProviderNote">开启后，Codex 请求会优先按 prompt_cache_key/thread/session 固定到同一健康 Codex 账号，提高同一对话的 prompt cache 复用率；缺少对话标识时再按 API Potluck Key + 模型兜底。账号不可用时自动切换。</small>
                 </div>
-                <div class="config-inline-heading">
-                    <span data-i18n="config.glm.title">GPT 会话分流到 GLM</span>
-                    <small data-i18n="config.glm.note">新会话按 Codex 与 GLM 节点权重分配；已有 GLM 会话在关闭后继续使用原节点，闲置 7 天后过期。</small>
-                </div>
-                <div class="form-row">
+                <div class="form-row config-routing-toggle-row">
                     <div class="form-group">
-                        <label data-i18n="config.glm.enabled">启用新会话分流</label>
+                        <label for="codexPotluckStickyProviderEnabled" data-i18n="config.advanced.codexPotluckStickyProviderEnabled">启用缓存亲和</label>
                         <label class="toggle-switch">
-                            <input type="checkbox" id="glmSessionRoutingEnabled">
+                            <input type="checkbox" id="codexPotluckStickyProviderEnabled">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
                 </div>
-                <p id="glmRoutingSummary" role="status" aria-live="polite" data-i18n="config.glm.loading">正在读取 GLM 节点状态…</p>
                 <hr>
-                <div class="form-row">
+
+                <div class="config-inline-heading">
+                    <span data-i18n="config.glm.title">GPT 会话分流到 GLM</span>
+                    <small data-i18n="config.glm.note">符合条件的新 GPT 会话按当前可用节点权重选择；已有绑定保持原节点，闲置 7 天后过期。</small>
+                </div>
+                <div class="form-row config-routing-toggle-row">
                     <div class="form-group">
-                        <label data-i18n="config.advanced.codexPotluckStickyProviderEnabled">启用缓存亲和</label>
+                        <label for="glmSessionRoutingEnabled" data-i18n="config.glm.enabled">启用新会话分流</label>
                         <label class="toggle-switch">
-                            <input type="checkbox" id="codexPotluckStickyProviderEnabled">
+                            <input type="checkbox" id="glmSessionRoutingEnabled">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>

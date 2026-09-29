@@ -660,6 +660,14 @@ input:checked + .toggle-slider:before {
     line-height: 1.5;
 }
 
+.config-routing-toggle-row .form-group {
+    margin-bottom: 0;
+}
+
+.config-routing-toggle-row + hr {
+    margin: 1rem 0 1.5rem;
+}
+
 /* 响应式调整 */
 @media (max-width: 768px) {
     .form-row, .config-row {
