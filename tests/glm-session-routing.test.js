@@ -1,7 +1,7 @@
 import { describe, expect, jest, test } from '@jest/globals';
 import { Readable } from 'node:stream';
 jest.mock('../src/utils/proxy-utils.js', () => ({ configureTLSSidecar: jest.fn() }));
-import { resolveGlmSessionRoute, recordGlmResponseOwnership, GLM_AFFINITY_TTL_MS } from '../src/services/glm-session-routing.js';
+import { resolveGlmSessionRoute, recordGlmResponseOwnership, GLM_AFFINITY_TTL_MS, isGlmPrefixedResponsesEligible, shouldAttemptGlmSessionRouting } from '../src/services/glm-session-routing.js';
 import { GlmCodingPlanAdapter } from '../src/providers/glm/coding-plan-adapter.js';
 import { createProviderConfigEvent } from '../src/runtime/provider-config-event.js';
 
@@ -31,6 +31,26 @@ function config(threadId, enabled = true) {
 }
 
 describe('GLM session routing', () => {
+    test('allows only the Codex Responses path without an explicit provider header', () => {
+        expect(isGlmPrefixedResponsesEligible('/openai-codex-oauth/v1/responses', null)).toBe(true);
+        expect(isGlmPrefixedResponsesEligible('/openai-codex-oauth/v1/responses', 'openai-codex-oauth')).toBe(false);
+        expect(isGlmPrefixedResponsesEligible('/openai-codex-oauth/v1/chat/completions', null)).toBe(false);
+        expect(isGlmPrefixedResponsesEligible('/glm-coding-plan/v1/responses', null)).toBe(false);
+        const prefixed = { ...config('thread-a'), _explicitProviderSelection: true, _glmPrefixedResponsesEligible: true };
+        expect(shouldAttemptGlmSessionRouting(prefixed)).toBe(true);
+        expect(shouldAttemptGlmSessionRouting({ ...prefixed, _glmPrefixedResponsesEligible: false })).toBe(false);
+        expect(shouldAttemptGlmSessionRouting({ ...prefixed, potluckKeyData: { fixedCredential: { uuid: 'codex-a' } } })).toBe(false);
+        expect(shouldAttemptGlmSessionRouting(prefixed, { temporaryRoute: true })).toBe(false);
+        expect(shouldAttemptGlmSessionRouting(prefixed, { customModelConfig: true })).toBe(false);
+    });
+    test('without a stable client session identifier stays on Codex without binding', async () => {
+        const executor = memoryRedis();
+        const route = await resolveGlmSessionRoute({
+            config: config(null), body: { model: 'gpt-6-sol' }, endpointType, manager: nodes, redisExecutor: executor
+        });
+        expect(route).toEqual({ reason: 'no_session_id' });
+        expect(executor.records.size).toBe(0);
+    });
     test('config event carries the hot switch with its revision', () => {
         const event = createProviderConfigEvent('glm-coding-plan', [], { revision: 4, glmRoutingEnabled: true });
         expect(event).toMatchObject({ type: 'provider_config_sync', revision: 4, glmRoutingEnabled: true });
@@ -58,6 +78,38 @@ describe('GLM session routing', () => {
         }
         expect(glmCount).toBeGreaterThan(680);
         expect(glmCount).toBeLessThan(820);
+    });
+    test('prefixed Responses sessions use their explicit cache keys for weighted, sticky selection', async () => {
+        const executor = memoryRedis();
+        const manager = { providerStatus: {
+            'openai-codex-oauth': [
+                { uuid: 'codex-a', config: { uuid: 'codex-a', isHealthy: true, providerWeight: 1 } },
+                { uuid: 'codex-b', config: { uuid: 'codex-b', isHealthy: true, providerWeight: 1 } }
+            ],
+            'glm-coding-plan': [
+                { uuid: 'glm-a', config: { uuid: 'glm-a', isHealthy: true, glmVerified: true, GLM_API_KEY: 'test-key', providerWeight: 1 } }
+            ]
+        } };
+        let glmCount = 0;
+        for (let i = 0; i < 1000; i += 1) {
+            const current = {
+                ...config(null),
+                _explicitProviderSelection: true,
+                _glmPrefixedResponsesEligible: true,
+                _codexCacheAffinityScope: { promptCacheKey: `session-${i}` }
+            };
+            expect(shouldAttemptGlmSessionRouting(current)).toBe(true);
+            const first = await resolveGlmSessionRoute({
+                config: current, body: { model: 'gpt-6-sol' }, endpointType, manager, redisExecutor: executor
+            });
+            if (first.type === 'glm-coding-plan') glmCount += 1;
+            const again = await resolveGlmSessionRoute({
+                config: current, body: { model: 'gpt-6-sol' }, endpointType, manager, redisExecutor: executor
+            });
+            expect(again).toMatchObject({ type: first.type, uuid: first.uuid, reason: 'affinity' });
+        }
+        expect(glmCount).toBeGreaterThan(260);
+        expect(glmCount).toBeLessThan(410);
     });
     test('different client keys do not share bindings', async () => {
         const executor = memoryRedis();

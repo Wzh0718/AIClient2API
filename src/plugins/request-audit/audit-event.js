@@ -231,6 +231,7 @@ export function buildRequestAuditEvent(context = {}) {
     const actualModel = context.model || context.processedRequestBody?.model || context.originalRequestBody?.model || 'unknown';
     const requestedModel = context.originalRequestBody?.model || actualModel;
     const cacheAffinityScope = context._codexCacheAffinityScope || {};
+    const cacheAffinityHashes = context._codexCacheAffinityHashes || {};
     const response = normalizeResponse(context);
     const failure = normalizeFailure(context);
     const runtime = normalizeRuntime(context.runtime);
@@ -243,6 +244,12 @@ export function buildRequestAuditEvent(context = {}) {
         ? selectedProviderUuid === actualProviderUuid ? 'consistent' : 'mismatch'
         : 'unverifiable';
     const routing = context._codexRouting || {};
+    const glmRouting = context._glmRoutingAudit || (context._glmRouting ? {
+        result: context._glmRouting.reason || null,
+        providerType: context._glmRouting.type || null,
+        providerUuidHash: hashSecret(context._glmRouting.uuid),
+        actualModel: context._glmRouting.type === 'glm-coding-plan' ? 'glm-5.3-flash' : null
+    } : null);
     const attempts = normalizeAttempts(context);
     const lastAttempt = attempts.at(-1) || null;
     const codexContext = context.processedRequestBody?.[CODEX_FINGERPRINT_CONTEXT_KEY] || {};
@@ -271,9 +278,9 @@ export function buildRequestAuditEvent(context = {}) {
         beijingDate: beijing.date,
         beijingHour: beijing.hour,
         requestId: context.requestId || context._monitorRequestId || null,
-        prompt_cache_key_hash: hashSecret(cacheAffinityScope.promptCacheKey, 32),
-        thread_id_hash: hashSecret(cacheAffinityScope.threadId, 32),
-        session_id_hash: hashSecret(cacheAffinityScope.sessionId, 32),
+        prompt_cache_key_hash: cacheAffinityHashes.promptCacheKeyHash || hashSecret(cacheAffinityScope.promptCacheKey, 32),
+        thread_id_hash: cacheAffinityHashes.threadIdHash || hashSecret(cacheAffinityScope.threadId, 32),
+        session_id_hash: cacheAffinityHashes.sessionIdHash || hashSecret(cacheAffinityScope.sessionId, 32),
         request: {
             method: context.method || 'POST',
             path: sanitizePath(context.path || context.requestPath),
@@ -312,12 +319,7 @@ export function buildRequestAuditEvent(context = {}) {
             providerNameDisplay: sanitizeProviderName(context.providerName)
         },
         routing: {
-            ...(context._glmRouting ? { glm: {
-                result: context._glmRouting.reason || null,
-                providerType: context._glmRouting.type || null,
-                providerUuidHash: hashSecret(context._glmRouting.uuid),
-                actualModel: context._glmRouting.type === 'glm-coding-plan' ? 'glm-5.3-flash' : null
-            } } : {}),
+            ...(glmRouting ? { glm: glmRouting } : {}),
             routingMode: ['pool', 'auto', 'fixed'].includes(context._codexRouting?.routingMode)
                 ? context._codexRouting.routingMode
                 : null,

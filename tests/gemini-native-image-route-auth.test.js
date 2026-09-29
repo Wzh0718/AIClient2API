@@ -54,8 +54,8 @@ jest.mock('../src/services/service-manager.js', () => ({
 }));
 
 jest.mock('../src/providers/adapter.js', () => ({
-    getRegisteredProviders: jest.fn(() => ['gemini-antigravity']),
-    isRegisteredProvider: jest.fn(provider => provider === 'gemini-antigravity')
+    getRegisteredProviders: jest.fn(() => ['gemini-antigravity', 'openai-codex-oauth']),
+    isRegisteredProvider: jest.fn(provider => ['gemini-antigravity', 'openai-codex-oauth'].includes(provider))
 }));
 
 jest.mock('../src/core/config-manager.js', () => ({
@@ -118,6 +118,31 @@ function makeResponse() {
 }
 
 describe('Gemini native route and authentication contract', () => {
+    test.each([
+        ['/openai-codex-oauth/v1/responses', undefined, true],
+        ['/openai-codex-oauth/v1/responses', 'openai-codex-oauth', false],
+        ['/openai-codex-oauth/v1/chat/completions', undefined, false]
+    ])('marks GLM eligibility for %s with provider header %s as %s', async (url, providerHeader, expected) => {
+        mockHandleAPIRequests.mockClear();
+        const handler = createRequestHandler({
+            UI_ENABLED: false, MODEL_PROVIDER: 'openai-codex-oauth', GLM_SESSION_ROUTING_ENABLED: true,
+            REQUIRED_API_KEY: 'contract-key'
+        }, null);
+        const req = {
+            method: 'POST', url,
+            headers: { host: 'localhost:3000', ...(providerHeader ? { 'model-provider': providerHeader } : {}) },
+            socket: { encrypted: false, remoteAddress: '127.0.0.1' }
+        };
+        await handler(req, makeResponse());
+        expect(mockHandleAPIRequests).toHaveBeenCalledTimes(1);
+        const [method, path, , , requestConfig] = mockHandleAPIRequests.mock.calls[0];
+        expect(method).toBe('POST');
+        expect(path).toBe(url.replace(/^\/openai-codex-oauth/, ''));
+        expect(requestConfig._explicitProviderSelection).toBe(true);
+        expect(requestConfig._glmPrefixedResponsesEligible).toBe(expected);
+        mockHandleAPIRequests.mockClear();
+        handleUIApiRequests.mockClear();
+    });
     test.each([
         ['query key', {}, 'http://localhost/v1beta/models/gemini-3.1-flash-image:generateContent?key=contract-key'],
         ['x-goog-api-key', { 'x-goog-api-key': 'contract-key' }, 'http://localhost/v1beta/models/gemini-3.1-flash-image:generateContent'],

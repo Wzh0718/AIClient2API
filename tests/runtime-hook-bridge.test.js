@@ -1,4 +1,5 @@
 import { RuntimeHookBridge } from '../src/runtime/runtime-hook-bridge.js';
+import { buildRequestAuditEvent } from '../src/plugins/request-audit/audit-event.js';
 
 describe('RuntimeHookBridge', () => {
     test('preserves request network metadata for audit events', async () => {
@@ -95,6 +96,46 @@ describe('RuntimeHookBridge', () => {
         expect(serialized).not.toContain('maki_raw_secret_value');
         expect(published[0].args[0].potluckKeyHash).toMatch(/^sha256:/);
         expect(published[0].args[0]).not.toHaveProperty('potluckApiKey');
+    });
+
+    test('keeps separate GLM session decisions and only hashed affinity fields across workers', async () => {
+        const messages = [];
+        const bridge = new RuntimeHookBridge({ send: async message => { messages.push(message); } });
+        for (const [requestId, key, type, uuid] of [
+            ['route-a', 'private-session-a', 'glm-coding-plan', 'glm-a'],
+            ['route-b', 'private-session-b', 'openai-codex-oauth', 'codex-b']
+        ]) {
+            await bridge.handle('onContentGenerated', {
+                requestId,
+                _requestAuditLifecycle: true,
+                model: 'gpt-6-sol',
+                _codexCacheAffinityScope: {
+                    promptCacheKey: key,
+                    threadId: 'private-thread-' + requestId,
+                    sessionId: 'private-client-session-' + requestId
+                },
+                _glmRouting: { reason: 'assigned', type, uuid, identity: 'private-binding-' + requestId }
+            });
+            await bridge.handle('onRequestCompleted', { requestId, response: { httpStatus: 200, completed: true } });
+        }
+        const finalEvents = messages.filter(message => message.hookName === 'onRequestCompleted')
+            .map(message => buildRequestAuditEvent(message.args[0]));
+        expect(finalEvents).toHaveLength(2);
+        expect(finalEvents[0].prompt_cache_key_hash).toMatch(/^sha256:[a-f0-9]{32}$/);
+        expect(finalEvents[0].thread_id_hash).toMatch(/^sha256:[a-f0-9]{32}$/);
+        expect(finalEvents[0].session_id_hash).toMatch(/^sha256:[a-f0-9]{32}$/);
+        expect(finalEvents[0].prompt_cache_key_hash).not.toBe(finalEvents[1].prompt_cache_key_hash);
+        expect(finalEvents[0].routing.glm).toMatchObject({
+            result: 'assigned', providerType: 'glm-coding-plan', actualModel: 'glm-5.3-flash'
+        });
+        expect(finalEvents[1].routing.glm).toMatchObject({
+            result: 'assigned', providerType: 'openai-codex-oauth', actualModel: null
+        });
+        const serialized = JSON.stringify(messages);
+        expect(serialized).not.toContain('private-session-');
+        expect(serialized).not.toContain('private-thread-');
+        expect(serialized).not.toContain('private-client-session-');
+        expect(serialized).not.toContain('private-binding-');
     });
 
     test('preserves Potluck quota reservation metadata across workers', async () => {

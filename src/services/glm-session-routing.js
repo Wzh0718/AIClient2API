@@ -10,6 +10,18 @@ export const GLM_AFFINITY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PREFIX = 'aiclient:glm-session:v1:';
 let redisClient;
 
+export function isGlmPrefixedResponsesEligible(path, providerHeader) {
+    return !providerHeader && path === `/${MODEL_PROVIDER.CODEX_API}/v1/responses`;
+}
+
+export function shouldAttemptGlmSessionRouting(config = {}, { temporaryRoute = false, customModelConfig = false } = {}) {
+    return !temporaryRoute
+        && !customModelConfig
+        && !config.potluckKeyData?.fixedCredential?.uuid
+        && config.MODEL_PROVIDER === MODEL_PROVIDER.CODEX_API
+        && (!config._explicitProviderSelection || config._glmPrefixedResponsesEligible === true);
+}
+
 function redis() {
     if (redisClient) return redisClient;
     if (!process.env.REDIS_URL) throw Object.assign(new Error('GLM session routing requires Redis'), { status: 503, code: 'GLM_AFFINITY_UNAVAILABLE' });

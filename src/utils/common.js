@@ -24,7 +24,7 @@ import { resolveOriginalCodexTurnId } from '../providers/openai/codex-turn-state
 import { beginRequestAttempt, finishRequestAttempt, getSuccessfulOutboundModel } from './request-attempts.js';
 import { matchesModelFamily } from '../providers/openai/codex-model-routing.js';
 import requestContext from './context.js';
-import { GLM_MODEL, resolveGlmSessionRoute } from '../services/glm-session-routing.js';
+import { GLM_MODEL, resolveGlmSessionRoute, shouldAttemptGlmSessionRouting } from '../services/glm-session-routing.js';
 import { assertCodexRoutingIntegrity } from '../services/codex-routing-integrity.js';
 import {
     preserveTemporaryRouteResponseModel,
@@ -3625,7 +3625,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     // Route only after temporary-key and custom-model rules have settled.
     // The Redis binding is checked even after the switch is disabled so that
     // established sessions keep their original upstream.
-    if (!temporaryRoute && !customModelConfig && !CONFIG._explicitProviderSelection && !CONFIG.potluckKeyData?.fixedCredential?.uuid && CONFIG.MODEL_PROVIDER === MODEL_PROVIDER.CODEX_API) {
+    if (shouldAttemptGlmSessionRouting(CONFIG, { temporaryRoute, customModelConfig })) {
         const glmRoute = await resolveGlmSessionRoute({
             config: CONFIG,
             body: originalRequestBody,
