@@ -1127,4 +1127,149 @@ describe('API Potluck key credential routing', () => {
         });
         expect(mockAtomicWriteFile).not.toHaveBeenCalled();
     });
+
+    test('saves a restricted credential set through public refs and converts back to legacy fixed', async () => {
+        const { keyManager, apiRoutes } = await loadPotluckModules();
+        const token = writeAdminToken();
+        const providers = ['codex-a', 'codex-b', 'codex-c'];
+        fs.writeFileSync(path.join(tempDir, 'configs', 'provider_pools.json'), JSON.stringify({
+            'openai-codex-oauth': providers.map(uuid => ({ uuid, isHealthy: true, isDisabled: false }))
+        }));
+        const ref = uuid => `sha256:${crypto.createHash('sha256').update(`openai-codex-oauth:${uuid}`).digest('hex').slice(0, 16)}`;
+        const created = await keyManager.createKey('Restricted Contract', 1000);
+        const keyRef = `sha256:${crypto.createHash('sha256').update(created.id).digest('hex').slice(0, 16)}`;
+        const routePath = `/api/potluck/keys/${encodeURIComponent(keyRef)}/routing`;
+
+        const invalid = await callPotluckRoute(apiRoutes.handlePotluckApiRoutes, 'PUT', routePath, {
+            routingMode: 'restricted', credentialRefs: [ref('codex-a'), ref('codex-a')]
+        }, token);
+        expect(invalid.statusCode).toBe(400);
+        expect((await keyManager.getKey(created.id)).routingMode).not.toBe('restricted');
+        await expect(keyManager.updateKeyRouting(created.id, {
+            routingMode: 'restricted', restrictedCredentialUuids: ['codex-a']
+        })).rejects.toMatchObject({ code: 'INVALID_KEY_ROUTING' });
+        await expect(keyManager.updateKeyRouting(created.id, {
+            routingMode: 'restricted',
+            restrictedCredentialUuids: ['codex-a', 'codex-b', 'codex-c', 'codex-d', 'codex-e', 'codex-f']
+        })).rejects.toMatchObject({ code: 'INVALID_KEY_ROUTING' });
+        const unknown = await callPotluckRoute(apiRoutes.handlePotluckApiRoutes, 'PUT', routePath, {
+            routingMode: 'restricted', credentialRefs: [ref('codex-a'), ref('missing')]
+        }, token);
+        expect(unknown.statusCode).toBe(400);
+        expect((await keyManager.getKey(created.id)).routingMode).not.toBe('restricted');
+
+        const restricted = await callPotluckRoute(apiRoutes.handlePotluckApiRoutes, 'PUT', routePath, {
+            routingMode: 'restricted', credentialRefs: [ref('codex-a'), ref('codex-c')]
+        }, token);
+        expect(restricted.statusCode).toBe(200);
+        expect(restricted.body.data).toMatchObject({
+            routingMode: 'restricted', credentialRefs: [ref('codex-a'), ref('codex-c')]
+        });
+        expect(await keyManager.getKey(created.id)).toMatchObject({
+            routingMode: 'restricted', restrictedCredentialUuids: ['codex-a', 'codex-c'],
+            fixedCredential: null, manualLock: true
+        });
+        expect(await keyManager.validateKey(created.id)).toMatchObject({
+            valid: true,
+            keyData: { routingMode: 'restricted', restrictedCredentialUuids: ['codex-a', 'codex-c'] }
+        });
+        const detail = await callPotluckRoute(apiRoutes.handlePotluckApiRoutes, 'GET',
+            `/api/potluck/keys/${encodeURIComponent(keyRef)}`, undefined, token);
+        expect(detail.body.data.credentialRefs).toEqual([ref('codex-a'), ref('codex-c')]);
+        expect(JSON.stringify(detail.body)).not.toContain('codex-a');
+        expect(JSON.stringify(detail.body)).not.toContain(created.id);
+        const groupView = await callPotluckRoute(apiRoutes.handlePotluckApiRoutes, 'GET',
+            '/api/potluck/credential-groups', undefined, token);
+        const assignment = groupView.body.data.keys.find(key => key.keyRef === keyRef);
+        expect(assignment).toMatchObject({
+            routingMode: 'restricted', credentialRefs: [ref('codex-a'), ref('codex-c')],
+            spilloverPolicy: 'disabled'
+        });
+        expect(JSON.stringify(groupView.body)).not.toContain(created.id);
+
+        const single = await callPotluckRoute(apiRoutes.handlePotluckApiRoutes, 'PUT', routePath, {
+            routingMode: 'fixed', fixedCredential: { credentialRef: ref('codex-a') }
+        }, token);
+        expect(single.statusCode).toBe(200);
+        expect(await keyManager.getKey(created.id)).toMatchObject({
+            routingMode: 'fixed', fixedCredential: { uuid: 'codex-a' },
+            restrictedCredentialUuids: []
+        });
+    });
+
+    test('restores the previous Key routing if the credential-group revision update fails', async () => {
+        const { keyManager, apiRoutes } = await loadPotluckModules();
+        const { CredentialGroupService } = await import('../src/services/codex-credential-group-service.js');
+        const token = writeAdminToken();
+        fs.writeFileSync(path.join(tempDir, 'configs', 'provider_pools.json'), JSON.stringify({
+            'openai-codex-oauth': ['codex-a', 'codex-b'].map(uuid => ({ uuid, isHealthy: true }))
+        }));
+        const ref = uuid => `sha256:${crypto.createHash('sha256').update(`openai-codex-oauth:${uuid}`).digest('hex').slice(0, 16)}`;
+        const created = await keyManager.createKey('Rollback Contract', 1000);
+        const keyRef = `sha256:${crypto.createHash('sha256').update(created.id).digest('hex').slice(0, 16)}`;
+        const original = await keyManager.getKey(created.id);
+        const failure = jest.spyOn(CredentialGroupService.prototype, 'updateKeyAssignment')
+            .mockRejectedValueOnce(new Error('revision write failed'));
+        try {
+            const response = await callPotluckRoute(apiRoutes.handlePotluckApiRoutes, 'PUT',
+                `/api/potluck/keys/${encodeURIComponent(keyRef)}/routing`, {
+                    routingMode: 'restricted', credentialRefs: [ref('codex-a'), ref('codex-b')]
+                }, token);
+            expect(response.statusCode).toBeGreaterThanOrEqual(400);
+            expect(await keyManager.getKey(created.id)).toMatchObject({
+                routingMode: original.routingMode,
+                primaryGroupId: original.primaryGroupId,
+                fixedCredential: original.fixedCredential,
+                restrictedCredentialUuids: []
+            });
+        } finally {
+            failure.mockRestore();
+        }
+    });
+
+    test('does not advance the group revision while restricted Key persistence is pending', async () => {
+        const { keyManager, apiRoutes } = await loadPotluckModules();
+        const token = writeAdminToken();
+        fs.writeFileSync(path.join(tempDir, 'configs', 'provider_pools.json'), JSON.stringify({
+            'openai-codex-oauth': ['codex-a', 'codex-b'].map(uuid => ({ uuid, isHealthy: true }))
+        }));
+        const ref = uuid => `sha256:${crypto.createHash('sha256').update(`openai-codex-oauth:${uuid}`).digest('hex').slice(0, 16)}`;
+        const created = await keyManager.createKey('Pending Restricted Contract', 1000);
+        const keyRef = `sha256:${crypto.createHash('sha256').update(created.id).digest('hex').slice(0, 16)}`;
+        mockAtomicWriteFile.mockRejectedValueOnce(new Error('disk temporarily unavailable'));
+        const response = await callPotluckRoute(apiRoutes.handlePotluckApiRoutes, 'PUT',
+            `/api/potluck/keys/${encodeURIComponent(keyRef)}/routing`, {
+                routingMode: 'restricted', credentialRefs: [ref('codex-a'), ref('codex-b')]
+            }, token);
+        expect(response.statusCode).toBe(503);
+        expect(response.body.error.code).toBe('KEY_ROUTING_PERSISTENCE_PENDING');
+        expect((await keyManager.getKey(created.id)).routingMode).toBe(created.routingMode);
+        expect(fs.existsSync(path.join(tempDir, 'configs', 'codex-credential-groups.json'))).toBe(false);
+    });
+
+    test('preserves restricted members across the multi-worker Key config snapshot', async () => {
+        const { keyManager } = await loadPotluckModules();
+        const created = await keyManager.createKey('Worker Restricted Contract', 1000);
+        const events = [];
+        keyManager.setKeyStoreSyncPublisher(event => events.push(event), { epoch: 'control-restricted' });
+        try {
+            await keyManager.updateKeyRouting(created.id, {
+                routingMode: 'restricted',
+                restrictedCredentialUuids: ['codex-a', 'codex-b']
+            });
+            const event = events.at(-1);
+            expect(event.records.find(record => record.keyId === created.id)).toMatchObject({
+                routingMode: 'restricted', restrictedCredentialUuids: ['codex-a', 'codex-b']
+            });
+            const applied = keyManager.applyKeyStoreSyncEvent({
+                ...event, epoch: 'execution-restricted', revision: 1
+            });
+            expect(applied.applied).toBe(true);
+            expect(await keyManager.getKey(created.id)).toMatchObject({
+                routingMode: 'restricted', restrictedCredentialUuids: ['codex-a', 'codex-b']
+            });
+        } finally {
+            keyManager.setKeyStoreSyncPublisher(null);
+        }
+    });
 });

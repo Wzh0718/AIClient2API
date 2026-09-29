@@ -320,7 +320,7 @@ export function buildRequestAuditEvent(context = {}) {
         },
         routing: {
             ...(glmRouting ? { glm: glmRouting } : {}),
-            routingMode: ['pool', 'auto', 'fixed'].includes(context._codexRouting?.routingMode)
+            routingMode: ['pool', 'auto', 'fixed', 'restricted'].includes(context._codexRouting?.routingMode)
                 ? context._codexRouting.routingMode
                 : null,
             requestedPrimaryGroupId: context._codexRouting?.requestedPrimaryGroupId || null,

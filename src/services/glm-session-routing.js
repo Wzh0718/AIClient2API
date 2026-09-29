@@ -18,6 +18,7 @@ export function shouldAttemptGlmSessionRouting(config = {}, { temporaryRoute = f
     return !temporaryRoute
         && !customModelConfig
         && !config.potluckKeyData?.fixedCredential?.uuid
+        && config.potluckKeyData?.routingMode !== 'restricted'
         && config.MODEL_PROVIDER === MODEL_PROVIDER.CODEX_API
         && (!config._explicitProviderSelection || config._glmPrefixedResponsesEligible === true);
 }
@@ -81,7 +82,7 @@ export async function glmRouteCandidates(manager, requestedModel, config = {}) {
     if (config.potluckKeyData) {
         const groupConfig = await new CredentialGroupService({ filePath: config.CODEX_CREDENTIAL_GROUPS_FILE_PATH }).getCurrentConfig();
         const keyRouting = resolveKeyRoutingAssignment(config.potluckKeyData, groupConfig);
-        if (keyRouting.routingMode === 'fixed') return [];
+        if (keyRouting.routingMode === 'fixed' || keyRouting.routingMode === 'restricted') return [];
         const route = routeKeyToCredentialCandidates({
             keyRouting,
             groups: groupConfig.groups || [],

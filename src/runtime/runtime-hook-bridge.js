@@ -72,7 +72,7 @@ function compactModelRouting(routing) {
 function compactCodexRouting(routing) {
     if (!routing || typeof routing !== 'object') return undefined;
     return {
-        routingMode: ['pool', 'auto', 'fixed'].includes(routing.routingMode)
+        routingMode: ['pool', 'auto', 'fixed', 'restricted'].includes(routing.routingMode)
             ? routing.routingMode
             : null,
         requestedPrimaryGroupId: routing.requestedPrimaryGroupId || null,

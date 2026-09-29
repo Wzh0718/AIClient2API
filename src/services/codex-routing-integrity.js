@@ -22,6 +22,15 @@ export function getCodexRoutingConsistencyStatus(route = {}, actualProviderUuid 
             : 'mismatch';
     }
 
+    if (route.routingMode === 'restricted') {
+        return Array.isArray(route.restrictedCredentialUuids)
+            && route.restrictedCredentialUuids.includes(actualProviderUuid)
+            && route.selectedGroupId === null
+            && route.actualProviderGroupId === null
+            ? 'consistent'
+            : 'mismatch';
+    }
+
     if (route.routingMode === 'auto' || route.routingMode === 'fixed') {
         if (
             !route.selectedGroupId
@@ -45,7 +54,7 @@ export function getCodexRoutingConsistencyStatus(route = {}, actualProviderUuid 
 
 export function assertCodexRoutingIntegrity(config = {}, actualProviderUuid = null) {
     const route = config._codexRouteResult || config._codexRouting;
-    if (!route || !['pool', 'auto', 'fixed'].includes(route.routingMode)) return true;
+    if (!route || !['pool', 'auto', 'fixed', 'restricted'].includes(route.routingMode)) return true;
 
     const consistencyStatus = getCodexRoutingConsistencyStatus(route, actualProviderUuid);
     route.consistencyStatus = consistencyStatus;

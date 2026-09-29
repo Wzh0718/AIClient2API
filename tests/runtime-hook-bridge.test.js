@@ -138,6 +138,44 @@ describe('RuntimeHookBridge', () => {
         expect(serialized).not.toContain('private-binding-');
     });
 
+    test('audits restricted routing without transmitting its raw member list', async () => {
+        const messages = [];
+        const bridge = new RuntimeHookBridge({ send: async message => { messages.push(message); } });
+        for (const [requestId, uuid, email] of [
+            ['restricted-audit-a', 'codex-a', 'account-a@example.com'],
+            ['restricted-audit-b', 'codex-b', 'account-b@example.com']
+        ]) {
+            await bridge.handle('onContentGenerated', {
+                requestId,
+                _requestAuditLifecycle: true,
+                model: 'gpt-6-luna',
+                providerUuid: uuid,
+                accountEmail: email,
+                _codexRouting: {
+                    routingMode: 'restricted',
+                    selectedProviderUuid: uuid,
+                    restrictedCredentialUuids: ['private-member-a', 'private-member-b'],
+                    selectedGroupId: null,
+                    actualProviderGroupId: null
+                }
+            });
+            await bridge.handle('onRequestCompleted', {
+                requestId,
+                response: { httpStatus: 200, completed: true }
+            });
+        }
+        const events = messages.filter(message => message.hookName === 'onRequestCompleted')
+            .map(message => buildRequestAuditEvent(message.args[0]));
+        expect(events.map(event => [event.requestId, event.account.accountEmail])).toEqual([
+            ['restricted-audit-a', 'account-a@example.com'],
+            ['restricted-audit-b', 'account-b@example.com']
+        ]);
+        expect(events.every(event => event.routing.routingMode === 'restricted'
+            && event.routing.consistencyStatus === 'consistent')).toBe(true);
+        expect(events[0].routing.selectedProviderUuidHash).not.toBe(events[1].routing.selectedProviderUuidHash);
+        expect(JSON.stringify(messages)).not.toContain('private-member-');
+    });
+
     test('preserves Potluck quota reservation metadata across workers', async () => {
         const messages = [];
         const bridge = new RuntimeHookBridge({

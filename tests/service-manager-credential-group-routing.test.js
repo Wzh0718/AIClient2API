@@ -111,6 +111,78 @@ afterEach(() => {
 });
 
 describe('Service Manager Codex credential-group routing', () => {
+    test('restricted routing selects only listed credentials across groups and keeps session affinity', async () => {
+        writeGroupConfig({
+            groups: [
+                { id: 'group-a', credentialUuids: ['codex-a', 'codex-b'] },
+                { id: 'group-b', credentialUuids: ['codex-c'] }
+            ],
+            keyAssignments: [{
+                keyId: 'key-1', routingMode: 'restricted',
+                restrictedCredentialUuids: ['codex-a', 'codex-c']
+            }]
+        });
+        const config = createConfig({
+            providers: [provider('codex-a', { isHealthy: true }), provider('codex-b', { isHealthy: true }),
+                provider('codex-c', { isHealthy: true })],
+            keyData: { routingMode: 'restricted', restrictedCredentialUuids: ['codex-a', 'codex-c'] }
+        });
+        const manager = await initialize(config);
+        const calls = [];
+        jest.spyOn(manager, 'selectProviderWithFallback').mockImplementation(async (_type, _model, options) => {
+            calls.push(options.allowedProviderUuids);
+            const uuid = options.allowedProviderUuids.includes('codex-a')
+                && !options.excludeProviderUuids?.includes('codex-a') ? 'codex-a' : 'codex-c';
+            return { config: provider(uuid), actualProviderType: providerType, isFallback: false };
+        });
+
+        const first = await getApiServiceWithFallback(config, 'gpt-5.6-luna');
+        const again = await getApiServiceWithFallback(config, 'gpt-5.6-luna');
+        expect(first.uuid).toBe('codex-a');
+        expect(again.uuid).toBe('codex-a');
+        expect(calls).toEqual([['codex-a', 'codex-c'], ['codex-a', 'codex-c']]);
+        expect(config._codexRouting).toMatchObject({
+            routingMode: 'restricted', selectedProviderUuid: 'codex-a',
+            restrictedCredentialUuids: ['codex-a', 'codex-c'], consistencyStatus: 'consistent'
+        });
+        const retry = await getApiServiceWithFallback(config, 'gpt-5.6-luna', {
+            excludeProviderUuids: ['codex-a']
+        });
+        expect(retry.uuid).toBe('codex-c');
+        expect(calls.at(-1)).toEqual(['codex-a', 'codex-c']);
+        manager.providerStatus[providerType].find(item => item.uuid === 'codex-a').config.isHealthy = false;
+        const fallback = await getApiServiceWithFallback(config, 'gpt-5.6-luna');
+        expect(fallback.uuid).toBe('codex-c');
+        expect(calls.at(-1)).toEqual(['codex-c']);
+        manager.providerStatus[providerType].find(item => item.uuid === 'codex-c').config.isHealthy = false;
+        await expect(getApiServiceWithFallback(config, 'gpt-5.6-luna')).rejects.toMatchObject({
+            code: 'RESTRICTED_CREDENTIALS_UNAVAILABLE', status: 503
+        });
+        expect(calls).toHaveLength(4);
+    });
+    test('restricted routing rejects a selector result outside the chosen set', async () => {
+        writeGroupConfig({
+            groups: [
+                { id: 'group-a', credentialUuids: ['codex-a', 'codex-b'] },
+                { id: 'group-b', credentialUuids: ['codex-c'] }
+            ],
+            keyAssignments: [{ keyId: 'key-1', routingMode: 'restricted',
+                restrictedCredentialUuids: ['codex-a', 'codex-c'] }]
+        });
+        const config = createConfig({
+            providers: [provider('codex-a', { isHealthy: true }),
+                provider('codex-b', { isHealthy: true }),
+                provider('codex-c', { isHealthy: true })],
+            keyData: { routingMode: 'restricted', restrictedCredentialUuids: ['codex-a', 'codex-c'] }
+        });
+        const manager = await initialize(config);
+        jest.spyOn(manager, 'selectProviderWithFallback').mockResolvedValue({
+            config: provider('codex-b'), actualProviderType: providerType, isFallback: false
+        });
+        await expect(getApiServiceWithFallback(config, 'gpt-5.6-luna')).rejects.toMatchObject({
+            code: 'RESTRICTED_CREDENTIALS_UNAVAILABLE', status: 503
+        });
+    });
     test('waits inside the primary group before spilling over after an upstream rate limit', async () => {
         writeGroupConfig({
             groups: [

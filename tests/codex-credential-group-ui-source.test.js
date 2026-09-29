@@ -176,12 +176,17 @@ describe('Codex credential-group UI source', () => {
         expect(potluckHtml).toContain("/routing`");
     });
 
-    test('prefers account email labels and preselects the current fixed credential reference', () => {
+    test('uses one fixed editor for one to five selected credential references', () => {
         expect(potluckHtml).toContain('credential.accountEmail || credential.customName || credential.credentialRef');
         expect(potluckHtml).toContain('function openEditRouting(keyId)');
         expect(potluckHtml).toContain('allKeys.find(key => key.id === keyId)');
         expect(potluckHtml).toContain('currentKey?.fixedCredential?.credentialRef');
-        expect(potluckHtml).toContain('credentialSelect.value = currentFixedCredentialRef');
+        expect(potluckHtml).toContain('currentKey?.credentialRefs');
+        expect(potluckHtml).toContain('id="routingFixedCredential"');
+        expect(potluckHtml).toContain('multiple size="5"');
+        expect(potluckHtml).toContain('option.selected = selectedRefs.has(option.value)');
+        expect(potluckHtml).toContain("body.routingMode = 'restricted'");
+        expect(potluckHtml).toContain('body.credentialRefs = credentialRefs');
         expect(potluckHtml).not.toMatch(/openEditRouting\('\$\{key\.id\}', '\$\{key\.routingMode/u);
     });
 

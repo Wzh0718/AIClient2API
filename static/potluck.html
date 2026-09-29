@@ -1712,8 +1712,8 @@
                     <select id="routingPrimaryGroup" class="sort-select" style="width:100%"></select>
                 </div>
                 <div class="form-group" id="routingCredentialField" hidden>
-                    <label for="routingFixedCredential">固定凭据</label>
-                    <select id="routingFixedCredential" class="sort-select" style="width:100%"></select>
+                    <label for="routingFixedCredential">固定凭据（可选 1–5 份）</label>
+                    <select id="routingFixedCredential" class="sort-select" style="width:100%" multiple size="5"></select>
                     <div id="routingFixedCredentialHelp" class="form-help" aria-live="polite"></div>
                 </div>
                 <div class="pool-concurrency-section" id="edgeAdmissionSection">
@@ -3497,6 +3497,12 @@
                 const lockIcon = key?.manualLock === true ? '<i class="fas fa-lock" aria-hidden="true"></i>' : '';
                 return `<span class="key-routing-summary is-fixed" title="${escapeHtml(summary)}" aria-label="${escapeHtml(summary)}">fixed${lockIcon}</span>`;
             }
+            if (routingMode === 'restricted') {
+                const count = Array.isArray(key?.credentialRefs) ? key.credentialRefs.length : 0;
+                const summary = `固定凭据 × ${count} · 仅在所选凭据内切换${manualLockSuffix}`;
+                const lockIcon = key?.manualLock === true ? '<i class="fas fa-lock" aria-hidden="true"></i>' : '';
+                return `<span class="key-routing-summary is-fixed" title="${escapeHtml(summary)}" aria-label="${escapeHtml(summary)}">fixed × ${count}${lockIcon}</span>`;
+            }
             if (routingMode === 'pool') {
                 const summary = `全池加权 · 按权重、额度与负载选择${manualLockSuffix}`;
                 const lockIcon = key?.manualLock === true ? '<i class="fas fa-lock" aria-hidden="true"></i>' : '';
@@ -4135,8 +4141,12 @@
             const currentMode = currentKey?.routingMode || 'pool';
             const currentGroupId = currentKey?.primaryGroupId || '';
             const currentFixedCredentialRef = currentKey?.fixedCredential?.credentialRef || '';
+            const currentCredentialRefs = currentMode === 'restricted'
+                ? (Array.isArray(currentKey?.credentialRefs) ? currentKey.credentialRefs : [])
+                : (currentFixedCredentialRef ? [currentFixedCredentialRef] : []);
             document.getElementById('editRoutingKeyId').value = keyId;
-            document.getElementById('routingMode').value = currentMode === 'fixed' || currentMode === 'auto' ? currentMode : 'pool';
+            document.getElementById('routingMode').value = ['fixed', 'restricted'].includes(currentMode)
+                ? 'fixed' : currentMode === 'auto' ? 'auto' : 'pool';
             document.getElementById('edgeAdmissionMode').value = currentKey?.edgeAdmissionMode === 'enforce' ? 'enforce' : 'disabled';
             document.getElementById('edgeAdmissionConcurrencyLimit').value = Number(currentKey?.edgeAdmissionConcurrencyLimit || 0);
             document.getElementById('edgeAdmissionQueueLimit').value = Number(currentKey?.edgeAdmissionQueueLimit || 0);
@@ -4156,7 +4166,7 @@
                 const credentialHelp = document.getElementById('routingFixedCredentialHelp');
                 const credentials = Array.isArray(view.credentials) ? view.credentials : [];
                 const availableCredentials = credentials.filter(credential => credential.uiAvailable === true);
-                const currentCredential = credentials.find(credential => credential.credentialRef === currentFixedCredentialRef);
+                const selectedRefs = new Set(currentCredentialRefs);
                 const unavailableReasonLabels = {
                     disabled: '已禁用',
                     unhealthy: '状态异常',
@@ -4168,22 +4178,26 @@
                     `<option value="${escapeHtml(credential.credentialRef)}">${escapeHtml(credentialLabel(credential))}</option>`
                 );
 
-                let helpText = '';
-                if (currentFixedCredentialRef && currentCredential?.uiAvailable !== true) {
+                let helpText = '按 Ctrl（Mac 为 Command）或 Shift 多选；选 1 份严格固定，选 2–5 份仅在所选凭据内切换。';
+                for (const ref of currentCredentialRefs) {
+                    const currentCredential = credentials.find(credential => credential.credentialRef === ref);
+                    if (currentCredential?.uiAvailable === true) continue;
                     const reason = currentCredential
                         ? (unavailableReasonLabels[currentCredential.uiUnavailableReason] || '当前不可用')
                         : '原绑定凭据不存在';
                     const label = currentCredential ? credentialLabel(currentCredential) : '原绑定凭据';
-                    options.unshift(`<option value="${escapeHtml(currentFixedCredentialRef)}">${escapeHtml(`${label}（${reason}）`)}</option>`);
-                    helpText = `${reason}；保留当前绑定，不会自动换绑。`;
+                    options.unshift(`<option value="${escapeHtml(ref)}">${escapeHtml(`${label}（${reason}）`)}</option>`);
+                    helpText = currentMode === 'fixed'
+                        ? `${reason}；保留当前绑定，不会自动换绑。`
+                        : '所选凭据中有暂不可用成员；保存会保留选择，运行时只使用可用成员。';
                 }
                 if (options.length === 0) {
                     options.push('<option value="" selected disabled>暂无可用凭据</option>');
                     helpText = '暂无可用凭据，请先在提供商管理中恢复或启用凭据。';
                 }
                 credentialSelect.innerHTML = options.join('');
-                credentialSelect.disabled = options.length === 1 && !currentFixedCredentialRef && availableCredentials.length === 0;
-                if (currentFixedCredentialRef) credentialSelect.value = currentFixedCredentialRef;
+                credentialSelect.disabled = options.length === 1 && selectedRefs.size === 0 && availableCredentials.length === 0;
+                for (const option of credentialSelect.options) option.selected = selectedRefs.has(option.value);
                 if (credentialHelp) credentialHelp.textContent = helpText;
                 updateRoutingFields();
                 openModal('editRoutingModal');
@@ -4211,9 +4225,17 @@
                 body.primaryGroupId = document.getElementById('routingPrimaryGroup').value || null;
                 if (!body.primaryGroupId) { showToast('请选择主凭据组', 'error'); return; }
             } else if (routingMode === 'fixed') {
-                const credentialRef = document.getElementById('routingFixedCredential').value;
-                if (!credentialRef) { showToast('请选择固定凭据', 'error'); return; }
-                body.fixedCredential = { providerType: 'openai-codex-oauth', credentialRef };
+                const credentialRefs = [...document.getElementById('routingFixedCredential').selectedOptions]
+                    .map(option => option.value).filter(Boolean);
+                if (credentialRefs.length < 1 || credentialRefs.length > 5) {
+                    showToast('请选择 1–5 份固定凭据', 'error'); return;
+                }
+                if (credentialRefs.length === 1) {
+                    body.fixedCredential = { providerType: 'openai-codex-oauth', credentialRef: credentialRefs[0] };
+                } else {
+                    body.routingMode = 'restricted';
+                    body.credentialRefs = credentialRefs;
+                }
             }
                 const edgeAdmission = readEdgeAdmissionForm();
                 if (!edgeAdmission) return;

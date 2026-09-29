@@ -206,6 +206,8 @@ function keyConfigSnapshot(keyData) {
         routingMode: keyData.routingMode || 'pool',
         primaryGroupId: keyData.routingMode === 'auto' ? (keyData.primaryGroupId || null) : null,
         fixedCredential: keyData.routingMode === 'fixed' && keyData.fixedCredential ? { ...keyData.fixedCredential } : null,
+        restrictedCredentialUuids: keyData.routingMode === 'restricted'
+            ? [...(keyData.restrictedCredentialUuids || [])] : [],
         manualLock: keyData.manualLock === true
     };
 }
@@ -227,7 +229,8 @@ function publishKeyConfigSync(reason, targetVersion, records) {
         reason,
         records: records.map(record => ({
             ...record,
-            fixedCredential: record.fixedCredential ? { ...record.fixedCredential } : null
+            fixedCredential: record.fixedCredential ? { ...record.fixedCredential } : null,
+            restrictedCredentialUuids: [...(record.restrictedCredentialUuids || [])]
         }))
     });
     lastPublishedKeyConfigMutationVersion = Math.max(lastPublishedKeyConfigMutationVersion, Number(targetVersion || 0));
@@ -323,6 +326,7 @@ export function applyKeyStoreSyncEvent(event = {}) {
                 routingMode: record.routingMode,
                 primaryGroupId: record.primaryGroupId,
                 fixedCredential: record.fixedCredential,
+                restrictedCredentialUuids: record.restrictedCredentialUuids,
                 manualLock: record.manualLock
             })
             : normalizeKeyData({
@@ -347,6 +351,7 @@ export function applyKeyStoreSyncEvent(event = {}) {
                 routingMode: record.routingMode,
                 primaryGroupId: record.primaryGroupId,
                 fixedCredential: record.fixedCredential,
+                restrictedCredentialUuids: record.restrictedCredentialUuids,
                 manualLock: record.manualLock,
                 usageHistory: {}
             });
@@ -535,6 +540,8 @@ function normalizeKeyRouting(routing = {}, { strict = false } = {}) {
     const hasPrimaryGroup = typeof routing.primaryGroupId === 'string' && routing.primaryGroupId.trim();
     const routingMode = routing.routingMode === 'fixed'
         ? 'fixed'
+        : routing.routingMode === 'restricted'
+            ? 'restricted'
         : routing.routingMode === 'pool'
             ? 'pool'
             : (routing.routingMode === 'auto' || routing.routingMode === undefined || routing.routingMode === null)
@@ -542,7 +549,7 @@ function normalizeKeyRouting(routing = {}, { strict = false } = {}) {
                 : null;
 
     if (!routingMode) {
-        throw createInvalidKeyRoutingError('routingMode 必须是 pool、auto 或 fixed');
+        throw createInvalidKeyRoutingError('routingMode 必须是 pool、auto、fixed 或 restricted');
     }
 
     const manualLock = routing.manualLock === true;
@@ -565,7 +572,25 @@ function normalizeKeyRouting(routing = {}, { strict = false } = {}) {
                     uuid
                 }
                 : null,
+            restrictedCredentialUuids: [],
             manualLock
+        };
+    }
+
+    if (routingMode === 'restricted') {
+        const supplied = Array.isArray(routing.restrictedCredentialUuids)
+            ? routing.restrictedCredentialUuids : [];
+        const uuids = supplied.map(value => typeof value === 'string' ? value.trim() : '');
+        if (strict && (uuids.length < 2 || uuids.length > 5 || uuids.some(value => !value)
+            || new Set(uuids).size !== uuids.length)) {
+            throw createInvalidKeyRoutingError('限定凭据池必须选择 2–5 个不同的 Codex 凭据');
+        }
+        return {
+            routingMode,
+            primaryGroupId: null,
+            fixedCredential: null,
+            restrictedCredentialUuids: uuids,
+            manualLock: true
         };
     }
 
@@ -576,6 +601,7 @@ function normalizeKeyRouting(routing = {}, { strict = false } = {}) {
         routingMode,
         primaryGroupId,
         fixedCredential: null,
+        restrictedCredentialUuids: [],
         manualLock
     };
 }
@@ -610,6 +636,11 @@ function isSameKeyRouting(keyData, routing) {
     if (keyData.routingMode !== routing.routingMode) return false;
     if ((keyData.primaryGroupId || null) !== (routing.primaryGroupId || null)) return false;
     if ((keyData.manualLock === true) !== (routing.manualLock === true)) return false;
+    if (keyData.routingMode === 'restricted') {
+        const current = keyData.restrictedCredentialUuids || [];
+        const next = routing.restrictedCredentialUuids || [];
+        return current.length === next.length && current.every((uuid, index) => uuid === next[index]);
+    }
 
     const currentFixed = keyData.fixedCredential || null;
     const nextFixed = routing.fixedCredential || null;
@@ -2054,6 +2085,7 @@ export async function createKey(name = '', dailyLimit = null, options = {}) {
         routingMode: defaultRouting.routingMode,
         primaryGroupId: defaultRouting.primaryGroupId,
         fixedCredential: defaultRouting.fixedCredential,
+        restrictedCredentialUuids: defaultRouting.restrictedCredentialUuids || [],
         manualLock: defaultRouting.manualLock,
         usageHistory: {}
     };
@@ -2128,6 +2160,7 @@ export function getCredentialRoutingKeyCatalog() {
         routingMode: keyData.routingMode,
         primaryGroupId: keyData.primaryGroupId || null,
         fixedCredential: keyData.fixedCredential ? { ...keyData.fixedCredential } : null,
+        restrictedCredentialUuids: [...(keyData.restrictedCredentialUuids || [])],
         manualLock: keyData.manualLock === true,
         usageHistory: cloneCredentialRoutingUsageHistory(keyData.usageHistory || {})
     }));
@@ -3100,6 +3133,7 @@ export async function validateKey(apiKey) {
         concurrencyMode: updated.concurrencyMode === 'enforce' ? 'enforce' : 'shadow',
         primaryGroupId: updated.primaryGroupId,
         fixedCredential: updated.fixedCredential ? { ...updated.fixedCredential } : null,
+        restrictedCredentialUuids: [...(updated.restrictedCredentialUuids || [])],
         manualLock: updated.manualLock === true,
         configSyncEpoch: keyConfigSyncEpoch,
         configSyncRevision: keyConfigSyncRevision,

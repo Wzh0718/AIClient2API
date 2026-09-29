@@ -469,6 +469,27 @@ describe('Codex key demand and capacity-aware assignment', () => {
             manualLock: true
         });
     });
+
+    test('keeps a manually selected restricted set through group regeneration', () => {
+        const selected = ['cred-1', 'cred-3'];
+        const suggestion = generateCredentialGroupSuggestion({
+            credentials: createCredentials(3),
+            keys: [{ id: 'key-restricted', routingMode: 'restricted',
+                restrictedCredentialUuids: selected, manualLock: true }],
+            currentConfig: {
+                groups: [
+                    { id: 'group-a', credentialUuids: ['cred-1', 'cred-2'] },
+                    { id: 'group-b', credentialUuids: ['cred-3'] }
+                ],
+                keyAssignments: [{ keyId: 'key-restricted', routingMode: 'restricted',
+                    restrictedCredentialUuids: selected, manualLock: true }]
+            },
+            now: NOW
+        });
+        expect(suggestion.keyAssignments.find(item => item.keyId === 'key-restricted')).toMatchObject({
+            routingMode: 'restricted', restrictedCredentialUuids: selected, manualLock: true
+        });
+    });
 });
 
 describe('Codex credential routing decisions', () => {
@@ -814,6 +835,43 @@ describe('Codex credential group suggestion validation', () => {
         { providerType: 'openai-codex-oauth-work', uuid: 'cred-2' }
     ];
     const keys = [{ id: 'key-1' }, { id: 'key-2' }];
+
+    test('accepts a locked restricted assignment across groups and rejects duplicate members', () => {
+        const base = {
+            applicable: true,
+            groups: [
+                { id: 'group-a', credentialUuids: ['cred-1', 'cred-2'] },
+                { id: 'group-b', credentialUuids: ['cred-3'] }
+            ],
+            keyAssignments: [{
+                keyId: 'key-1', routingMode: 'restricted',
+                restrictedCredentialUuids: ['cred-1', 'cred-3']
+            }]
+        };
+        const catalog = createCredentials(3);
+        const validated = validateCredentialGroupSuggestion(base, { credentials: catalog, keys });
+        expect(validated.keyAssignments[0]).toMatchObject({
+            routingMode: 'restricted',
+            restrictedCredentialUuids: ['cred-1', 'cred-3'],
+            manualLock: true
+        });
+        expect(() => validateCredentialGroupSuggestion({
+            ...base,
+            keyAssignments: [{ keyId: 'key-1', routingMode: 'restricted',
+                restrictedCredentialUuids: ['cred-1', 'cred-1'] }]
+        }, { credentials: catalog, keys })).toThrow(expect.objectContaining({
+            code: 'INVALID_CREDENTIAL_GROUP_CONFIG',
+            details: { reason: 'RESTRICTED_CREDENTIALS_INVALID' }
+        }));
+        expect(() => validateCredentialGroupSuggestion(base, {
+            credentials: catalog.map(item => item.uuid === 'cred-3'
+                ? { ...item, providerType: 'openai-codex-oauth-work' } : item),
+            keys
+        })).toThrow(expect.objectContaining({
+            code: 'INVALID_CREDENTIAL_GROUP_CONFIG',
+            details: { reason: 'RESTRICTED_CREDENTIALS_INVALID' }
+        }));
+    });
 
     test.each([
         [

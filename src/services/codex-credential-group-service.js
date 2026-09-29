@@ -118,6 +118,8 @@ function normalizeKeyAssignment(assignment = {}) {
     const hasPrimaryGroup = Boolean(String(assignment.primaryGroupId || '').trim());
     const routingMode = assignment.routingMode === 'fixed'
         ? 'fixed'
+        : assignment.routingMode === 'restricted'
+            ? 'restricted'
         : assignment.routingMode === 'pool' || !hasPrimaryGroup
             ? 'pool'
             : 'auto';
@@ -132,7 +134,11 @@ function normalizeKeyAssignment(assignment = {}) {
                 uuid: String(assignment.fixedCredential.uuid)
             }
             : null,
-        manualLock: assignment.manualLock === true
+        restrictedCredentialUuids: routingMode === 'restricted'
+            ? (Array.isArray(assignment.restrictedCredentialUuids)
+                ? assignment.restrictedCredentialUuids : []).map(String)
+            : [],
+        manualLock: routingMode === 'restricted' || assignment.manualLock === true
     };
 }
 
@@ -305,6 +311,19 @@ export function validateCredentialGroupSuggestion(suggestion, options = {}) {
         }
 
         if (assignment.routingMode === 'pool') continue;
+        if (assignment.routingMode === 'restricted') {
+            const uuids = assignment.restrictedCredentialUuids || [];
+            if (uuids.length < 2 || uuids.length > 5 || new Set(uuids).size !== uuids.length
+                || uuids.some(uuid => !credentialByUuid.has(uuid)
+                    || getCredentialProviderType(credentialByUuid.get(uuid)) !== 'openai-codex-oauth')) {
+                throw createCredentialGroupError(
+                    'INVALID_CREDENTIAL_GROUP_CONFIG',
+                    'Restricted Key routing must reference 2–5 distinct Codex credentials',
+                    { reason: 'RESTRICTED_CREDENTIALS_INVALID' }
+                );
+            }
+            continue;
+        }
 
         const fixed = assignment.fixedCredential;
         const credential = fixed?.uuid ? credentialByUuid.get(String(fixed.uuid)) : null;
@@ -477,6 +496,9 @@ export function resolveKeyRoutingAssignment(keyData = {}, currentConfig = {}) {
     }
 
     if (keyData.routingMode === 'fixed') {
+        return { ...normalizeKeyAssignment(keyData), keyId, routingConfigSource: 'key-data', assignmentMissing: true };
+    }
+    if (keyData.routingMode === 'restricted') {
         return { ...normalizeKeyAssignment(keyData), keyId, routingConfigSource: 'key-data', assignmentMissing: true };
     }
     if (keyData.routingMode === 'pool') {
@@ -734,11 +756,21 @@ export function generateCredentialGroupSuggestion(options = {}) {
 
     for (const item of unlockedDemands) {
         const existing = currentAssignments.get(item.keyId);
-        const routingMode = item.key.routingMode === 'fixed' || existing?.routingMode === 'fixed'
+        const routingMode = item.key.routingMode === 'restricted' || existing?.routingMode === 'restricted'
+            ? 'restricted'
+            : item.key.routingMode === 'fixed' || existing?.routingMode === 'fixed'
             ? 'fixed'
             : item.key.routingMode === 'pool' || existing?.routingMode === 'pool'
                 ? 'pool'
                 : 'auto';
+        if (routingMode === 'restricted') {
+            assignments.push({
+                ...normalizeKeyAssignment({ ...existing, ...item.key, keyId: item.keyId, routingMode }),
+                demand: item.demand,
+                highConsumption: highConsumptionKeyIds.has(item.keyId)
+            });
+            continue;
+        }
         if (routingMode === 'fixed') {
             assignments.push({
                 ...normalizeKeyAssignment({ ...existing, ...item.key, keyId: item.keyId, routingMode: 'fixed' }),
@@ -900,6 +932,34 @@ export function routeKeyToCredentialCandidates(options = {}) {
         };
     }
 
+    if (keyRouting.routingMode === 'restricted') {
+        const uuids = keyRouting.restrictedCredentialUuids || [];
+        const allByUuid = new Map(credentials
+            .filter(credential => getCredentialUuid(credential))
+            .map(credential => [getCredentialUuid(credential), credential]));
+        const valid = uuids.length >= 2 && uuids.length <= 5
+            && new Set(uuids).size === uuids.length
+            && uuids.every(uuid => !allByUuid.has(uuid)
+                || getCredentialProviderType(allByUuid.get(uuid)) === 'openai-codex-oauth');
+        const candidates = valid ? uuids.filter(uuid => availableByUuid.has(uuid)) : [];
+        const nextRecoveryTime = candidates.length ? null : uuids
+            .map(uuid => allByUuid.get(uuid)?.scheduledRecoveryTime
+                || allByUuid.get(uuid)?.config?.scheduledRecoveryTime)
+            .filter(value => Number.isFinite(Date.parse(value)) && Date.parse(value) > Date.now())
+            .sort((left, right) => Date.parse(left) - Date.parse(right))[0] || null;
+        return {
+            routingMode: 'restricted',
+            selectedGroupId: null,
+            candidateProviderUuids: candidates,
+            restrictedCredentialUuids: uuids,
+            fallbackProviderUuids: [],
+            spillover: false,
+            nextRecoveryTime,
+            errorCode: !valid ? 'ROUTE_MISMATCH'
+                : candidates.length ? null : nextRecoveryTime ? 'PROVIDER_COOLDOWN' : 'RESTRICTED_CREDENTIALS_UNAVAILABLE'
+        };
+    }
+
     const primaryGroup = groups.find(group => group.id === keyRouting.primaryGroupId) || groups[0] || null;
     const primaryCandidates = (primaryGroup?.credentialUuids || []).filter(uuid => availableByUuid.has(uuid));
     if (primaryCandidates.length > 0) {
@@ -1015,6 +1075,17 @@ export class CredentialGroupService {
     async updateKeyAssignment(keyId, routing = {}) {
         const current = await this.getCurrentConfig();
         const normalized = normalizeKeyAssignment({ ...routing, keyId });
+        if (normalized.routingMode === 'restricted') {
+            const uuids = normalized.restrictedCredentialUuids;
+            if (uuids.length < 2 || uuids.length > 5 || uuids.some(uuid => !uuid)
+                || new Set(uuids).size !== uuids.length) {
+                throw createCredentialGroupError(
+                    'INVALID_CREDENTIAL_GROUP_CONFIG',
+                    'Restricted Key routing requires 2–5 distinct credentials',
+                    { reason: 'RESTRICTED_CREDENTIALS_INVALID' }
+                );
+            }
+        }
         const keyAssignments = (current.keyAssignments || [])
             .filter(assignment => String(assignment?.keyId || assignment?.id || '') !== String(keyId));
         keyAssignments.push(normalized);

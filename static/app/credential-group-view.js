@@ -64,7 +64,7 @@ export function getFocusedCredentialGroupKeys(keys = [], focusShare = DEFAULT_FO
 
     all.forEach(key => {
         const isOperationalException = key.enabled !== false
-            && (key.routingMode === 'fixed' || key.manualLock === true);
+            && (key.routingMode === 'fixed' || key.routingMode === 'restricted' || key.manualLock === true);
         if (isOperationalException) visibleRefs.add(keyStableRef(key));
     });
 

@@ -172,6 +172,7 @@ const CODEX_ROUTING_DIAGNOSTIC_FIELDS = new Set([
     'requestedPrimaryGroupId',
     'selectedGroupId',
     'selectedProviderUuid',
+    'restrictedCredentialUuids',
     'actualProviderGroupId',
     'providerSwitchCount',
     'modelFallbackFrom',
@@ -582,6 +583,59 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
     }
 
     await acquireCodexKeyConcurrencyLease(config, keyRouting, selectionDiagnostics, useAcquire);
+
+    if (keyRouting.routingMode === 'restricted') {
+        const route = routeKeyToCredentialCandidates({
+            keyRouting,
+            groups,
+            credentials: getProviderCredentialCatalog(providerType)
+        });
+        updateCodexRoutingDiagnostics(config, {
+            routingMode: 'restricted',
+            requestedPrimaryGroupId: null,
+            selectedGroupId: null,
+            selectedProviderUuid: null,
+            restrictedCredentialUuids: [...(keyRouting.restrictedCredentialUuids || [])],
+            spillover: false,
+            assignmentMissing: false
+        });
+        if (route.errorCode) {
+            await releasePotluckKeyConcurrencyLease();
+            const error = new Error('The restricted Codex credential pool is unavailable');
+            error.code = route.errorCode;
+            error.status = route.errorCode === 'PROVIDER_COOLDOWN' ? 429 : 503;
+            if (route.nextRecoveryTime) error.retryAfter = route.nextRecoveryTime;
+            error.details = { routingMode: 'restricted', retryable: route.errorCode !== 'ROUTE_MISMATCH' };
+            throw error;
+        }
+        const restrictedOptions = withStickyProviderAffinity(config, providerType, {
+            ...options,
+            selectionDiagnostics,
+            requestedModel,
+            allowedProviderUuids: route.candidateProviderUuids,
+            disableProviderFallback: true,
+            preferredProviderUuid: null
+        });
+        let selectedResult;
+        try {
+            selectedResult = await selectFromPool(restrictedOptions);
+        } catch (error) {
+            await releasePotluckKeyConcurrencyLease();
+            throw error;
+        }
+        if (!selectedResult || !route.restrictedCredentialUuids.includes(selectedResult.config?.uuid)) {
+            await releasePotluckKeyConcurrencyLease();
+            const error = new Error('No selected Codex credential is available');
+            error.code = 'RESTRICTED_CREDENTIALS_UNAVAILABLE';
+            error.status = 503;
+            throw error;
+        }
+        updateCodexRoutingDiagnostics(config, {
+            selectedProviderUuid: selectedResult.config.uuid,
+            hotShardApplied: selectionDiagnostics.hotShardApplied === true
+        });
+        return { handled: true, selectedResult, availabilityError: null };
+    }
 
     if (keyRouting.routingMode === 'pool') {
         const keyHash = config.potluckKeyData?.id
@@ -2008,10 +2062,10 @@ function finalizeCodexRouteResult(config, {
     const finalProviderUuid = selectedProviderUuid || diagnostics.selectedProviderUuid || previous.selectedProviderUuid || null;
     const previousProviderUuid = previous.selectedProviderUuid || null;
     const preservePreviousIdentity = !previousProviderUuid || previousProviderUuid === finalProviderUuid;
-    const selectedGroupId = routingMode === 'pool'
+    const selectedGroupId = routingMode === 'pool' || routingMode === 'restricted'
         ? null
         : diagnostics.selectedGroupId || previous.selectedGroupId || null;
-    const actualProviderGroupId = routingMode === 'pool' ? null : selectedGroupId;
+    const actualProviderGroupId = routingMode === 'pool' || routingMode === 'restricted' ? null : selectedGroupId;
     const providerSwitchCount = Number(previous.providerSwitchCount || 0)
         + (previousProviderUuid && finalProviderUuid && previousProviderUuid !== finalProviderUuid ? 1 : 0);
     const routeResult = {

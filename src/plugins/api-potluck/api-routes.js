@@ -330,7 +330,10 @@ function compactKeyForList(key) {
             )
         }
         : null;
-    const result = { keyRef: hashSecret(key.id), id: hashSecret(key.id), fixedCredential };
+    const result = {
+        keyRef: hashSecret(key.id), id: hashSecret(key.id), fixedCredential,
+        credentialRefs: compactRestrictedCredentialRefs(key.restrictedCredentialUuids)
+    };
     for (const field of LIST_KEY_FIELDS) result[field] = key[field];
     result.usageHistory = compactUsageHistoryForList(key.usageHistory || {}, 7);
     return result;
@@ -347,10 +350,18 @@ function compactFixedCredential(fixedCredential) {
     };
 }
 
+function compactRestrictedCredentialRefs(uuids) {
+    return Array.isArray(uuids)
+        ? uuids.map(uuid => getCredentialRef('openai-codex-oauth', uuid))
+        : [];
+}
+
 function sanitizeKeyManagementData(keyData = {}) {
     const keyRef = hashSecret(keyData.id);
     const result = { ...keyData, id: keyRef, keyRef };
     result.fixedCredential = compactFixedCredential(result.fixedCredential);
+    result.credentialRefs = compactRestrictedCredentialRefs(result.restrictedCredentialUuids);
+    delete result.restrictedCredentialUuids;
     delete result.concurrencyMode;
     delete result.concurrencyLimit;
     delete result.queueLimit;
@@ -398,6 +409,7 @@ function compactKeyManagementMutationData(keyData = {}) {
         routingMode: keyData.routingMode || 'pool',
         primaryGroupId: keyData.primaryGroupId || null,
         fixedCredential: compactFixedCredential(keyData.fixedCredential),
+        credentialRefs: compactRestrictedCredentialRefs(keyData.restrictedCredentialUuids),
         manualLock: keyData.manualLock === true,
         edgeAdmissionMode: keyData.edgeAdmissionMode === 'enforce' ? 'enforce' : 'disabled',
         edgeAdmissionConcurrencyLimit: Number(keyData.edgeAdmissionConcurrencyLimit ?? keyData.concurrencyLimit ?? 0),
@@ -664,6 +676,8 @@ function buildPublicKeyAssignment(key, assignment, credentials, options = {}) {
     const requestedRoutingMode = assignment?.routingMode || key?.routingMode;
     const routingMode = requestedRoutingMode === 'fixed'
         ? 'fixed'
+        : requestedRoutingMode === 'restricted'
+            ? 'restricted'
         : requestedRoutingMode === 'auto' && (assignment?.primaryGroupId || key?.primaryGroupId)
             ? 'auto'
             : 'pool';
@@ -694,6 +708,9 @@ function buildPublicKeyAssignment(key, assignment, credentials, options = {}) {
                 )
             }
             : null,
+        credentialRefs: routingMode === 'restricted'
+            ? compactRestrictedCredentialRefs(assignment?.restrictedCredentialUuids || key?.restrictedCredentialUuids)
+            : [],
         manualLock: assignment?.manualLock === true || key?.manualLock === true,
         demand,
         highConsumption: assignment?.highConsumption === true,
@@ -1657,13 +1674,60 @@ export async function handlePotluckApiRoutes(method, path, req, res) {
                         }
                     };
                 }
+                if (routing.routingMode === 'restricted') {
+                    const refs = routing.credentialRefs;
+                    if (!Array.isArray(refs) || refs.length < 2 || refs.length > 5
+                        || refs.some(ref => typeof ref !== 'string' || !ref)
+                        || new Set(refs).size !== refs.length) {
+                        sendJson(res, 400, { success: false, error: { message: '请选择 2–5 份不同的 Codex 凭据', code: 'RESTRICTED_CREDENTIALS_INVALID' } });
+                        return true;
+                    }
+                    const credentials = await loadCodexCredentialCatalog();
+                    const byRef = new Map(credentials
+                        .filter(credential => credential.providerType === 'openai-codex-oauth')
+                        .map(credential => [getCredentialRef(credential.providerType, credential.uuid), credential]));
+                    if (refs.some(ref => !byRef.has(ref))) {
+                        sendJson(res, 400, { success: false, error: { message: '限定池包含不存在的 Codex 凭据', code: 'RESTRICTED_CREDENTIAL_NOT_FOUND' } });
+                        return true;
+                    }
+                    routing = {
+                        ...routing,
+                        restrictedCredentialUuids: refs.map(ref => byRef.get(ref).uuid)
+                    };
+                }
+                const previous = await getKey(keyId, { summaryOnly: true, compactCosts: true });
+                if (!previous) {
+                    sendJson(res, 404, { success: false, error: { message: '未找到 Key' } });
+                    return true;
+                }
+                const previousRouting = {
+                    routingMode: previous.routingMode || 'pool',
+                    primaryGroupId: previous.primaryGroupId || null,
+                    fixedCredential: previous.fixedCredential || null,
+                    restrictedCredentialUuids: previous.restrictedCredentialUuids || [],
+                    manualLock: previous.manualLock === true
+                };
                 const keyData = await updateKeyRouting(keyId, routing);
                 if (!keyData) {
                     sendJson(res, 404, { success: false, error: { message: '未找到 Key' } });
                     return true;
                 }
+                if ((routing.routingMode === 'restricted' || previousRouting.routingMode === 'restricted')
+                    && keyData.persistencePending === true) {
+                    await updateKeyRouting(keyId, previousRouting);
+                    sendJson(res, 503, { success: false, error: {
+                        message: 'Key 路由尚未持久化，限定池未应用',
+                        code: 'KEY_ROUTING_PERSISTENCE_PENDING'
+                    } });
+                    return true;
+                }
                 const credentialGroupService = new CredentialGroupService();
-                await credentialGroupService.updateKeyAssignment(keyId, keyData);
+                try {
+                    await credentialGroupService.updateKeyAssignment(keyId, keyData);
+                } catch (error) {
+                    await updateKeyRouting(keyId, previousRouting);
+                    throw error;
+                }
                 sendManagementMutationResponse(res, {
                     result: keyData,
                     message: 'Key 路由更新成功',

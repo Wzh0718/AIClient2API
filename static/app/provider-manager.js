@@ -449,11 +449,14 @@ function renderCredentialGroupKeyTable(keys, emptyKey = 'providers.credentialGro
                 const routingMode = typeof key?.routingMode === 'string'
                     ? key.routingMode.trim().toLowerCase()
                     : 'pool';
-                const isFixed = routingMode === 'fixed';
+                const isFixed = routingMode === 'fixed' || routingMode === 'restricted';
                 const isAuto = routingMode === 'auto';
+                const fixedRefs = routingMode === 'restricted'
+                    ? (Array.isArray(key?.credentialRefs) ? key.credentialRefs : [])
+                    : [key?.fixedCredential?.credentialRef].filter(Boolean);
                 const routeBadge = credentialGroupBadge(
                     isFixed
-                        ? t('providers.credentialGroups.route.fixed')
+                        ? `${t('providers.credentialGroups.route.fixed')}${routingMode === 'restricted' ? ` × ${fixedRefs.length}` : ''}`
                         : isAuto
                             ? t('providers.credentialGroups.route.auto')
                             : t('providers.credentialGroups.route.pool'),
@@ -474,15 +477,21 @@ function renderCredentialGroupKeyTable(keys, emptyKey = 'providers.credentialGro
                 const primaryGroup = !isAuto
                     ? t('providers.credentialGroups.notAvailable')
                     : (key?.primaryGroupId || t('providers.credentialGroups.route.noPrimary'));
-                const fixedRef = key?.fixedCredential?.credentialRef || '';
-                const label = resolveCredentialGroupMemberLabel(
-                    fixedRef,
-                    Array.isArray(credentialGroupView?.credentials) ? credentialGroupView.credentials : []
-                );
                 const fixedCell = !isFixed
                     ? escapeHtml(t('providers.credentialGroups.notAvailable'))
-                    : (fixedRef
-                        ? `<div class="credential-groups-table-primary"><strong>${escapeHtml(label.primary || t('providers.credentialGroups.unknown'))}</strong>${label.secondary ? `<small title="${escapeHtml(label.secondary)}">${escapeHtml(label.secondary)}</small>` : ''}</div>`
+                    : (fixedRefs.length
+                        ? fixedRefs.map(ref => {
+                            const member = (credentialGroupView?.credentials || [])
+                                .find(credential => credential.credentialRef === ref);
+                            const label = resolveCredentialGroupMemberLabel(
+                                ref,
+                                Array.isArray(credentialGroupView?.credentials) ? credentialGroupView.credentials : []
+                            );
+                            const status = member
+                                ? getCredentialGroupCredentialStatus(member)
+                                : { text: t('providers.credentialGroups.unknown'), className: 'is-warning' };
+                            return `<div class="credential-groups-table-primary"><strong>${escapeHtml(label.primary || t('providers.credentialGroups.unknown'))}</strong>${label.secondary ? `<small title="${escapeHtml(label.secondary)}">${escapeHtml(label.secondary)}</small>` : ''}${credentialGroupBadge(status.text, status.className)}</div>`;
+                        }).join('')
                         : escapeHtml(t('providers.credentialGroups.unknown')));
                 return `<tr>
                     <td><div class="credential-groups-table-primary"><code>${escapeHtml(key?.maskedKey || key?.keyRef || t('providers.credentialGroups.unknown'))}</code><small>${escapeHtml(key?.name || t('providers.credentialGroups.unknown'))}</small></div></td>
