@@ -70,13 +70,13 @@ describe('temporary key model content routing', () => {
         jest.useRealTimers();
     });
 
-    test('keeps the requested response model while non-batch GPT-5.4 executes on Luna', async () => {
+    test.each(['gpt-5.4-mini-fast', 'gpt-5.3-codex-spark-fast'])('keeps requested %s while executing on ordinary GPT-6 Luna', async requestedModel => {
         const generateContent = jest.fn().mockResolvedValue({
             type: 'response.completed',
             response: {
                 id: 'luna-response',
                 object: 'response',
-                model: 'gpt-5.6-luna',
+                model: 'gpt-6-luna',
                 status: 'completed',
                 output: []
             }
@@ -84,7 +84,7 @@ describe('temporary key model content routing', () => {
         mockGetApiServiceWithFallback.mockResolvedValueOnce({
             service: { generateContent },
             actualProviderType: 'openai-codex-oauth',
-            actualModel: 'gpt-5.6-luna',
+            actualModel: 'gpt-6-luna',
             uuid: 'codex-luna',
             serviceConfig: {
                 customName: 'Codex Luna',
@@ -101,7 +101,7 @@ describe('temporary key model content routing', () => {
             PROMPT_LOG_MODE: 'none',
             providerPools: { 'openai-codex-oauth': [{ uuid: 'codex-luna' }] }
         };
-        const request = new FakeRequest({ model: 'gpt-5.4-mini-fast', stream: false, input: 'hello' });
+        const request = new FakeRequest({ model: requestedModel, stream: false, input: 'hello' });
         const response = new FakeResponse();
         request.start();
 
@@ -117,14 +117,17 @@ describe('temporary key model content routing', () => {
             '/openai-codex-oauth/v1/responses'
         );
 
-        expect(generateContent).toHaveBeenCalledWith('gpt-5.6-luna', expect.any(Object));
-        expect(JSON.parse(response.body).model).toBe('gpt-5.4-mini-fast');
+        expect(generateContent).toHaveBeenCalledWith('gpt-6-luna', expect.any(Object));
+        expect(JSON.parse(response.body).model).toBe(requestedModel);
         expect(mockExecuteHook).toHaveBeenCalledWith('onContentGenerated', expect.objectContaining({
             toProvider: 'openai-codex-oauth',
-            model: 'gpt-5.6-luna',
+            model: 'gpt-6-luna',
             providerUuid: 'codex-luna',
             accountEmail: 'luna@example.com'
         }));
+        const hookContext = mockExecuteHook.mock.calls.find(([name]) => name === 'onContentGenerated')[1];
+        expect(hookContext.processedRequestBody.service_tier).toBe('default');
+        expect(hookContext.usagePricingModel).toBe('gpt-6-luna');
     });
 
     test('converts a matching Responses request to Antigravity while preserving the client model', async () => {
@@ -163,7 +166,7 @@ describe('temporary key model content routing', () => {
                 models: ['gpt-5.4-mini', 'gpt-5.3-codex-spark'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
-                fallbackModel: 'gpt-5.6-luna',
+                fallbackModel: 'gpt-6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }]
@@ -266,7 +269,7 @@ describe('temporary key model content routing', () => {
                 models: ['gpt-5.4-mini', 'gpt-5.3-codex-spark'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
-                fallbackModel: 'gpt-5.6-luna',
+                fallbackModel: 'gpt-6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }]
@@ -351,7 +354,7 @@ describe('temporary key model content routing', () => {
                 models: ['gpt-5.4-mini'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
-                fallbackModel: 'gpt-5.6-luna',
+                fallbackModel: 'gpt-6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }]
@@ -444,7 +447,7 @@ describe('temporary key model content routing', () => {
                 return {
                 service: { generateContent: fallbackGenerateContent },
                 actualProviderType: 'openai-codex-oauth',
-                actualModel: 'gpt-5.6-luna',
+                actualModel: 'gpt-6-luna',
                 uuid: 'codex-selection-fallback',
                 serviceConfig: {
                     customName: 'Codex selection fallback',
@@ -468,7 +471,7 @@ describe('temporary key model content routing', () => {
                 models: ['gpt-5.4-mini'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
-                fallbackModel: 'gpt-5.6-luna',
+                fallbackModel: 'gpt-6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }]
@@ -502,7 +505,7 @@ describe('temporary key model content routing', () => {
             },
             {
                 provider: 'openai-codex-oauth',
-                model: 'gpt-5.6-luna',
+                model: 'gpt-6-luna',
                 disableProviderFallback: true
             }
         ]);
@@ -510,7 +513,7 @@ describe('temporary key model content routing', () => {
         expect(providerPoolManager.recordGeminiSchedulingEvent).toHaveBeenCalledWith('fallbacks');
         expect(config._temporaryKeyModelRouteResult).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
-            actualModel: 'gpt-5.6-luna',
+            actualModel: 'gpt-6-luna',
             providerUuid: 'codex-selection-fallback',
             providerName: 'Codex selection fallback',
             accountIdentity: 'codex-account-final',
@@ -521,7 +524,7 @@ describe('temporary key model content routing', () => {
             'onContentGenerated',
             expect.objectContaining({
                 toProvider: 'openai-codex-oauth',
-                model: 'gpt-5.6-luna',
+                model: 'gpt-6-luna',
                 providerUuid: 'codex-selection-fallback',
                 providerName: 'Codex selection fallback',
                 accountIdentity: 'codex-account-final',
@@ -542,7 +545,7 @@ describe('temporary key model content routing', () => {
                 response: {
                     id: 'scheduled-luna-response',
                     object: 'response',
-                    model: 'gpt-5.6-luna',
+                    model: 'gpt-6-luna',
                     status: 'completed',
                     output: []
                 }
@@ -551,7 +554,7 @@ describe('temporary key model content routing', () => {
         mockGetApiServiceWithFallback.mockResolvedValueOnce({
             service: lunaService,
             actualProviderType: 'openai-codex-oauth',
-            actualModel: 'gpt-5.6-luna',
+            actualModel: 'gpt-6-luna',
             uuid: 'scheduled-luna-unary',
             serviceConfig: {
                 customName: 'Scheduled Luna unary',
@@ -582,7 +585,7 @@ describe('temporary key model content routing', () => {
                 modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
-                fallbackModel: 'gpt-5.6-luna',
+                fallbackModel: 'gpt-6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true,
                 targetBlackout: {
@@ -592,7 +595,7 @@ describe('temporary key model content routing', () => {
                     end: '23:59',
                     modelFamilies: ['gpt-5.4', 'gpt-5.3-codex-spark'],
                     fallbackProviderType: 'openai-codex-oauth',
-                    fallbackModel: 'gpt-5.6-luna'
+                    fallbackModel: 'gpt-6-luna'
                 }
             }]
         };
@@ -620,16 +623,16 @@ describe('temporary key model content routing', () => {
         expect(mockGetApiServiceWithFallback).toHaveBeenCalledTimes(1);
         expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(
             expect.objectContaining({ MODEL_PROVIDER: 'openai-codex-oauth' }),
-            'gpt-5.6-luna',
+            'gpt-6-luna',
             expect.objectContaining({ disableProviderFallback: true })
         );
         expect(mockGetApiServiceWithFallback.mock.calls.some(([, model]) => model === 'gemini-2.5-flash')).toBe(false);
         expect(providerPoolManager.recordGeminiSchedulingEvent).not.toHaveBeenCalled();
-        expect(lunaService.generateContent).toHaveBeenCalledWith('gpt-5.6-luna', expect.any(Object));
+        expect(lunaService.generateContent).toHaveBeenCalledWith('gpt-6-luna', expect.any(Object));
         expect(JSON.parse(response.body).model).toBe('gpt-5.4-mini');
         expect(config._temporaryKeyModelRouteResult).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
-            actualModel: 'gpt-5.6-luna',
+            actualModel: 'gpt-6-luna',
             fallbackUsed: true,
             fallbackReason: 'scheduled_blackout',
             targetAttempted: false
@@ -650,7 +653,7 @@ describe('temporary key model content routing', () => {
                     response: {
                         id: 'scheduled-luna-stream',
                         object: 'response',
-                        model: 'gpt-5.6-luna',
+                        model: 'gpt-6-luna',
                         status: 'completed',
                         output: []
                     }
@@ -660,7 +663,7 @@ describe('temporary key model content routing', () => {
         mockGetApiServiceWithFallback.mockResolvedValueOnce({
             service: lunaService,
             actualProviderType: 'openai-codex-oauth',
-            actualModel: 'gpt-5.6-luna',
+            actualModel: 'gpt-6-luna',
             uuid: 'scheduled-luna-stream',
             serviceConfig: {
                 customName: 'Scheduled Luna stream',
@@ -691,7 +694,7 @@ describe('temporary key model content routing', () => {
                 modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
-                fallbackModel: 'gpt-5.6-luna',
+                fallbackModel: 'gpt-6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true,
                 targetBlackout: {
@@ -701,7 +704,7 @@ describe('temporary key model content routing', () => {
                     end: '23:59',
                     modelFamilies: ['gpt-5.4', 'gpt-5.3-codex-spark'],
                     fallbackProviderType: 'openai-codex-oauth',
-                    fallbackModel: 'gpt-5.6-luna'
+                    fallbackModel: 'gpt-6-luna'
                 }
             }]
         };
@@ -728,10 +731,10 @@ describe('temporary key model content routing', () => {
         expect(mockGetApiServiceWithFallback).toHaveBeenCalledTimes(1);
         expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(
             expect.objectContaining({ MODEL_PROVIDER: 'openai-codex-oauth' }),
-            'gpt-5.6-luna',
+            'gpt-6-luna',
             expect.objectContaining({ disableProviderFallback: true })
         );
-        expect(lunaService.generateContentStream).toHaveBeenCalledWith('gpt-5.6-luna', expect.any(Object));
+        expect(lunaService.generateContentStream).toHaveBeenCalledWith('gpt-6-luna', expect.any(Object));
         expect(response.body).toContain('gpt-5.3-codex-spark-fast');
         expect(response.body).not.toContain('gemini-2.5-flash');
         expect(config._temporaryKeyModelRouteResult).toMatchObject({
@@ -762,7 +765,7 @@ describe('temporary key model content routing', () => {
                 response: {
                     id: 'luna-fallback-response',
                     object: 'response',
-                    model: 'gpt-5.6-luna',
+                    model: 'gpt-6-luna',
                     status: 'completed',
                     output: []
                 }
@@ -780,7 +783,7 @@ describe('temporary key model content routing', () => {
             .mockResolvedValueOnce({
                 service: lunaService,
                 actualProviderType: 'openai-codex-oauth',
-                actualModel: 'gpt-5.6-luna',
+                actualModel: 'gpt-6-luna',
                 uuid: 'codex-luna-fallback',
                 serviceConfig: {
                     customName: 'Codex Luna fallback',
@@ -805,7 +808,7 @@ describe('temporary key model content routing', () => {
                 modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
-                fallbackModel: 'gpt-5.6-luna',
+                fallbackModel: 'gpt-6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }]
@@ -838,28 +841,28 @@ describe('temporary key model content routing', () => {
 
         expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(
             expect.objectContaining({ MODEL_PROVIDER: 'openai-codex-oauth' }),
-            'gpt-5.6-luna',
+            'gpt-6-luna',
             expect.objectContaining({ disableProviderFallback: true })
         );
         expect(mockGetApiServiceWithFallback.mock.calls.some(
             ([, selectedModel, options]) => selectedModel === requestedModel
                 && options?.preserveRequestedCodexModel === true
         )).toBe(false);
-        expect(lunaService.generateContent).toHaveBeenCalledWith('gpt-5.6-luna', expect.any(Object));
+        expect(lunaService.generateContent).toHaveBeenCalledWith('gpt-6-luna', expect.any(Object));
         expect(JSON.parse(response.body)).toMatchObject({
             model: requestedModel,
             status: 'completed'
         });
         expect(config._temporaryKeyModelRouteResult).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
-            actualModel: 'gpt-5.6-luna',
+            actualModel: 'gpt-6-luna',
             providerUuid: 'codex-luna-fallback',
             fallbackUsed: true
         });
         expect(providerPoolManager.recordGeminiSchedulingEvent).toHaveBeenCalledWith('fallbacks');
         expect(mockExecuteHook).toHaveBeenCalledWith('onContentGenerated', expect.objectContaining({
             toProvider: 'openai-codex-oauth',
-            model: 'gpt-5.6-luna',
+            model: 'gpt-6-luna',
             providerUuid: 'codex-luna-fallback',
             accountEmail: 'luna@example.com',
             _monitorRequestId: `batch-fallback-${requestedModel}`
@@ -884,7 +887,7 @@ describe('temporary key model content routing', () => {
                     response: {
                         id: 'luna-stream-fallback',
                         object: 'response',
-                        model: 'gpt-5.6-luna',
+                        model: 'gpt-6-luna',
                         status: 'completed',
                         output: []
                     }
@@ -903,7 +906,7 @@ describe('temporary key model content routing', () => {
             .mockResolvedValueOnce({
                 service: lunaService,
                 actualProviderType: 'openai-codex-oauth',
-                actualModel: 'gpt-5.6-luna',
+                actualModel: 'gpt-6-luna',
                 uuid: 'codex-luna-stream-fallback',
                 serviceConfig: {
                     customName: 'Codex Luna stream fallback',
@@ -934,7 +937,7 @@ describe('temporary key model content routing', () => {
                 modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
-                fallbackModel: 'gpt-5.6-luna',
+                fallbackModel: 'gpt-6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true
             }]
@@ -967,19 +970,19 @@ describe('temporary key model content routing', () => {
 
         expect(mockGetApiServiceWithFallback).toHaveBeenCalledWith(
             expect.objectContaining({ MODEL_PROVIDER: 'openai-codex-oauth' }),
-            'gpt-5.6-luna',
+            'gpt-6-luna',
             expect.objectContaining({ disableProviderFallback: true })
         );
         expect(mockGetApiServiceWithFallback.mock.calls.some(
             ([, selectedModel, options]) => selectedModel === requestedModel
                 && options?.preserveRequestedCodexModel === true
         )).toBe(false);
-        expect(lunaService.generateContentStream).toHaveBeenCalledWith('gpt-5.6-luna', expect.any(Object));
+        expect(lunaService.generateContentStream).toHaveBeenCalledWith('gpt-6-luna', expect.any(Object));
         expect(response.body).toContain(requestedModel);
         expect(response.body).not.toContain('gemini-2.5-flash');
         expect(config._temporaryKeyModelRouteResult).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
-            actualModel: 'gpt-5.6-luna',
+            actualModel: 'gpt-6-luna',
             providerUuid: 'codex-luna-stream-fallback',
             fallbackUsed: true
         });
@@ -987,7 +990,7 @@ describe('temporary key model content routing', () => {
         expect(contentHooks).toHaveLength(1);
         expect(contentHooks[0][1]).toMatchObject({
             toProvider: 'openai-codex-oauth',
-            model: 'gpt-5.6-luna',
+            model: 'gpt-6-luna',
             providerUuid: 'codex-luna-stream-fallback',
             accountEmail: 'luna-stream@example.com',
             _monitorRequestId: 'batch-stream-fallback',

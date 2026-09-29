@@ -83,10 +83,10 @@
         "targetProviderType": "gemini-antigravity",
         "targetModel": "gemini-claude-sonnet-4-5"
       },
-      "gpt-5.4": "gpt-5.6-luna",
-      "gpt-5.4-fast": "gpt-5.6-luna",
-      "gpt-5.4-mini": "gpt-5.6-luna",
-      "gpt-5.4-mini-fast": "gpt-5.6-luna"
+      "gpt-5.4": { "targetProviderType": "openai-codex-oauth", "targetModel": "gpt-6-luna" },
+      "gpt-5.4-fast": { "targetProviderType": "openai-codex-oauth", "targetModel": "gpt-6-luna" },
+      "gpt-5.4-mini": { "targetProviderType": "openai-codex-oauth", "targetModel": "gpt-6-luna" },
+      "gpt-5.4-mini-fast": { "targetProviderType": "openai-codex-oauth", "targetModel": "gpt-6-luna" }
     },
     "workdayCalendars": {
       "cn-statutory-workday": {
@@ -121,7 +121,7 @@
         "modelFamilies": ["gpt-5.3", "gpt-5.4"],
         "targetProviderType": "gemini-antigravity",
         "targetModel": "gemini-2.5-flash",
-        "fallbackModel": "gpt-5.6-luna",
+        "fallbackModel": "gpt-6-luna",
         "fallbackToOriginal": true,
         "preserveResponseModel": true,
         "targetBlackout": {
@@ -131,7 +131,7 @@
           "end": "19:00",
           "modelFamilies": ["gpt-5.4", "gpt-5.3-codex-spark"],
           "fallbackProviderType": "openai-codex-oauth",
-          "fallbackModel": "gpt-5.6-luna"
+          "fallbackModel": "gpt-6-luna"
         }
       }
     ],

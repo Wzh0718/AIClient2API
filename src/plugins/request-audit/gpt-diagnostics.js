@@ -7,7 +7,7 @@ import { getRequestAttempts } from '../../utils/request-attempts.js';
 const TEST_VERSION = 'gpt-diagnostics-v3';
 const MAX_TARGETS = 10;
 // 每个凭据固定对这组模型逐一执行 ModelTrace 归因，前端不再选择模型。
-export const FIXED_MODELS = Object.freeze(['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra']);
+export const FIXED_MODELS = Object.freeze(['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-luna', 'gpt-6-astra']);
 const TESTS = Object.freeze({
     modeltrace: Object.freeze({ label: 'ModelTrace', requestCount: modelTraceChallenges().length, maxOutputTokensPerRequest: 8192 })
 });

@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 describe('Codex image generation tool options', () => {
-    test('routes gpt-image-2 through gpt-5.6-luna while preserving the external image model', async () => {
+    test('routes gpt-image-2 through gpt-6-luna while preserving the external image model', async () => {
         const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
 
         try {
@@ -39,7 +39,7 @@ describe('Codex image generation tool options', () => {
                 }]
             }, false);
 
-            expect(body.model).toBe('gpt-5.6-luna');
+            expect(body.model).toBe('gpt-6-luna');
             expect(body.tools).toEqual([{ type: 'image_generation', model: 'gpt-image-2' }]);
         } finally {
             service.stopCacheCleanup();
@@ -51,7 +51,7 @@ describe('Codex image generation tool options', () => {
         ['gpt-image-2.5-sunburst', 'gpt-image-2.5-sunburst'],
         ['gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-flare-2026-09-08'],
         ['gpt-image-2.5-flare-fast', 'gpt-image-2.5-flare']
-    ])('routes %s through gpt-5.6-luna with the requested image tool model', async (requestedModel, toolModel) => {
+    ])('routes %s through gpt-6-luna with the requested image tool model', async (requestedModel, toolModel) => {
         const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
 
         try {
@@ -63,7 +63,7 @@ describe('Codex image generation tool options', () => {
                 }]
             }, false);
 
-            expect(body.model).toBe('gpt-5.6-luna');
+            expect(body.model).toBe('gpt-6-luna');
             expect(body.tools).toEqual([{ type: 'image_generation', model: toolModel }]);
         } finally {
             service.stopCacheCleanup();
@@ -89,7 +89,7 @@ describe('Codex image generation tool options', () => {
         }
     });
 
-    test('routes gpt-image-2-fast through the same gpt-5.6-luna image shell', async () => {
+    test('routes gpt-image-2-fast through the same gpt-6-luna image shell', async () => {
         const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
 
         try {
@@ -101,7 +101,7 @@ describe('Codex image generation tool options', () => {
                 }]
             }, false);
 
-            expect(body.model).toBe('gpt-5.6-luna');
+            expect(body.model).toBe('gpt-6-luna');
             expect(body.tools).toEqual([{ type: 'image_generation', model: 'gpt-image-2' }]);
         } finally {
             service.stopCacheCleanup();
@@ -121,7 +121,7 @@ describe('Codex image generation tool options', () => {
             }, true);
 
             expect(body.model).toBe('gpt-5.5');
-            expect(body.model).not.toBe('gpt-5.6-luna');
+            expect(body.model).not.toBe('gpt-6-luna');
         } finally {
             service.stopCacheCleanup();
         }

@@ -26,7 +26,7 @@ describe('GPT diagnostics safety and fingerprint inputs', () => {
   test('advertises the fixed-model fingerprint budget and rejects removed tests without creating runs', async () => {
     const runner = new GptDiagnosticsRunner();
     expect(runner.capabilities()).toMatchObject({ testVersion: 'gpt-diagnostics-v3', maxTargets: 10,
-      models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra'],
+      models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-luna', 'gpt-6-astra'],
       defaultTests: ['modeltrace'], perCredential: { requestCount: 12, maxOutputTokens: 98304 } });
     expect(runner.estimate({ targets: [{}, {}] })).toEqual({ credentialCount: 2, targetCount: 8, requestCount: 24, maxOutputTokens: 196608 });
     await expect(runner.create({ targets: [{ providerUuid: 'p' }], tests: ['knowledge'] }))

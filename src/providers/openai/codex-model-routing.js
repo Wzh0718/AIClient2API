@@ -2,8 +2,8 @@
 export const DEFAULT_CODEX_FALLBACK_MODEL = null;
 
 const SPARK_ALIAS_BY_MODEL = {
-    'gpt-5.3-codex-spark': 'gpt-5.6-luna',
-    'gpt-5.3-codex-spark-fast': 'gpt-5.6-luna-fast'
+    'gpt-5.3-codex-spark': 'gpt-6-luna',
+    'gpt-5.3-codex-spark-fast': 'gpt-6-luna'
 };
 
 export function matchesModelFamily(model, family) {

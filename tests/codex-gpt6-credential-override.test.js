@@ -47,7 +47,7 @@ describe('Codex GPT-6 catalog and credential override', () => {
         expect((await prepare('gpt-5.6-sol')).model).toBe('gpt-5.6-sol');
         expect((await prepare('gpt-5.6-sol', { codexGpt6OverrideEnabled: true })).model).toBe('gpt-6-luna');
         const image = await prepare('gpt-image-2', { codexGpt6OverrideEnabled: true, codexGpt6OverrideModel: 'gpt-6-astra' });
-        expect(image.model).toBe('gpt-5.6-luna');
+        expect(image.model).toBe('gpt-6-luna');
         expect(image.tools).toEqual([{ type: 'image_generation', model: 'gpt-image-2' }]);
         expect(resolveCodexOutboundModel('gpt-image-2.5', { codexGpt6OverrideEnabled: true })).toBe('gpt-image-2.5');
         expect(() => resolveCodexOutboundModel('gpt-5.6-sol', {

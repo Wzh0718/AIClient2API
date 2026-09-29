@@ -8,6 +8,12 @@ describe('temporary key model route configuration', () => {
 
         expect(managerSource).toContain('temporaryKeyModelRoutes: []');
         expect(managerSource).toContain('workdayCalendars: {}');
+        for (const model of ['gpt-5.4', 'gpt-5.4-fast', 'gpt-5.4-mini', 'gpt-5.4-mini-fast']) {
+            expect(example.modelFallbackMapping[model]).toEqual({
+                targetProviderType: 'openai-codex-oauth',
+                targetModel: 'gpt-6-luna'
+            });
+        }
         expect(example.workdayCalendars['cn-statutory-workday'].years['2026']).toEqual({
             holidays: [
                 '2026-01-01', '2026-01-02', '2026-01-03',
@@ -34,7 +40,7 @@ describe('temporary key model route configuration', () => {
                 modelFamilies: ['gpt-5.3', 'gpt-5.4'],
                 targetProviderType: 'gemini-antigravity',
                 targetModel: 'gemini-2.5-flash',
-                fallbackModel: 'gpt-5.6-luna',
+                fallbackModel: 'gpt-6-luna',
                 fallbackToOriginal: true,
                 preserveResponseModel: true,
                 targetBlackout: {
@@ -44,7 +50,7 @@ describe('temporary key model route configuration', () => {
                     end: '19:00',
                     modelFamilies: ['gpt-5.4', 'gpt-5.3-codex-spark'],
                     fallbackProviderType: 'openai-codex-oauth',
-                    fallbackModel: 'gpt-5.6-luna'
+                    fallbackModel: 'gpt-6-luna'
                 }
             }
         ]);

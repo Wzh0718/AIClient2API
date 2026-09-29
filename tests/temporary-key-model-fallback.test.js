@@ -88,13 +88,13 @@ describe('temporary model route fallback', () => {
         const fallbackService = {
             generateContent: jest.fn().mockResolvedValue({
                 id: 'fallback-response',
-                model: 'gpt-5.6-luna'
+                model: 'gpt-6-luna'
             })
         };
         const fallback = jest.fn().mockResolvedValue({
             service: fallbackService,
-            model: 'gpt-5.6-luna',
-            requestBody: { model: 'gpt-5.6-luna', input: [] },
+            model: 'gpt-6-luna',
+            requestBody: { model: 'gpt-6-luna', input: [] },
             toProvider: 'openai-codex-oauth',
             uuid: 'codex-fallback',
             customName: 'Codex fallback'
@@ -125,7 +125,7 @@ describe('temporary model route fallback', () => {
         });
         expect(config._temporaryKeyModelRouteResult).toMatchObject({
             actualProviderType: 'openai-codex-oauth',
-            actualModel: 'gpt-5.6-luna',
+            actualModel: 'gpt-6-luna',
             fallbackUsed: true
         });
     });
@@ -138,13 +138,13 @@ describe('temporary model route fallback', () => {
         };
         const fallbackService = {
             async *generateContentStream() {
-                yield { type: 'response.completed', response: { model: 'gpt-5.6-luna' } };
+                yield { type: 'response.completed', response: { model: 'gpt-6-luna' } };
             }
         };
         const fallback = jest.fn().mockResolvedValue({
             service: fallbackService,
-            model: 'gpt-5.6-luna',
-            requestBody: { model: 'gpt-5.6-luna', input: [] },
+            model: 'gpt-6-luna',
+            requestBody: { model: 'gpt-6-luna', input: [] },
             toProvider: 'openai-codex-oauth',
             uuid: 'codex-fallback'
         });

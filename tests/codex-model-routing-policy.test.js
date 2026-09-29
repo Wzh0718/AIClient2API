@@ -23,8 +23,8 @@ describe('Codex entry model routing policy', () => {
     );
 
     test.each([
-        ['gpt-5.3-codex-spark', 'gpt-5.6-luna'],
-        ['gpt-5.3-codex-spark-fast', 'gpt-5.6-luna-fast']
+        ['gpt-5.3-codex-spark', 'gpt-6-luna'],
+        ['gpt-5.3-codex-spark-fast', 'gpt-6-luna']
     ])('maps retired Spark model %s to %s before the supported check', (model, actualModel) => {
         expect(resolveCodexEntryModel({ model, supported: false })).toEqual({
             actualModel,
@@ -56,7 +56,7 @@ describe('Codex entry model routing policy', () => {
             model: 'gpt-5.3-codex-spark',
             supported: false,
             preserveRequestedModel: true
-        })).toEqual({ actualModel: 'gpt-5.6-luna', reason: 'SPARK_ALIAS' });
+        })).toEqual({ actualModel: 'gpt-6-luna', reason: 'SPARK_ALIAS' });
     });
 
     test.each([

@@ -1025,10 +1025,10 @@ export class CodexApiService {
         const defaultServiceTier = isUltraFastModel ? 'ultrafast' : isFastModel ? 'priority' : 'default';
         const defaultReasoningEffort = isSpeedModel ? 'xhigh' : 'medium';
 
-        // 图像生成模型：gpt-image-2 / Image 2.5 通过 image_generation 工具 + gpt-5.6-luna 实现
+        // 图像生成模型：gpt-image-2 / Image 2.5 通过 image_generation 工具 + gpt-6-luna 实现
         const isImageModel = isSupportedGptImageModel(upstreamModel);
         const effectiveUpstreamModel = isImageModel
-            ? 'gpt-5.6-luna'
+            ? 'gpt-6-luna'
             : resolveCodexOutboundModel(upstreamModel, this.config);
 
         const cleanedBody = sanitizeCodexModelParameters(effectiveUpstreamModel, {...requestBody});

@@ -3739,6 +3739,13 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     // 1. Convert request body from client format to backend format, if necessary.
     // 使用浅拷贝以避免直接变异 originalRequestBody，保持原始数据的纯净性以供后续钩子使用
     let processedRequestBody = { ...originalRequestBody };
+    // 旧 Fast 别名若已选定普通 GPT-6 Luna，不让原请求名在协议转换时重新启用 Fast 档位。
+    // 调用方显式指定的 service_tier 仍由转换器保留。
+    if (model === 'gpt-6-luna'
+        && /-fast$/i.test(clientRequestedModel)
+        && (!originalRequestBody.service_tier || originalRequestBody.service_tier === 'default')) {
+        processedRequestBody.model = model;
+    }
     if (toProvider === MODEL_PROVIDER.GLM_CODING_PLAN && CONFIG._glmRouting) {
         processedRequestBody._glmRouting = CONFIG._glmRouting;
         processedRequestBody._glmClientIdentity = CONFIG._glmClientIdentity;
