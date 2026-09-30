@@ -197,13 +197,15 @@ describe('request audit api aggregation', () => {
   test('diagnostic routes create list inspect and cancel runs', async () => {
     const run = { runId: 'run-1', status: 'queued' };
     setGptDiagnosticsRunner({
-      capabilities: () => ({ testVersion: 'gpt-diagnostics-v2', maxTargets: 10, perTarget: { requestCount: 4, maxOutputTokens: 26624 } }),
+      capabilities: () => ({ testVersion: 'gpt-diagnostics-v4', maxTargets: 10, models: ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'],
+        defaultTests: ['modeltrace'], perCredential: { requestCount: 9, maxOutputTokens: 73728 } }),
       create: jest.fn(async () => run), list: jest.fn(() => [run]), get: jest.fn(() => run), cancel: jest.fn(async () => ({ ...run, status: 'cancelled' }))
     });
     const config = { _requestAuditSkipAuth: true };
     try {
       expect((await callRoute('/api/gpt-diagnostics/capabilities', config)).data).toMatchObject({
-        testVersion: 'gpt-diagnostics-v2', maxTargets: 10, perTarget: { requestCount: 4, maxOutputTokens: 26624 }
+        testVersion: 'gpt-diagnostics-v4', maxTargets: 10, models: ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'],
+        defaultTests: ['modeltrace'], perCredential: { requestCount: 9, maxOutputTokens: 73728 }
       });
       const retired = await callRoute('/api/gpt-diagnostics/runs/run-1/score', config, 'POST', { score: 3 }, 410);
       expect(retired.error.message).toContain('retired');

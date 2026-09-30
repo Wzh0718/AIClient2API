@@ -17,13 +17,13 @@ const errors = [];
 const checks = [];
 page.on('pageerror', error => errors.push(error.message));
 const pass = name => { checks.push(name); console.log(`PASS ${name}`); };
-const models = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra'];
+const models = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'];
 const credentials = Array.from({ length: 16 }, (_, i) => ({ uuid: `credential-${String(i).padStart(2, '0')}`,
     customName: i < 2 ? '共享账户' : i === 2 ? '很长的凭据名称，用来检查窄屏布局与文字换行，不应撑宽页面' : `诊断账户 ${i}`,
     isHealthy: i !== 2, isDisabled: i === 11, needsRefresh: i === 14, quotaAvailable: i === 15 ? false : undefined,
     uiAvailable: ![2, 11, 14, 15].includes(i), uiUnavailableReason: [2, 11, 14, 15].includes(i) ? 'fixture' : null }));
-const capabilities = { testVersion: 'gpt-diagnostics-v3', maxTargets: 10, models,
-    defaultTests: ['modeltrace'], perCredential: { requestCount: 12, maxOutputTokens: 98304 } };
+const capabilities = { testVersion: 'gpt-diagnostics-v4', maxTargets: 10, models,
+    defaultTests: ['modeltrace'], perCredential: { requestCount: 9, maxOutputTokens: 73728 } };
 const historical = { runId: 'history-1', status: 'partial', createdAt: '2026-09-22T04:20:00Z', testVersion: 'gpt-diagnostics-v1',
     targets: [{ providerUuid: 'deleted-account', model: 'gpt-test' }], estimate: { credentialCount: 1, targetCount: 1, requestCount: 5, maxOutputTokens: 26192 },
     results: [{ providerUuid: 'deleted-account', model: 'gpt-test', status: 'failed', error: '模拟上游错误：服务暂不可用',
@@ -62,9 +62,9 @@ await page.route('**/*', async route => {
             if (holdCreate) await new Promise(resolve => { unblockCreate = resolve; });
             if (failCreate) return respond({ error: { message: '模拟创建失败' } }, 503);
             const targetCount = posted.targets.length * models.length;
-            const run = { runId: 'new-run', status: 'queued', createdAt: new Date().toISOString(), testVersion: 'gpt-diagnostics-v3',
+            const run = { runId: 'new-run', status: 'queued', createdAt: new Date().toISOString(), testVersion: 'gpt-diagnostics-v4',
                 targets: posted.targets.flatMap(t => models.map(model => ({ providerUuid: t.providerUuid, model }))),
-                estimate: { credentialCount: posted.targets.length, targetCount, requestCount: posted.targets.length * 12, maxOutputTokens: posted.targets.length * 98304 }, results: [] };
+                estimate: { credentialCount: posted.targets.length, targetCount, requestCount: posted.targets.length * 9, maxOutputTokens: posted.targets.length * 73728 }, results: [] };
             runs = [run, ...runs];
             return respond({ success: true, data: { run } }, 202);
         }
@@ -106,8 +106,8 @@ try {
     await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => document.activeElement.id), 'credential-toggle');
     assert((await page.locator('#budget').textContent()).includes('2 个凭据'));
-    assert((await page.locator('#budget').textContent()).includes('24 次请求'));
-    assert((await page.locator('#budget').textContent()).includes('196,608'));
+    assert((await page.locator('#budget').textContent()).includes('18 次请求'));
+    assert((await page.locator('#budget').textContent()).includes('147,456'));
     pass('keyboard picker, duplicate names, per-credential budget');
 
     await page.locator('#credential-toggle').click();

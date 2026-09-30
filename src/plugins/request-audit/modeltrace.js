@@ -7,8 +7,8 @@ const VALUE_MIN = 1;
 const VALUE_MAX = 355;
 const DIMENSION = 355;
 const ALPHA = 0.5;
-export const MODELTRACE_BANK_VERSION = '3f0dd2f4b451ad424f3b165a108a468efe4d4d81';
-const BANK_SHA256 = '6a3f7e4d703990a2322cf535020309380ca858654345d8fe5db278578568bad3';
+export const MODELTRACE_BANK_VERSION = 'df3a0f9d3e054c0dc02d6d586686db8daf8fa7c8';
+const BANK_SHA256 = '1c2cb74d372f9f0f30d0dabbb7b7a838660d2f769a88d0c8489e4c662e088c21';
 const BANK_URL = `https://raw.githubusercontent.com/xqy2006/ModelTrace/${MODELTRACE_BANK_VERSION}/data/unified_bank.json`;
 
 function mean(values) { return values.reduce((sum, value) => sum + value, 0) / values.length; }
@@ -35,7 +35,7 @@ export function parseModelTraceNumbers(text) {
     for (const match of String(text || '').matchAll(/\d+/g)) {
         const separator = String(text).slice(previousEnd, match.index);
         const value = Number(match[0]);
-        if (current.length && /[a-z]/i.test(separator)) { runs.push(current); current = []; }
+        if (current.length && /\p{L}/u.test(separator)) { runs.push(current); current = []; }
         if (value >= VALUE_MIN && value <= VALUE_MAX) current.push(value);
         previousEnd = match.index + match[0].length;
     }
@@ -64,12 +64,15 @@ function histogram(values, bins, min, max) {
 
 function orderedFeature(numbers) {
     const pieces = [];
+    const baseSize = Math.floor(numbers.length / 4);
+    const remainder = numbers.length % 4;
+    let start = 0;
     for (let block = 0; block < 4; block += 1) {
-        const start = Math.floor(numbers.length * block / 4);
-        const end = Math.floor(numbers.length * (block + 1) / 4);
+        const end = start + baseSize + (block < remainder ? 1 : 0);
         const smoothed = histogram(numbers.slice(start, end), 16, 1, 356).map(value => value + 0.5);
         const total = smoothed.reduce((sum, value) => sum + value, 0);
         pieces.push(...smoothed.map(value => Math.sqrt(value / total)));
+        start = end;
     }
     const lastDigits = Array(10).fill(0.5);
     for (const number of numbers) lastDigits[number % 10] += 1;

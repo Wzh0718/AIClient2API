@@ -1,5 +1,5 @@
 import { GptDiagnosticsRunner, FIXED_MODELS } from '../src/plugins/request-audit/gpt-diagnostics.js';
-import { parseModelTraceNumbers, modelTraceChallenges } from '../src/plugins/request-audit/modeltrace.js';
+import { MODELTRACE_BANK_VERSION, parseModelTraceNumbers, modelTraceChallenges } from '../src/plugins/request-audit/modeltrace.js';
 import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -25,10 +25,10 @@ async function waitForRun(runner, runId) {
 describe('GPT diagnostics safety and fingerprint inputs', () => {
   test('advertises the fixed-model fingerprint budget and rejects removed tests without creating runs', async () => {
     const runner = new GptDiagnosticsRunner();
-    expect(runner.capabilities()).toMatchObject({ testVersion: 'gpt-diagnostics-v3', maxTargets: 10,
-      models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-luna', 'gpt-6-astra'],
-      defaultTests: ['modeltrace'], perCredential: { requestCount: 12, maxOutputTokens: 98304 } });
-    expect(runner.estimate({ targets: [{}, {}] })).toEqual({ credentialCount: 2, targetCount: 8, requestCount: 24, maxOutputTokens: 196608 });
+    expect(runner.capabilities()).toMatchObject({ testVersion: 'gpt-diagnostics-v4', maxTargets: 10,
+      models: ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'],
+      defaultTests: ['modeltrace'], perCredential: { requestCount: 9, maxOutputTokens: 73728 } });
+    expect(runner.estimate({ targets: [{}, {}] })).toEqual({ credentialCount: 2, targetCount: 6, requestCount: 18, maxOutputTokens: 147456 });
     await expect(runner.create({ targets: [{ providerUuid: 'p' }], tests: ['knowledge'] }))
       .rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('knowledge') });
     expect(runner.list()).toEqual([]);
@@ -36,6 +36,8 @@ describe('GPT diagnostics safety and fingerprint inputs', () => {
 
   test('extracts the longest valid numeric run and ships three fixed-version challenges', () => {
     expect(parseModelTraceNumbers('note 999 words 1, 2, 355, 0, 44')).toEqual([1, 2, 355, 44]);
+    expect(parseModelTraceNumbers('12 34中文56 78')).toEqual([12, 34]);
+    expect(MODELTRACE_BANK_VERSION).toBe('df3a0f9d3e054c0dc02d6d586686db8daf8fa7c8');
     const challenges = modelTraceChallenges();
     expect(challenges.map(item => item.expectedCount)).toEqual([294, 311, 329]);
     expect(challenges.every(item => item.prompt.includes('禁止使用工具'))).toBe(true);
@@ -57,12 +59,12 @@ describe('GPT diagnostics safety and fingerprint inputs', () => {
     try {
       const created = await runner.create({ targets: [{ providerUuid: 'p' }, { providerUuid: 'p' }] });
       expect(created.targets.map(target => target.model)).toEqual([...FIXED_MODELS]);
-      expect(created.estimate).toEqual({ credentialCount: 1, targetCount: 4, requestCount: 12, maxOutputTokens: 98304 });
+      expect(created.estimate).toEqual({ credentialCount: 1, targetCount: 3, requestCount: 9, maxOutputTokens: 73728 });
       const run = await waitForRun(runner, created.runId);
-      expect(run.testVersion).toBe('gpt-diagnostics-v3');
+      expect(run.testVersion).toBe('gpt-diagnostics-v4');
       expect(run.status).toBe('completed');
-      expect(generateContent).toHaveBeenCalledTimes(12);
-      expect(generateContent.mock.calls.reduce((sum, [, body]) => sum + body.max_output_tokens, 0)).toBe(98304);
+      expect(generateContent).toHaveBeenCalledTimes(9);
+      expect(generateContent.mock.calls.reduce((sum, [, body]) => sum + body.max_output_tokens, 0)).toBe(73728);
       expect(run.results[0]).toMatchObject({ providerName: 'Test credential', providerUuid: 'p' });
       expect(run.results.map(result => result.model)).toEqual([...FIXED_MODELS]);
       expect(run.results[0].probes.map(probe => probe.test)).toEqual(['modeltrace', 'modeltrace', 'modeltrace']);
@@ -174,8 +176,8 @@ describe('GPT diagnostics safety and fingerprint inputs', () => {
       const created = await runner.create({ targets: [{ providerUuid: 'provider-a' }] });
       const run = await waitForRun(runner, created.runId);
       expect(run.status).toBe('completed');
-      expect(generateContent).toHaveBeenCalledTimes(12);
-      expect(recordProbe).toHaveBeenCalledTimes(12);
+      expect(generateContent).toHaveBeenCalledTimes(9);
+      expect(recordProbe).toHaveBeenCalledTimes(9);
       expect(recordProbe).toHaveBeenCalledWith(expect.objectContaining({ requestId: expect.stringMatching(/^diag_/), providerUuid: 'provider-a' }));
       expect(run.results[0].modelTrace.valid).toBe(true);
       expect(run.results[0]).not.toHaveProperty('knowledge');
