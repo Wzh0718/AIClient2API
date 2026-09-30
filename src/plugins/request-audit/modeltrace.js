@@ -164,7 +164,8 @@ function download(url, redirects = 0) {
 
 export async function loadModelTraceBank({ cachePath = path.join(process.cwd(), 'configs', 'gpt-diagnostics', `modeltrace-bank-${MODELTRACE_BANK_VERSION}.json`) } = {}) {
     let bytes = await fs.readFile(cachePath).catch(() => null);
-    const matchesPinnedChecksum = value => value && crypto.createHash('sha256').update(value).digest('hex') === BANK_SHA256;
+    const matchesPinnedChecksum = value => value && crypto.createHash('sha256')
+        .update(value.toString('utf8').replace(/\r\n/g, '\n'), 'utf8').digest('hex') === BANK_SHA256;
     if (!matchesPinnedChecksum(bytes)) bytes = await fs.readFile(BUNDLED_BANK_URL).catch(() => null);
     if (!matchesPinnedChecksum(bytes)) bytes = await download(BANK_URL);
     if (!matchesPinnedChecksum(bytes)) throw new Error('ModelTrace bank checksum mismatch');
