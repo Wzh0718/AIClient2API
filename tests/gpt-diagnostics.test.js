@@ -43,6 +43,18 @@ describe('GPT diagnostics safety and fingerprint inputs', () => {
     expect(challenges.every(item => item.prompt.includes('禁止使用工具'))).toBe(true);
   });
 
+  test('loads the verified bundled bank on a cache miss or checksum mismatch', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'modeltrace-bank-'));
+    const cachePath = path.join(dir, 'bank.json');
+    const { loadModelTraceBank } = jest.requireActual('../src/plugins/request-audit/modeltrace.js');
+    try {
+      await writeFile(cachePath, '{"corrupt":true}');
+      const bank = await loadModelTraceBank({ cachePath });
+      expect(bank.models.map(model => model.id)).toEqual(expect.arrayContaining(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']));
+      expect(JSON.parse(await readFile(cachePath, 'utf8')).models).toHaveLength(16);
+    } finally { await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); }
+  });
+
   test('page removes legacy preview, scoring and knowledge surfaces', () => {
     expect(diagnosticsPage).not.toMatch(/pelican|鹈鹕|iframe|\/score|知识时间/);
     expect(diagnosticsPage).toContain('检测历史');

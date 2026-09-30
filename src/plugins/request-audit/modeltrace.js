@@ -10,6 +10,7 @@ const ALPHA = 0.5;
 export const MODELTRACE_BANK_VERSION = 'df3a0f9d3e054c0dc02d6d586686db8daf8fa7c8';
 const BANK_SHA256 = '1c2cb74d372f9f0f30d0dabbb7b7a838660d2f769a88d0c8489e4c662e088c21';
 const BANK_URL = `https://raw.githubusercontent.com/xqy2006/ModelTrace/${MODELTRACE_BANK_VERSION}/data/unified_bank.json`;
+const BUNDLED_BANK_URL = new URL('./modeltrace-bank.json', import.meta.url);
 
 function mean(values) { return values.reduce((sum, value) => sum + value, 0) / values.length; }
 function norm(values) { return Math.max(Math.sqrt(values.reduce((sum, value) => sum + value * value, 0)), 1e-12); }
@@ -163,9 +164,10 @@ function download(url, redirects = 0) {
 
 export async function loadModelTraceBank({ cachePath = path.join(process.cwd(), 'configs', 'gpt-diagnostics', `modeltrace-bank-${MODELTRACE_BANK_VERSION}.json`) } = {}) {
     let bytes = await fs.readFile(cachePath).catch(() => null);
-    if (!bytes) bytes = await download(BANK_URL);
-    const digest = crypto.createHash('sha256').update(bytes).digest('hex');
-    if (digest !== BANK_SHA256) throw new Error('ModelTrace bank checksum mismatch');
+    const matchesPinnedChecksum = value => value && crypto.createHash('sha256').update(value).digest('hex') === BANK_SHA256;
+    if (!matchesPinnedChecksum(bytes)) bytes = await fs.readFile(BUNDLED_BANK_URL).catch(() => null);
+    if (!matchesPinnedChecksum(bytes)) bytes = await download(BANK_URL);
+    if (!matchesPinnedChecksum(bytes)) throw new Error('ModelTrace bank checksum mismatch');
     await fs.mkdir(path.dirname(cachePath), { recursive: true });
     await fs.writeFile(cachePath, bytes, { mode: 0o600 });
     return JSON.parse(bytes.toString('utf8'));
