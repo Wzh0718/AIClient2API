@@ -25,6 +25,7 @@
 - Production uses a single-writer handoff: the control worker writes provider configuration, execution workers receive revisioned `provider_config_sync`, and stale provider-state events are rejected.
 - Before traffic switch, verify `/runtime/health` shows complete worker topology and provider config convergence with `pendingWorkerCount=0`.
 - Do not directly restart or replace the active container while writing mounted config. Pause management/OAuth writes, perform the documented manual Nginx handoff, retain rollback state, and obtain explicit production authorization.
+- For an explicitly authorized maintenance or data repair window, after the Nginx ingress gate is verified and management/OAuth writes are paused, `persistenceBacklog=0` and `runtimeHooks.spooled=0` in three consecutive samples are required before stopping the active writer. If `metrics.inFlight` remains at 1–3, the operator may stop the container without waiting for it to reach zero; record the count and possible interrupted requests. Do not use this exception above 3 in-flight requests or while persistence is pending. Use a bounded graceful stop and distinguish an expected forced exit from OOM or other stop failures.
 
 ## Edge Admission Rollout
 
