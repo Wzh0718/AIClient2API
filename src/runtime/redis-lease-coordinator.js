@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'crypto';
+import { providerLeaseOwner } from './provider-lease-scope.js';
 
 export class CoordinationUnavailableError extends Error {
     constructor(message = 'Runtime coordination is unavailable', cause = null) {
@@ -104,7 +105,7 @@ if best == nil then
     return cjson.encode({ cooldownBlocked = true, retryAfterMs = nearest_cooldown_ttl or 1000 })
   end
   if probe_blocked then return cjson.encode({ probeRejected = true }) end
-  return nil
+  return cjson.encode({ capacityExhausted = true })
 end
 if best.probeHash and best.probeHash ~= '' then
   local probe_key = KEYS[1] .. ':model-probe:' .. best.probeHash
@@ -116,6 +117,8 @@ redis.call('ZADD', active_key, tonumber(ARGV[6]) + ttl_ms, lease_id)
 redis.call('PEXPIRE', active_key, ttl_ms * 2)
 local lease_key = KEYS[1] .. ':lease:' .. lease_id
 redis.call('HSET', lease_key, 'epoch', epoch, 'providerKey', best.key, 'workerId', worker_id)
+local owner = cjson.decode(ARGV[13] or '{}')
+redis.call('HSET', lease_key, 'requestId', owner.requestId or '', 'keyRef', owner.keyRef or '', 'model', owner.model or '', 'createdAt', owner.createdAt or ARGV[6])
 if best.probeHash and best.probeHash ~= '' then
   redis.call('HSET', lease_key, 'probeHash', best.probeHash, 'probeOwner', probe_owner)
 end
@@ -144,6 +147,46 @@ if probe_hash and probe_owner then
   if redis.call('GET', probe_key) == probe_owner then redis.call('DEL', probe_key) end
 end
 return 1
+`;
+
+// Read-only: do not prune expired members or renew TTLs while diagnosing occupancy.
+const LIST_PROVIDER_LEASES_SCRIPT = `
+local cursor = '0'
+local leases = {}
+local accounts = {}
+local total = 0
+local pages = 0
+local now_ms = tonumber(ARGV[1])
+repeat
+  local page = redis.call('SCAN', cursor, 'MATCH', KEYS[1] .. ':active:*', 'COUNT', 100)
+  cursor = page[1]
+  pages = pages + 1
+  for _, active_key in ipairs(page[2]) do
+    local provider_key = string.sub(active_key, string.len(KEYS[1] .. ':active:') + 1)
+    local provider_type, uuid = string.match(provider_key, '^([^:]+):(.+)$')
+    if provider_type and (ARGV[2] == '' or ARGV[2] == provider_type) and (ARGV[3] == '' or ARGV[3] == uuid) then
+      local count = redis.call('ZCOUNT', active_key, '(' .. ARGV[1], '+inf')
+      if count > 0 and not accounts[provider_key] then
+        accounts[provider_key] = { providerType = provider_type, providerUuid = uuid, activeCount = count }
+        total = total + count
+        local remaining = tonumber(ARGV[4]) - #leases
+        if remaining > 0 then
+          local members = redis.call('ZRANGEBYSCORE', active_key, '(' .. ARGV[1], '+inf', 'WITHSCORES', 'LIMIT', 0, remaining)
+          for i = 1, #members, 2 do
+            local id = members[i]
+            local fields = redis.call('HMGET', KEYS[1] .. ':lease:' .. id, 'requestId', 'workerId', 'keyRef', 'model', 'createdAt')
+            table.insert(leases, { leaseId = id, providerType = provider_type, providerUuid = uuid,
+              requestId = fields[1], workerId = fields[2], keyRef = fields[3], model = fields[4],
+              createdAt = fields[5], expiresAt = tonumber(members[i + 1]) })
+          end
+        end
+      end
+    end
+  end
+until cursor == '0' or pages >= 100
+local grouped = {}
+for _, account in pairs(accounts) do table.insert(grouped, account) end
+return cjson.encode({ leases = leases, accounts = grouped, total = total, truncated = total > #leases or cursor ~= '0' })
 `;
 
 const ACQUIRE_POTLUCK_KEY_SCRIPT = `
@@ -391,6 +434,7 @@ local leases = cjson.decode(ARGV[6])
 for _, lease in ipairs(leases) do
   local lease_key = KEYS[1] .. ':lease:' .. lease.leaseId
   redis.call('HSET', lease_key, 'epoch', lease.epoch or '', 'providerKey', lease.providerKey or '', 'workerId', ARGV[1])
+  redis.call('HSET', lease_key, 'requestId', lease.requestId or '', 'keyRef', lease.keyRef or '', 'model', lease.model or '', 'createdAt', lease.createdAt or '')
   if lease.probeHash and lease.probeHash ~= '' and lease.probeOwner and lease.probeOwner ~= '' then
     redis.call('HSET', lease_key, 'probeHash', lease.probeHash, 'probeOwner', lease.probeOwner)
     redis.call('SET', KEYS[1] .. ':model-probe:' .. lease.probeHash, lease.probeOwner, 'PX', tonumber(ARGV[4]))
@@ -704,6 +748,8 @@ export class RedisLeaseCoordinator {
         if (normalized.length === 0) return null;
         const leaseId = randomUUID();
         const probeOwner = `${this.workerId}:${leaseId}`;
+        const owner = providerLeaseOwner(requestedModel);
+        for (const key of ['requestId', 'keyRef', 'model']) owner[key] ||= '';
         const result = await this._eval('acquire-provider-lease', ACQUIRE_SCRIPT, [
             this.epoch,
             leaseId,
@@ -716,10 +762,18 @@ export class RedisLeaseCoordinator {
             String(this.affinityTtlMs),
             String(routedProviderKey || ''),
             probeOwner,
-            '30000'
+            '30000',
+            JSON.stringify(owner)
         ]);
         if (!result) return null;
         const lease = typeof result === 'string' ? JSON.parse(result) : result;
+        if (lease.capacityExhausted) {
+            throw Object.assign(new Error('All eligible providers are at concurrency capacity'), {
+                status: 429, statusCode: 429, code: 'PROVIDER_CONCURRENCY_EXHAUSTED',
+                filterReasons: { concurrency_capacity: normalized.length },
+                details: { reason: 'PROVIDER_CONCURRENCY_EXHAUSTED' }
+            });
+        }
         if (lease.probeRejected) {
             this.modelSchedulingMetrics.probeRejected += 1;
             return null;
@@ -749,6 +803,7 @@ export class RedisLeaseCoordinator {
             candidate.providerType === lease.providerType && candidate.uuid === lease.uuid
         ));
         this.activeLeases.set(lease.leaseId, {
+            ...owner,
             leaseId: lease.leaseId,
             epoch: this.epoch,
             providerKey: `${lease.providerType}:${lease.uuid}`,
@@ -758,6 +813,28 @@ export class RedisLeaseCoordinator {
             } : {})
         });
         return lease;
+    }
+
+    async listProviderLeases({ providerType = '', providerUuid = '' } = {}) {
+        for (const value of [providerType, providerUuid]) {
+            if (typeof value !== 'string' || value.length > 128 || (value && !/^[A-Za-z0-9_-]+$/.test(value))) {
+                throw Object.assign(new Error('Invalid provider lease filter'), { status: 400 });
+            }
+        }
+        const result = await this._eval('list-provider-leases', LIST_PROVIDER_LEASES_SCRIPT,
+            [String(Date.now()), providerType, providerUuid, '200']);
+        const data = typeof result === 'string' ? JSON.parse(result) : result;
+        if (!data || !Number.isFinite(Number(data.total))) throw new CoordinationUnavailableError();
+        const nullable = value => value === false || value === undefined || value === null || value === '' ? null : value;
+        const leases = (Array.isArray(data.leases) ? data.leases : []).map(item => ({
+            leaseId: item.leaseId, providerType: item.providerType, providerUuid: item.providerUuid,
+            requestId: nullable(item.requestId), workerId: nullable(item.workerId),
+            keyRef: nullable(item.keyRef), model: nullable(item.model),
+            createdAt: nullable(item.createdAt) === null ? null : Number(item.createdAt),
+            expiresAt: Number(item.expiresAt)
+        }));
+        return { epoch: this.epoch, leases, accounts: Array.isArray(data.accounts) ? data.accounts : [],
+            total: Number(data.total), truncated: data.truncated === true };
     }
 
     async recordHotRequest(affinityKey, { observationId = '', now = Date.now(), windowMs = 60 * 60 * 1000, bucketMs = 10000 } = {}) {
@@ -1236,6 +1313,7 @@ export class RedisLeaseCoordinator {
     async renew(leaseId) {
         if (!leaseId) return false;
         const lease = this.activeLeases.get(leaseId);
+        if (!lease) return false;
         return Number(await this._eval('renew-provider-lease', RENEW_SCRIPT, [
             leaseId,
             String(this.leaseTtlMs),

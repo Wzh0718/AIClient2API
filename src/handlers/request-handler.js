@@ -19,6 +19,7 @@ import { runtimeMetrics } from '../runtime/runtime-metrics.js';
 import { formatSuccessLog } from '../runtime/success-log.js';
 import { extractApiKey, hashKeyId } from '../edge-auth/edge-auth-service.js';
 import { isGlmPrefixedResponsesEligible } from '../services/glm-session-routing.js';
+import { getProviderLeaseScope, closeProviderLeaseScope } from '../runtime/provider-lease-scope.js';
 
 /**
  * Generate a collision-resistant server-side request ID.
@@ -203,22 +204,28 @@ export function createRequestHandler(config, providerPoolManager) {
             runtimeCompletion ||= runtimeRequest.end({ statusCode });
             return runtimeCompletion;
         };
+        const requestStore = { requestId, runtimeRequest, requestAudit: { requestId, ...network, originalPath }, edgeAdmissionLease: validatedEdgeLease };
+        getProviderLeaseScope(requestStore);
+        const releaseProviderResources = reason => closeProviderLeaseScope(requestStore, reason);
         // Unit/in-process adapters may provide a minimal response object without
         // EventEmitter methods. Real Node responses still get lifecycle metrics;
         // lightweight test doubles continue through the normal handler path.
         if (typeof res.once === 'function') {
                 res.once('finish', () => {
+                    releaseProviderResources('response_finish').catch(() => {});
                     logOnce(res.statusCode);
                     releaseEdgeLeaseOnce();
                 });
                 res.once('close', () => {
+                    releaseProviderResources('response_close').catch(() => {});
                     logOnce(res.statusCode || 499);
                     releaseEdgeLeaseOnce();
             });
         }
 
-        return requestContext.run({ requestId, runtimeRequest, requestAudit: { requestId, ...network, originalPath }, edgeAdmissionLease: validatedEdgeLease }, async () => {
-            return logger.runWithContext(requestId, async () => {
+        return requestContext.run(requestStore, async () => {
+            try {
+            return await logger.runWithContext(requestId, async () => {
                 if (validatedEdgeLease?.leaseId) edgeRenewTimer = setInterval(() => { renewEdgeAdmissionLease(validatedEdgeLease).catch(() => {}); }, 30_000);
                 // Deep copy the config for each request to allow dynamic modification
                 const currentConfig = deepmerge({}, config);
@@ -493,6 +500,9 @@ export function createRequestHandler(config, providerPoolManager) {
                     auditLifecycle.dispose();
                 }
             });
+            } finally {
+                await releaseProviderResources('handler_return');
+            }
         });
     };
 

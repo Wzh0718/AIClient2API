@@ -115,6 +115,28 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
     }
 
     // 文件上传API
+    if (method === 'GET' && pathParam === '/api/provider-leases') {
+        res.setHeader('Cache-Control', 'no-store');
+        try {
+            const query = new URL(req.url, 'http://localhost').searchParams;
+            if (!providerPoolManager?.coordination?.listProviderLeases) {
+                throw Object.assign(new Error('Provider lease coordination is unavailable'), { status: 503 });
+            }
+            const snapshot = await providerPoolManager.coordination.listProviderLeases({
+                providerType: query.get('providerType') || '',
+                providerUuid: query.get('providerUuid') || ''
+            });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(snapshot));
+        } catch (error) {
+            const status = error.status === 400 ? 400 : 503;
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { code: status === 400 ? 'INVALID_LEASE_FILTER' : 'COORDINATION_UNAVAILABLE',
+                message: status === 400 ? 'Invalid provider lease filter' : 'Provider lease coordination is unavailable' } }));
+        }
+        return true;
+    }
+
     if (method === 'POST' && pathParam === '/api/upload-oauth-credentials') {
         return await eventBroadcast.handleUploadOAuthCredentials(req, res);
     }

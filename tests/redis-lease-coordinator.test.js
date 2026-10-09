@@ -1,4 +1,6 @@
 import { RedisLeaseCoordinator, CoordinationUnavailableError } from '../src/runtime/redis-lease-coordinator.js';
+import requestContext from '../src/utils/context.js';
+import { setProviderLeaseKey } from '../src/runtime/provider-lease-scope.js';
 
 class InMemoryRedisExecutor {
     constructor() {
@@ -139,6 +141,7 @@ class InMemoryRedisExecutor {
                 }
                 return false;
             });
+            if (!candidates.length && JSON.parse(candidatesJson).length) return JSON.stringify({ cooldownBlocked: true, retryAfterMs: 60000 });
             for (const [probeHash, lease] of this.modelProbeLeases.entries()) {
                 if (lease.expiresAt <= this.now) this.modelProbeLeases.delete(probeHash);
             }
@@ -163,7 +166,7 @@ class InMemoryRedisExecutor {
             const selected = routed && (routed.concurrencyLimit <= 0 || (this.active.get(routed.key) || 0) < routed.concurrencyLimit)
                 ? routed
                 : baseSelected;
-            if (!selected) return probeBlocked ? JSON.stringify({ probeRejected: true }) : null;
+            if (!selected) return probeBlocked ? JSON.stringify({ probeRejected: true }) : JSON.stringify({ capacityExhausted: true });
             if (selected.probeHash) {
                 this.modelProbeLeases.set(selected.probeHash, {
                     owner: probeOwner,
@@ -172,7 +175,9 @@ class InMemoryRedisExecutor {
             }
             this.active.set(selected.key, (this.active.get(selected.key) || 0) + 1);
             if (affinityKey && !mapped && baseSelected) this.affinity.set(affinityKey, baseSelected.key);
-            this.leases.set(leaseId, { epoch, providerKey: selected.key, workerId, ttlMs: Number(ttlMs), probeHash: selected.probeHash, probeOwner });
+            this.leases.set(leaseId, { epoch, providerKey: selected.key, workerId, ttlMs: Number(ttlMs),
+                expiresAt: Number(_nowMs) + Number(ttlMs),
+                ...JSON.parse(args[12] || '{}'), probeHash: selected.probeHash, probeOwner });
             return JSON.stringify({ leaseId, providerType: selected.providerType, uuid: selected.uuid, probe: Boolean(selected.probeHash) });
         }
         if (name === 'acquire-image-capacity') {
@@ -234,6 +239,23 @@ class InMemoryRedisExecutor {
             if (lease.probeHash && this.modelProbeLeases.get(lease.probeHash)?.owner === lease.probeOwner) this.modelProbeLeases.delete(lease.probeHash);
             return 1;
         }
+        if (name === 'list-provider-leases') {
+            const [now, type, uuid, limit] = args;
+            const rows = [...this.leases.entries()].filter(([, lease]) => {
+                const [providerType, providerUuid] = lease.providerKey.split(':');
+                return `aiclient2api:${lease.epoch}` === keys[0] && lease.expiresAt > Number(now)
+                    && (!type || type === providerType) && (!uuid || uuid === providerUuid);
+            }).map(([leaseId, lease]) => ({ ...lease, leaseId,
+                providerType: lease.providerKey.split(':')[0], providerUuid: lease.providerKey.split(':')[1] }));
+            const grouped = new Map();
+            for (const row of rows) {
+                const key = row.providerType + ':' + row.providerUuid;
+                if (!grouped.has(key)) grouped.set(key, { providerType: row.providerType, providerUuid: row.providerUuid, activeCount: 0 });
+                grouped.get(key).activeCount++;
+            }
+            return JSON.stringify({ leases: rows.slice(0, Number(limit)), accounts: [...grouped.values()],
+                total: rows.length, truncated: rows.length > Number(limit) });
+        }
         if (name === 'renew-provider-lease') {
             const [leaseId, ttlMs, _nowMs, probeHash, probeOwner] = args;
             if (!this.leases.has(leaseId)) return 0;
@@ -265,6 +287,71 @@ class InMemoryRedisExecutor {
 }
 
 describe('RedisLeaseCoordinator', () => {
+    test('reports saturation at five slots, distinguishes no candidates, and admits after release', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const coordinator = new RedisLeaseCoordinator({ redis, epoch: 'test' });
+        const candidates = [{ providerType: 'p', uuid: 'one', concurrencyLimit: 5 }];
+        const leases = [];
+        try {
+            for (let i = 0; i < 5; i++) leases.push(await coordinator.acquire(candidates));
+            await expect(coordinator.acquire(candidates)).rejects.toMatchObject({
+                status: 429, code: 'PROVIDER_CONCURRENCY_EXHAUSTED'
+            });
+            await expect(coordinator.acquire([])).resolves.toBeNull();
+            await coordinator.release(leases.shift().leaseId);
+            leases.push(await coordinator.acquire(candidates));
+            expect(redis.active.get('p:one')).toBe(5);
+        } finally {
+            await Promise.all(leases.map(lease => coordinator.release(lease.leaseId)));
+        }
+        expect(coordinator.renewTimers.size).toBe(0);
+    });
+
+    test('retains hashed request ownership through Redis recovery without retaining the key', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const coordinator = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
+        await requestContext.run({ requestId: 'request-one' }, async () => {
+            setProviderLeaseKey({ potluckKeyData: { id: 'synthetic-secret-key' } });
+            const lease = await coordinator.acquire([{ providerType: 'p', uuid: 'one', concurrencyLimit: 5 }], { requestedModel: 'test-model' });
+            const stored = redis.leases.get(lease.leaseId);
+            expect(stored).toMatchObject({ requestId: 'request-one', model: 'test-model', workerId: 'w1' });
+            expect(stored.keyRef).toMatch(/^sha256:[0-9a-f]{16}$/);
+            redis.leases.clear();
+            await coordinator.synchronize();
+            expect(redis.leases.get(lease.leaseId)).toMatchObject({ requestId: 'request-one', keyRef: stored.keyRef, model: 'test-model' });
+            expect(JSON.stringify(redis.scriptCalls)).not.toContain('synthetic-secret-key');
+            await coordinator.release(lease.leaseId);
+        });
+    });
+
+    test('queries only active current-epoch leases, tolerates legacy owners, truncates and fails honestly', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const coordinator = new RedisLeaseCoordinator({ redis, epoch: 'test' });
+        for (let i = 0; i < 201; i++) redis.leases.set('legacy-' + i, { epoch: 'test', providerKey: 'p:one', expiresAt: Date.now() + 60000 });
+        redis.leases.set('other', { epoch: 'old', providerKey: 'p:one', expiresAt: Date.now() + 60000 });
+        redis.leases.set('expired', { epoch: 'test', providerKey: 'p:one', expiresAt: 0 });
+        const result = await coordinator.listProviderLeases({ providerType: 'p', providerUuid: 'one' });
+        expect(result).toMatchObject({ total: 201, truncated: true, accounts: [{ providerType: 'p', providerUuid: 'one', activeCount: 201 }] });
+        expect(result.leases).toHaveLength(200);
+        expect(result.leases[0]).toMatchObject({ requestId: null, workerId: null, keyRef: null, createdAt: null });
+        expect(redis.leases.size).toBe(203);
+        await expect(coordinator.listProviderLeases({ providerType: '*' })).rejects.toMatchObject({ status: 400 });
+        redis.available = false;
+        await expect(coordinator.listProviderLeases()).rejects.toMatchObject({ code: 'COORDINATION_UNAVAILABLE' });
+    });
+
+    test('stops renewal locally even when Redis release fails', async () => {
+        const redis = new InMemoryRedisExecutor();
+        const coordinator = new RedisLeaseCoordinator({ redis, epoch: 'test' });
+        const lease = await coordinator.acquire([{ providerType: 'p', uuid: 'one', concurrencyLimit: 5 }]);
+        redis.available = false;
+        await expect(coordinator.release(lease.leaseId)).rejects.toMatchObject({ code: 'COORDINATION_UNAVAILABLE' });
+        expect(coordinator.renewTimers.size).toBe(0);
+        expect(coordinator.activeLeases.size).toBe(0);
+        redis.available = true;
+        await coordinator.synchronize();
+        expect(JSON.parse(redis.scriptCalls.at(-1).args[5])).toEqual([]);
+    });
     test('enforces Gemini queue limits across workers and releases capacity', async () => {
         const redis = new InMemoryRedisExecutor();
         const first = new RedisLeaseCoordinator({ redis, epoch: 'test', workerId: 'w1' });
@@ -390,7 +477,7 @@ describe('RedisLeaseCoordinator', () => {
             retryAfterMs: 60_000,
             reason: 'upstream_429'
         });
-        await expect(second.acquire(candidates, { requestedModel: 'gemini-2.5-flash' })).resolves.toBeNull();
+        await expect(second.acquire(candidates, { requestedModel: 'gemini-2.5-flash' })).rejects.toMatchObject({ status: 429, quotaScope: 'model' });
 
         const firstProbe = await first.acquireProviderModelProbe('gemini-antigravity', 'gemini-2', 'gemini-2.5-flash');
         const secondProbe = await second.acquireProviderModelProbe('gemini-antigravity', 'gemini-2', 'gemini-2.5-flash');
@@ -399,7 +486,10 @@ describe('RedisLeaseCoordinator', () => {
         await first.releaseProviderModelProbe('gemini-antigravity', 'gemini-2', 'gemini-2.5-flash', firstProbe);
         await expect(second.acquireProviderModelProbe('gemini-antigravity', 'gemini-2', 'gemini-2.5-flash')).resolves.toBeTruthy();
 
-        expect(JSON.stringify(redis.scriptCalls)).not.toContain('gemini-2.5-flash');
+        // Scheduling keys remain hashed; the separate diagnostic metadata stores model names.
+        expect(JSON.stringify(redis.scriptCalls.map(call => ({ ...call,
+            args: call.name === 'acquire-provider-lease' ? call.args.slice(0, 12) : call.args
+        })))).not.toContain('gemini-2.5-flash');
     });
 
     test('allows only one in-flight request for an unknown Antigravity quota candidate', async () => {
@@ -498,7 +588,7 @@ describe('RedisLeaseCoordinator', () => {
         const limited = [{ providerType: 'p', uuid: 'limited', concurrencyLimit: 1 }];
 
         const lease = await first.acquire(limited);
-        await expect(second.acquire(limited)).resolves.toBeNull();
+        await expect(second.acquire(limited)).rejects.toMatchObject({ status: 429, code: 'PROVIDER_CONCURRENCY_EXHAUSTED' });
         await first.release(lease.leaseId);
         await expect(second.acquire(limited)).resolves.toMatchObject({ uuid: 'limited' });
 

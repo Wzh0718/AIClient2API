@@ -31,6 +31,7 @@ import { resolveCodexEntryModel } from '../providers/openai/codex-model-routing.
 import { performance } from 'node:perf_hooks';
 import { runtimeMetrics } from '../runtime/runtime-metrics.js';
 import requestContext, { accumulateRoutingWait, computeSelectionStages } from '../utils/context.js';
+import { getProviderLeaseScope, setProviderLeaseKey, rollbackProviderLeases } from '../runtime/provider-lease-scope.js';
 import { PotluckKeyConcurrencyLimiter } from '../plugins/api-potluck/key-concurrency-limiter.js';
 import { buildGeminiSelectionDiagnostic } from '../utils/gemini-diagnostics.js';
 
@@ -1664,6 +1665,24 @@ async function _resolveEffectiveRouting(config, requestedModel, options = {}) {
  * @returns {Promise<Object>} The API service adapter
  */
 export async function getApiService(config, requestedModel = null, options = {}) {
+    const store = requestContext.getStore();
+    setProviderLeaseKey(config, store);
+    const checkpoint = new Set(getProviderLeaseScope(store).leases.keys());
+    const previousKeyLease = store.potluckKeyConcurrencyLease;
+    try {
+        return await getApiServiceInternal(config, requestedModel, options);
+    } catch (error) {
+        await rollbackProviderLeases(checkpoint, store);
+        const keyLease = store.potluckKeyConcurrencyLease;
+        if (keyLease && keyLease !== previousKeyLease) {
+            store.potluckKeyConcurrencyLease = null;
+            await Promise.resolve().then(() => keyLease.release()).catch(() => {});
+        }
+        throw error;
+    }
+}
+
+async function getApiServiceInternal(config, requestedModel = null, options = {}) {
     // 1. 鍓嶇疆璺敱瑙ｆ瀽
     const { effectiveProvider, actualModelName } = await _resolveEffectiveRouting(config, requestedModel, options);
     config.MODEL_PROVIDER = effectiveProvider;
@@ -1731,6 +1750,24 @@ export async function getApiService(config, requestedModel = null, options = {})
  * @returns {Promise<Object>} Object containing service adapter and metadata
  */
 export async function getApiServiceWithFallback(config, requestedModel = null, options = {}) {
+    const store = requestContext.getStore();
+    setProviderLeaseKey(config, store);
+    const checkpoint = new Set(getProviderLeaseScope(store).leases.keys());
+    const previousKeyLease = store.potluckKeyConcurrencyLease;
+    try {
+        return await getApiServiceWithFallbackInternal(config, requestedModel, options);
+    } catch (error) {
+        await rollbackProviderLeases(checkpoint, store);
+        const keyLease = store.potluckKeyConcurrencyLease;
+        if (keyLease && keyLease !== previousKeyLease) {
+            store.potluckKeyConcurrencyLease = null;
+            await Promise.resolve().then(() => keyLease.release()).catch(() => {});
+        }
+        throw error;
+    }
+}
+
+async function getApiServiceWithFallbackInternal(config, requestedModel = null, options = {}) {
     // 1. 鍓嶇疆璺敱瑙ｆ瀽
     const { effectiveProvider, actualModelName, entryModelReason, requestedEntryModel } = await _resolveEffectiveRouting(config, requestedModel, options);
     config.MODEL_PROVIDER = effectiveProvider;

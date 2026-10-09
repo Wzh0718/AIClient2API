@@ -23,6 +23,7 @@ import {
 } from '../utils/codex-plan.js';
 import { getCodexQuotaApplicability, normalizeCodexRateLimitWindows } from '../utils/codex-rate-limit.js';
 import requestContext, { accumulateRoutingWait } from '../utils/context.js';
+import { getProviderLeaseScope, registerProviderLease, releaseProviderLease } from '../runtime/provider-lease-scope.js';
 import { SmoothWeightedRoundRobin } from './smooth-weighted-round-robin.js';
 import { performance } from 'node:perf_hooks';
 import { createProviderStateEvent, applyProviderStateEvent } from '../runtime/provider-state-event.js';
@@ -2067,6 +2068,7 @@ export class ProviderPoolManager {
     }
 
     async acquireSlotFromMixedPool(providerType, requestedModel = null, options = {}) {
+        const leaseScope = getProviderLeaseScope();
         const mixedPool = this._getMixedProviderPoolConfig(providerType, requestedModel);
         if (!mixedPool) return null;
 
@@ -2113,9 +2115,7 @@ export class ProviderPoolManager {
                 await this.coordination.release(lease.leaseId);
                 return null;
             }
-            const store = requestContext.getStore();
-            store.providerLeases = store.providerLeases || new Map();
-            store.providerLeases.set(`${lease.providerType}:${lease.uuid}`, lease.leaseId);
+            await registerProviderLease(leaseScope, this.coordination, lease, requestedModel);
             selected.config.lastUsed = new Date().toISOString();
             return {
                 config: selected.config,
@@ -2536,6 +2536,7 @@ export class ProviderPoolManager {
      * @param {object} options 
      */
     async acquireSlot(providerType, requestedModel = null, options = {}) {
+        const leaseScope = getProviderLeaseScope();
         if (this.coordination) {
             await this._hydrateCodexPoolSnapshot(providerType, this.providerStatus[providerType] || [], requestedModel);
             const healthyProviders = await this._getHealthyProvidersForType(providerType, requestedModel, options);
@@ -2581,9 +2582,7 @@ export class ProviderPoolManager {
                 await this.coordination.release(lease.leaseId);
                 return null;
             }
-            const store = requestContext.getStore();
-            store.providerLeases = store.providerLeases || new Map();
-            store.providerLeases.set(`${lease.providerType}:${lease.uuid}`, lease.leaseId);
+            await registerProviderLease(leaseScope, this.coordination, lease, requestedModel);
             selected.config.lastUsed = new Date().toISOString();
             if (!options.skipUsageCount) {
                 selected.config.usageCount = (selected.config.usageCount || 0) + 1;
@@ -2673,15 +2672,7 @@ export class ProviderPoolManager {
         }
 
         if (this.coordination) {
-            const leases = requestContext.get('providerLeases');
-            const key = `${providerType}:${uuid}`;
-            const leaseId = leases?.get(key);
-            if (!leaseId) return false;
-            leases.delete(key);
-            const released = this.coordination.release(leaseId).catch(error => {
-                this._log('warn', `[Coordination] Lease release deferred to TTL for ${key}: ${error.message}`);
-                return false;
-            });
+            const released = releaseProviderLease(providerType, uuid);
             this._notifyGeminiElasticWaiters(providerType);
             return released;
         }

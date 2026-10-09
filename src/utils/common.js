@@ -4077,7 +4077,7 @@ export function handleError(res, error, provider = null, fromProvider = null, re
     const errorPayload = {
         error: {
             message: errorMessage,
-            code: statusCode,
+            code: error.code === 'PROVIDER_CONCURRENCY_EXHAUSTED' ? error.code : statusCode,
             suggestions: suggestions,
             details: error.response?.data
         }
@@ -4423,7 +4423,7 @@ export function createErrorResponse(error, fromProvider) {
                 error: {
                     message: errorMessage,
                     type: getErrorType(statusCode),
-                    code: getErrorType(statusCode),  // OpenAI 使用 code 字段作为核心判断
+                    code: error.code === 'PROVIDER_CONCURRENCY_EXHAUSTED' ? error.code : getErrorType(statusCode),
                     ...quotaMetadata
                 }
             };
@@ -4434,7 +4434,7 @@ export function createErrorResponse(error, fromProvider) {
                 error: {
                     type: getErrorType(statusCode),
                     message: errorMessage,
-                    code: getErrorType(statusCode),
+                    code: error.code === 'PROVIDER_CONCURRENCY_EXHAUSTED' ? error.code : getErrorType(statusCode),
                     ...quotaMetadata
                 }
             };
