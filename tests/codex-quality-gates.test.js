@@ -379,8 +379,8 @@ describe('Codex proxy quality gates', () => {
         const service = createService();
         try {
             const state = { inboundHeaders: { version: '0.154.0' }, context: {}, ids: null };
-            expect(service.buildHeaders(null, false, state, 'gpt-6-luna').version).toBe('0.156.1');
-            expect(service.buildHeaders(null, false, state, 'gpt-6-sol').version).toBe('0.156.1');
+            expect(service.buildHeaders(null, false, state, 'gpt-6-luna').version).toBe('0.162.0');
+            expect(service.buildHeaders(null, false, state, 'gpt-6-sol').version).toBe('0.162.0');
             expect(service.buildHeaders(null, false, state, 'gpt-6-astra').version).toBe('0.154.0');
             expect(service.buildHeaders(null, false, {
                 ...state, inboundHeaders: { version: '0.157.0' }

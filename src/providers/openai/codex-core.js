@@ -53,7 +53,7 @@ import { beginRequestAttempt, finishRequestAttempt } from '../../utils/request-a
 
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
 const CODEX_MODELS = getCodexModelIds(baseModels);
-const CODEX_VERSION = '0.156.1';
+const CODEX_VERSION = '0.162.0';
 function codexVersionForModel(model, version) {
     if (!/^gpt-6-(?:sol|luna)$/i.test(model)) return version;
     const parts = String(version).match(/^(\d+)\.(\d+)\.(\d+)/);
@@ -903,7 +903,7 @@ export class CodexApiService {
         ]) {
             const value = getInboundHeader(name);
             if (value !== undefined && value !== null && String(value).trim()) {
-                headers[name] = String(value);
+                headers[name] = name === 'thread-id' ? this.toSafeCacheHeaderValue(value) : String(value);
             }
         }
         // 入站兼容多种 session header，出站只保留 canonical Session-Id。
@@ -912,12 +912,12 @@ export class CodexApiService {
             .find(value => value !== undefined && value !== null && String(value).trim());
         const sessionHeader = inboundSession || cacheId;
         if (sessionHeader) {
-            headers['Session-Id'] = String(sessionHeader);
+            headers['Session-Id'] = this.toSafeCacheHeaderValue(sessionHeader);
         }
 
         // 设置 Conversation_id；prompt_cache_key 继续保留并参与现有 sticky/cache 逻辑。
         if (cacheId) {
-            headers['Conversation_id'] = cacheId;
+            headers['Conversation_id'] = this.toSafeCacheHeaderValue(cacheId);
         }
 
         // 必须最后改写，让账号级指纹覆盖入站身份，同时维持唯一 canonical Session-Id。
@@ -1655,6 +1655,12 @@ export class CodexApiService {
             clearInterval(this.cleanupInterval);
             this.cleanupInterval = null;
         }
+    }
+
+    toSafeCacheHeaderValue(cacheKey) {
+        const value = String(cacheKey);
+        if (/^[\x21-\x7E]{1,256}$/.test(value)) return value;
+        return `aic2a-${crypto.createHash('sha256').update(value).digest('hex').slice(0, 32)}`;
     }
 
     buildUsageHeaders() {

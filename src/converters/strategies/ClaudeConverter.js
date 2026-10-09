@@ -898,6 +898,15 @@ export class ClaudeConverter extends BaseConverter {
 
         // 处理消息
         if (Array.isArray(claudeRequest.messages)) {
+            const toolUseNameMap = new Map();
+            for (const message of claudeRequest.messages) {
+                if (!Array.isArray(message?.content)) continue;
+                for (const block of message.content) {
+                    if (block?.type === 'tool_use' && block.id && block.name) {
+                        toolUseNameMap.set(block.id, block.name);
+                    }
+                }
+            }
             claudeRequest.messages.forEach(message => {
                 if (!message || typeof message !== 'object' || !message.role) {
                     logger.warn("Skipping invalid message in claudeRequest.messages.");
@@ -1000,7 +1009,9 @@ export class ClaudeConverter extends BaseConverter {
                                     
                                     // 检查是否有缓存的 tool_id -> name 映射
                                     // 格式通常是 "funcName-uuid" 或 "toolu_xxx"
-                                    if (toolCallId.startsWith('toolu_')) {
+                                    if (toolUseNameMap.has(toolCallId)) {
+                                        funcName = toolUseNameMap.get(toolCallId);
+                                    } else if (toolCallId.startsWith('toolu_')) {
                                         // Claude 格式的 tool_use_id，需要从上下文中查找函数名
                                         // 这里我们保留原始 ID 作为 name（Gemini 会处理）
                                         funcName = toolCallId;
@@ -1014,16 +1025,25 @@ export class ClaudeConverter extends BaseConverter {
                                     
                                     // 获取响应数据
                                     let responseData = block.content;
+                                    const imageParts = [];
                                     
                                     // 的 tool_result_compressor 逻辑
                                     // 处理嵌套的 content 数组（如图片等）
                                     if (Array.isArray(responseData)) {
-                                        // 提取文本内容
-                                        const textParts = responseData
-                                            .filter(item => item && item.type === 'text')
-                                            .map(item => item.text)
-                                            .join('\n');
-                                        responseData = textParts || JSON.stringify(responseData);
+                                        const remaining = responseData.filter(item => {
+                                            if (item?.type !== 'image' || item.source?.type !== 'base64' || !item.source.data) {
+                                                return true;
+                                            }
+                                            imageParts.push({ inlineData: {
+                                                mimeType: item.source.media_type || 'image/jpeg',
+                                                data: item.source.data
+                                            } });
+                                            return false;
+                                        });
+                                        // Preserve URL images and unknown blocks even alongside text.
+                                        responseData = remaining.every(item => item?.type === 'text')
+                                            ? remaining.map(item => item.text).join('\n')
+                                            : JSON.stringify(remaining);
                                     } else if (typeof responseData !== 'string') {
                                         responseData = JSON.stringify(responseData);
                                     }
@@ -1038,6 +1058,7 @@ export class ClaudeConverter extends BaseConverter {
                                             }
                                         }
                                     });
+                                    parts.push(...imageParts);
                                 }
                                 break;
                                 
@@ -1103,6 +1124,8 @@ export class ClaudeConverter extends BaseConverter {
         }
 
         // 处理工具 - 使用 parametersJsonSchema 格式
+        const declaredFunctionNames = new Set();
+        const disableNativeTools = claudeRequest.tool_choice?.type === 'none';
         if (Array.isArray(claudeRequest.tools) && claudeRequest.tools.length > 0) {
             const functionDeclarations = [];
             let googleSearchTool = null;
@@ -1115,19 +1138,17 @@ export class ClaudeConverter extends BaseConverter {
                     return;
                 }
 
-                // 处理 google_search 扩展
-                if (tool.google_search) {
-                    googleSearchTool = tool.google_search;
+                if (typeof tool.type === 'string' && tool.type.startsWith('web_search')) {
+                    if (!disableNativeTools) googleSearchTool = googleSearchTool || {};
+                    return;
                 }
-
-                // 处理 url_context 扩展
-                if (tool.url_context) {
-                    urlContextTool = tool.url_context;
-                }
-
-                // 处理 google_maps 扩展
-                if (tool.googleMaps) {
-                    googleMapsTool = tool.googleMaps;
+                if (tool.google_search || tool.url_context || tool.googleMaps) {
+                    if (!disableNativeTools) {
+                        if (tool.google_search) googleSearchTool = tool.google_search;
+                        if (tool.url_context) urlContextTool = tool.url_context;
+                        if (tool.googleMaps) googleMapsTool = tool.googleMaps;
+                    }
+                    return;
                 }
 
                 // 如果没有名称且不是上述扩展，则跳过函数处理
@@ -1158,6 +1179,7 @@ export class ClaudeConverter extends BaseConverter {
                 }
                 
                 functionDeclarations.push(funcDecl);
+                declaredFunctionNames.add(funcDecl.name);
             });
             
             if (functionDeclarations.length > 0 || googleSearchTool || urlContextTool || googleMapsTool) {
@@ -1179,7 +1201,7 @@ export class ClaudeConverter extends BaseConverter {
 
         // 处理tool_choice
         if (claudeRequest.tool_choice) {
-            geminiRequest.toolConfig = this.buildGeminiToolConfigFromClaude(claudeRequest.tool_choice);
+            geminiRequest.toolConfig = this.buildGeminiToolConfigFromClaude(claudeRequest.tool_choice, declaredFunctionNames);
         }
 
         // 添加默认安全设置
@@ -1555,7 +1577,7 @@ export class ClaudeConverter extends BaseConverter {
     /**
      * 构建Gemini工具配置
      */
-    buildGeminiToolConfigFromClaude(claudeToolChoice) {
+    buildGeminiToolConfigFromClaude(claudeToolChoice, declaredFunctionNames = null) {
         if (!claudeToolChoice || typeof claudeToolChoice !== 'object' || !claudeToolChoice.type) {
             logger.warn("Invalid claudeToolChoice provided.");
             return undefined;
@@ -1568,6 +1590,9 @@ export class ClaudeConverter extends BaseConverter {
                 return { functionCallingConfig: { mode: 'NONE' } };
             case 'tool':
                 if (claudeToolChoice.name && typeof claudeToolChoice.name === 'string') {
+                    if (declaredFunctionNames && !declaredFunctionNames.has(claudeToolChoice.name)) {
+                        throw new Error(`Gemini cannot force tool '${claudeToolChoice.name}' because it has no matching FunctionDeclaration. Native server-side tools require automatic selection.`);
+                    }
                     return { 
                         functionCallingConfig: { 
                             mode: 'ANY', 

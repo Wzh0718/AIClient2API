@@ -35,14 +35,64 @@ afterEach(() => {
 });
 
 describe('Codex session cache key handling', () => {
+    test.each(['会话标识', 'control\r\nvalue', 'x'.repeat(257), 'space key'])('encodes unsafe headers without changing the explicit body cache key: %s', async key => {
+        const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
+        try {
+            const body = await service.prepareRequestBody('gpt-6-sol', { prompt_cache_key: key, input: [] }, false);
+            const headers = service.buildHeaders(body.prompt_cache_key, false, { inboundHeaders: { 'session-id': key, 'thread-id': key } });
+            expect(body.prompt_cache_key).toBe(key);
+            expect(headers.Conversation_id).toMatch(/^aic2a-[a-f0-9]{32}$/);
+            expect(headers['Session-Id']).toBe(headers.Conversation_id);
+            expect(headers['thread-id']).toBe(headers.Conversation_id);
+            expect(service.buildHeaders(key).Conversation_id).toBe(headers.Conversation_id);
+        } finally { service.stopCacheCleanup(); }
+    });
+
+    test('retains safe ASCII values at the length boundary', () => {
+        const service = new CodexApiService({});
+        try {
+            for (const key of ['a', 'x'.repeat(256)]) {
+                const headers = service.buildHeaders(key, true, { inboundHeaders: { session_id: key, 'thread-id': key } });
+                expect(headers.Conversation_id).toBe(key);
+                expect(headers['Session-Id']).toBe(key);
+                expect(headers['thread-id']).toBe(key);
+                expect(headers.session_id).toBeUndefined();
+            }
+        } finally { service.stopCacheCleanup(); }
+    });
+
+    test.each(['device', 'full'])('preserves the final fingerprint override order in %s mode', mode => {
+        const service = new CodexApiService({});
+        const ids = { mode, installationId: 'installation', sessionId: 'account-session', threadId: 'account-thread', windowId: 'window' };
+        try {
+            const headers = service.buildHeaders('缓存', true, { ids, inboundHeaders: { session_id: '会话', 'thread-id': '线程' } });
+            expect(headers.Conversation_id).toBe(service.toSafeCacheHeaderValue('缓存'));
+            expect(headers['Session-Id']).toBe(mode === 'device' ? service.toSafeCacheHeaderValue('会话') : ids.sessionId);
+            expect(headers['thread-id']).toBe(mode === 'device' ? service.toSafeCacheHeaderValue('线程') : ids.threadId);
+            expect(headers['x-codex-installation-id']).toBe(ids.installationId);
+        } finally { service.stopCacheCleanup(); }
+    });
+
+    test('retains configured and inbound client versions and user agents', () => {
+        const configured = new CodexApiService({ CODEX_VERSION: '0.163.0', CODEX_USER_AGENT: 'configured-agent' });
+        const inbound = new CodexApiService({});
+        const state = { inboundHeaders: { version: '0.164.0', 'user-agent': 'inbound-agent' } };
+        try {
+            expect(configured.buildHeaders(null, false, state)).toMatchObject({ version: '0.163.0', 'user-agent': 'configured-agent' });
+            expect(inbound.buildHeaders(null, false, state)).toMatchObject({ version: '0.164.0', 'user-agent': 'inbound-agent' });
+            expect(inbound.buildHeaders(null, false, { inboundHeaders: { version: '0.154.0' } }, 'gpt-6-luna').version).toBe('0.162.0');
+        } finally { configured.stopCacheCleanup(); inbound.stopCacheCleanup(); }
+    });
+
     test('uses the upstream Codex client version required for GPT-6 Sol and Luna', () => {
         const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
 
         try {
             const headers = service.buildHeaders(null, false);
 
-            expect(headers.version).toBe('0.156.1');
-            expect(headers['user-agent']).toContain('codex-tui/0.156.1');
+            expect(headers.version).toBe('0.162.0');
+            expect(headers['user-agent']).toContain('codex-tui/0.162.0');
+            expect(service.buildUsageHeaders()['user-agent']).toContain('codex-tui/0.162.0');
         } finally {
             service.stopCacheCleanup();
         }
