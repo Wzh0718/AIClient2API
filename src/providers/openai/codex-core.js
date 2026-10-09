@@ -37,7 +37,7 @@ import requestContext from '../../utils/context.js';
 import { performance } from 'node:perf_hooks';
 import { getCodexOverloadRetryDelayMs, getCodexOverloadRetryMaxAttempts, getCodexRetryDelayMs, shouldRetryCodex429 } from './codex-retry-policy.js';
 import { extractPersistedCodexSubscriptionWindow, mergeCodexSubscriptionWindow } from '../../utils/codex-utils.js';
-import { getCodexModelIds, sanitizeCodexModelParameters, normalizeCodexReasoningEffort, resolveCodexOutboundModel, isCodexGpt6OverrideApplied } from './codex-model-capabilities.js';
+import { getCodexModelIds, sanitizeCodexModelParameters, normalizeCodexReasoningEffort, resolveCodexOutboundModel, isCodexGpt6OverrideApplied, isGpt61SolModel } from './codex-model-capabilities.js';
 import {
     CODEX_TURN_STATE_HEADER,
     REUSABLE_CODEX_TURN_STATE_BYTES,
@@ -1150,7 +1150,10 @@ export class CodexApiService {
                 : (cleanedBody.service_tier || defaultServiceTier),
             reasoning: {
                 ...cleanedBody.reasoning,
-                effort: normalizeCodexReasoningEffort(effectiveUpstreamModel, cleanedBody.reasoning?.effort, isSpeedModel) || defaultReasoningEffort,
+                effort: normalizeCodexReasoningEffort(effectiveUpstreamModel,
+                    isGpt61SolModel(effectiveUpstreamModel)
+                        ? (cleanedBody.reasoning?.effort ?? cleanedBody.reasoning_effort)
+                        : cleanedBody.reasoning?.effort, isSpeedModel) || defaultReasoningEffort,
                 summary: cleanedBody.reasoning?.summary || 'auto'
             },
             stream,
@@ -1165,6 +1168,7 @@ export class CodexApiService {
         }
 
         delete result.messages;
+        if (isGpt61SolModel(effectiveUpstreamModel)) delete result.reasoning_effort;
 
         if (!["default", "priority", "fast", "ultrafast"].includes(result.service_tier)) {
             delete result.service_tier;

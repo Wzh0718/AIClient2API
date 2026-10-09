@@ -7,6 +7,7 @@ import {
     getConversionModels,
     getPricingDiagnostics,
     normalizeConversionModel,
+    PRICING_VERSION,
     resetPricingDiagnostics
 } from '../src/plugins/api-potluck/cost-estimator.js';
 
@@ -38,7 +39,7 @@ describe('api potluck cost estimator', () => {
         expect(cost.actualUsd).toBeCloseTo(1.065, 6);
         expect(cost.convertedUsd).toBeCloseTo(0.496, 6);
         expect(cost.conversionModel).toBe('gemini-2.5-flash');
-        expect(cost.pricingVersion).toBe('official-2026-09-28-agy-3.5-flash-lite-r1');
+        expect(cost.pricingVersion).toBe(PRICING_VERSION);
         expect(cost.missingPriceTokens).toBe(0);
     });
 

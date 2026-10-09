@@ -1,5 +1,5 @@
 {
-    "pricingVersion": "official-2026-09-28-agy-3.5-flash-lite-r1",
+    "pricingVersion": "official-2026-10-09-gpt61-sol-r1",
     "longContext": {
         "threshold": 275000,
         "inputMultiplier": 1.0,
@@ -15,6 +15,7 @@
         "gpt-5.4-mini": { "input": 0.75, "cachedInput": 0.075, "output": 4.50, "provider": "openai", "source": "official" },
         "gpt-6-astra": { "input": 10.00, "cachedInput": 1.00, "output": 50.00, "provider": "openai", "source": "official" },
         "gpt-6-sol": { "input": 2.00, "cachedInput": 0.20, "output": 10.00, "provider": "openai", "source": "official:2026-09-22" },
+        "gpt-6.1-sol": { "input": 2.00, "cachedInput": 0.10, "output": 10.00, "provider": "openai", "source": "official:2026-10-09" },
         "gpt-6-luna": { "input": 0.10, "cachedInput": 0.01, "output": 0.50, "provider": "openai", "source": "official:2026-09-22" },
         "gpt-5.4-nano": { "input": 0.20, "cachedInput": 0.02, "output": 1.25, "provider": "openai", "source": "official" },
         "gpt-5.3-codex": { "input": 1.75, "cachedInput": 0.175, "output": 14.00, "provider": "openai", "source": "official" },
@@ -88,6 +89,8 @@
         "gpt-image-2.5-sunburst-fast": { "baseModel": "gpt-image-2.5-sunburst", "multiplier": 1.0, "source": "temporary:historical-fast-base-price" },
         "gpt-6-astra-fast": { "baseModel": "gpt-6-astra", "multiplier": 2.0, "source": "official:fast-mode" },
         "gpt-5.6-sol-ultrafast": { "baseModel": "gpt-5.6-sol", "multiplier": 2.5, "source": "codex:ultrafast-same-as-fast" },
-        "gpt-6-astra-ultrafast": { "baseModel": "gpt-6-astra", "multiplier": 2.0, "source": "codex:ultrafast-same-as-fast" }
+        "gpt-6-astra-ultrafast": { "baseModel": "gpt-6-astra", "multiplier": 2.0, "source": "codex:ultrafast-same-as-fast" },
+        "gpt-6.1-sol-fast": { "baseModel": "gpt-6.1-sol", "multiplier": 2.0, "source": "official:2026-10-09-fast-mode" },
+        "gpt-6.1-sol-ultrafast": { "baseModel": "gpt-6.1-sol", "multiplier": 6.0, "source": "official:2026-10-09-ultrafast-mode" }
     }
 }
