@@ -15,7 +15,7 @@ import {
     getSafeUpstreamErrorDiagnostic,
     normalizeProviderErrorMessage
 } from '../../utils/common.js';
-import {isSupportedGptImageModel} from '../../utils/constants.js';
+import {isSupportedGptImageModel, resolveGptImageModelAlias} from '../../utils/constants.js';
 import {getProxyConfigForProvider} from '../../utils/proxy-utils.js';
 import {getProviderModels} from '../provider-models.js';
 import {
@@ -63,7 +63,7 @@ function codexVersionForModel(model, version) {
         ? version
         : CODEX_VERSION;
 }
-export const IMAGE_MODELS = new Set(['gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst']);
+export const IMAGE_MODELS = new Set(['gpt-image-2', 'gpt-image-2.5', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst']);
 const IMAGE_GENERATION_FUNCTION_NAMES = new Set(['image_gen.imagegen', 'image_gen__imagegen']);
 const IMAGE_TOOL_STRING_FIELDS = ['size', 'quality', 'background', 'output_format', 'input_fidelity', 'moderation'];
 const IMAGE_TOOL_NUMERIC_FIELDS = ['output_compression', 'partial_images'];
@@ -1021,12 +1021,12 @@ export class CodexApiService {
         const isSpeedModel = isUltraFastModel || isFastModel;
         const upstreamModel = isSpeedModel
             ? normalizedModel.replace(/-(?:fast|ultrafast)$/i, '')
-            : normalizedModel;
+            : resolveGptImageModelAlias(normalizedModel);
         const defaultServiceTier = isUltraFastModel ? 'ultrafast' : isFastModel ? 'priority' : 'default';
         const defaultReasoningEffort = isSpeedModel ? 'xhigh' : 'medium';
 
         // 图像生成模型：gpt-image-2 / Image 2.5 通过 image_generation 工具 + gpt-6-luna 实现
-        const isImageModel = isSupportedGptImageModel(upstreamModel);
+        const isImageModel = isSupportedGptImageModel(upstreamModel) && upstreamModel !== 'gpt-image-2.5';
         const effectiveUpstreamModel = isImageModel
             ? 'gpt-6-luna'
             : resolveCodexOutboundModel(upstreamModel, this.config);

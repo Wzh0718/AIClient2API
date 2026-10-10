@@ -39,7 +39,7 @@ function provider(uuid, overrides = {}) {
         customName: uuid,
         codexAccountKey: `account-${uuid}`,
         lastKnownCodexPlan: 'pro',
-        supportedModels: ['gpt-5.4-mini', 'gpt-5.6-luna'],
+        supportedModels: ['gpt-6-sol', 'gpt-6-luna'],
         ...overrides
     };
 }
@@ -92,6 +92,37 @@ async function initialize(config) {
     return getProviderPoolManager();
 }
 
+test('resolves Image 2.5 before credential selection and retains alias audit metadata', async () => {
+    writeGroupConfig({ groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }], keyAssignments: [] });
+    const config = createConfig({
+        providers: [provider('codex-a', { supportedModels: ['gpt-image-2.5-flare'] })],
+        keyData: { routingMode: 'fixed', fixedCredential: { providerType, uuid: 'codex-a' } }
+    });
+    const manager = await initialize(config);
+    const selectSpy = jest.spyOn(manager, 'selectProviderWithFallback');
+    const result = await getApiServiceWithFallback(config, 'gpt-image-2.5');
+    expect(selectSpy.mock.calls[0][1]).toBe('gpt-image-2.5-flare');
+    expect(result).toMatchObject({
+        actualModel: 'gpt-image-2.5-flare',
+        modelFallbackFrom: 'gpt-image-2.5',
+        modelFallbackTo: 'gpt-image-2.5-flare',
+        modelFallbackReason: 'IMAGE_MODEL_ALIAS'
+    });
+    expect(config._codexRouting).toMatchObject({
+        modelFallbackFrom: 'gpt-image-2.5', modelFallbackTo: 'gpt-image-2.5-flare'
+    });
+});
+
+test.each(['gpt-image-2.5-fast', 'gpt-image-2.5-ultrafast'])(
+    'rejects unsupported Image 2.5 speed alias %s before selecting credentials', async model => {
+        const config = createConfig();
+        const manager = await initialize(config);
+        const selectSpy = jest.spyOn(manager, 'selectProviderWithFallback');
+        await expect(getApiServiceWithFallback(config, model)).rejects.toThrow('不支持的模型');
+        expect(selectSpy).not.toHaveBeenCalled();
+    }
+);
+
 beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aiclient2api-credential-groups-'));
     groupFilePath = path.join(tempDir, 'codex-credential-groups.json');
@@ -136,8 +167,8 @@ describe('Service Manager Codex credential-group routing', () => {
             return { config: provider(uuid), actualProviderType: providerType, isFallback: false };
         });
 
-        const first = await getApiServiceWithFallback(config, 'gpt-5.6-luna');
-        const again = await getApiServiceWithFallback(config, 'gpt-5.6-luna');
+        const first = await getApiServiceWithFallback(config, 'gpt-6-luna');
+        const again = await getApiServiceWithFallback(config, 'gpt-6-luna');
         expect(first.uuid).toBe('codex-a');
         expect(again.uuid).toBe('codex-a');
         expect(calls).toEqual([['codex-a', 'codex-c'], ['codex-a', 'codex-c']]);
@@ -145,17 +176,17 @@ describe('Service Manager Codex credential-group routing', () => {
             routingMode: 'restricted', selectedProviderUuid: 'codex-a',
             restrictedCredentialUuids: ['codex-a', 'codex-c'], consistencyStatus: 'consistent'
         });
-        const retry = await getApiServiceWithFallback(config, 'gpt-5.6-luna', {
+        const retry = await getApiServiceWithFallback(config, 'gpt-6-luna', {
             excludeProviderUuids: ['codex-a']
         });
         expect(retry.uuid).toBe('codex-c');
         expect(calls.at(-1)).toEqual(['codex-a', 'codex-c']);
         manager.providerStatus[providerType].find(item => item.uuid === 'codex-a').config.isHealthy = false;
-        const fallback = await getApiServiceWithFallback(config, 'gpt-5.6-luna');
+        const fallback = await getApiServiceWithFallback(config, 'gpt-6-luna');
         expect(fallback.uuid).toBe('codex-c');
         expect(calls.at(-1)).toEqual(['codex-c']);
         manager.providerStatus[providerType].find(item => item.uuid === 'codex-c').config.isHealthy = false;
-        await expect(getApiServiceWithFallback(config, 'gpt-5.6-luna')).rejects.toMatchObject({
+        await expect(getApiServiceWithFallback(config, 'gpt-6-luna')).rejects.toMatchObject({
             code: 'RESTRICTED_CREDENTIALS_UNAVAILABLE', status: 503
         });
         expect(calls).toHaveLength(4);
@@ -179,7 +210,7 @@ describe('Service Manager Codex credential-group routing', () => {
         jest.spyOn(manager, 'selectProviderWithFallback').mockResolvedValue({
             config: provider('codex-b'), actualProviderType: providerType, isFallback: false
         });
-        await expect(getApiServiceWithFallback(config, 'gpt-5.6-luna')).rejects.toMatchObject({
+        await expect(getApiServiceWithFallback(config, 'gpt-6-luna')).rejects.toMatchObject({
             code: 'RESTRICTED_CREDENTIALS_UNAVAILABLE', status: 503
         });
     });
@@ -212,7 +243,7 @@ describe('Service Manager Codex credential-group routing', () => {
             });
 
         const startedAt = Date.now();
-        const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini', { acquireSlot: true });
+        const result = await getApiServiceWithFallback(config, 'gpt-6-sol', { acquireSlot: true });
 
         expect(result.uuid).toBe('codex-a');
         expect(selectSpy).toHaveBeenCalledTimes(2);
@@ -252,7 +283,7 @@ describe('Service Manager Codex credential-group routing', () => {
                 isFallback: false
             });
 
-        const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini', { acquireSlot: true });
+        const result = await getApiServiceWithFallback(config, 'gpt-6-sol', { acquireSlot: true });
 
         expect(result.uuid).toBe('codex-b');
         expect(selectSpy).toHaveBeenCalledTimes(3);
@@ -287,11 +318,11 @@ describe('Service Manager Codex credential-group routing', () => {
 
         expect(basicService.providerUuid).toBe('codex-b');
         expect(detailed.uuid).toBe('codex-b');
-        expect(detailed.actualModel).toBe('gpt-5.6-luna');
+        expect(detailed.actualModel).toBe('gpt-6-luna');
         expect(detailed.modelFallbackReason).toBe('SPARK_ALIAS');
         expect(selectSpy).toHaveBeenCalledTimes(2);
         for (const call of selectSpy.mock.calls) {
-            expect(call[1]).toBe('gpt-5.6-luna');
+            expect(call[1]).toBe('gpt-6-luna');
             expect(call[2]).toMatchObject({
                 allowedProviderUuids: ['codex-b'],
                 disableProviderFallback: true
@@ -334,12 +365,12 @@ describe('Service Manager Codex credential-group routing', () => {
 
         const result = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark');
 
-        expect(selectSpy.mock.calls[0][1]).toBe('gpt-5.6-luna');
+        expect(selectSpy.mock.calls[0][1]).toBe('gpt-6-luna');
         expect(result).toMatchObject({
             uuid: 'codex-a',
-            actualModel: 'gpt-5.6-luna',
+            actualModel: 'gpt-6-luna',
             modelFallbackFrom: 'gpt-5.3-codex-spark',
-            modelFallbackTo: 'gpt-5.6-luna',
+            modelFallbackTo: 'gpt-6-luna',
             modelFallbackReason: 'SPARK_ALIAS'
         });
     });
@@ -364,7 +395,7 @@ describe('Service Manager Codex credential-group routing', () => {
         });
         await initialize(config);
 
-        const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
+        const result = await getApiServiceWithFallback(config, 'gpt-6-sol');
 
         expect(result.uuid).toBe('codex-b');
         expect(config._codexRouting).toMatchObject({
@@ -389,7 +420,7 @@ describe('Service Manager Codex credential-group routing', () => {
         });
         await initialize(config);
 
-        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toMatchObject({
+        await expect(getApiServiceWithFallback(config, 'gpt-6-sol')).rejects.toMatchObject({
             code: 'ROUTE_MISMATCH',
             status: 503,
             details: expect.objectContaining({ reason: 'FIXED_CREDENTIAL_NOT_IN_GROUP' })
@@ -418,7 +449,7 @@ describe('Service Manager Codex credential-group routing', () => {
         }
 
         const options = caseName === 'concurrency exhausted' ? { acquireSlot: true } : {};
-        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini', options)).rejects.toMatchObject({
+        await expect(getApiServiceWithFallback(config, 'gpt-6-sol', options)).rejects.toMatchObject({
             code: 'FIXED_CREDENTIAL_UNAVAILABLE'
         });
         expect(config._codexRouting).toMatchObject({
@@ -443,7 +474,7 @@ describe('Service Manager Codex credential-group routing', () => {
         });
         await initialize(config);
 
-        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toMatchObject({
+        await expect(getApiServiceWithFallback(config, 'gpt-6-sol')).rejects.toMatchObject({
             code: 'MODEL_NOT_SUPPORTED',
             status: 404
         });
@@ -472,7 +503,7 @@ describe('Service Manager Codex credential-group routing', () => {
             scheduledRecoveryTime: recoveryTime
         });
 
-        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toMatchObject({
+        await expect(getApiServiceWithFallback(config, 'gpt-6-sol')).rejects.toMatchObject({
             code: 'PROVIDER_COOLDOWN',
             status: 429,
             retryAfter: recoveryTime
@@ -503,7 +534,7 @@ describe('Service Manager Codex credential-group routing', () => {
             lastErrorMessage: 'expired cooldown'
         });
 
-        const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
+        const result = await getApiServiceWithFallback(config, 'gpt-6-sol');
 
         expect(result.uuid).toBe('codex-a');
         expect(config._codexRouting).toMatchObject({
@@ -527,7 +558,7 @@ describe('Service Manager Codex credential-group routing', () => {
         const manager = await initialize(config);
         const selectSpy = jest.spyOn(manager, 'selectProviderWithFallback');
 
-        const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
+        const result = await getApiServiceWithFallback(config, 'gpt-6-sol');
 
         expect(result.uuid).toBe('codex-b');
         expect(selectSpy.mock.calls.map(call => call[2].allowedProviderUuids)).toEqual([
@@ -601,7 +632,7 @@ describe('Service Manager Codex credential-group routing', () => {
             });
             await initialize(config);
 
-            const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
+            const result = await getApiServiceWithFallback(config, 'gpt-6-sol');
 
             expect(result.uuid).toBe('codex-b');
             expect(config._codexRouting).toMatchObject({
@@ -641,14 +672,14 @@ describe('Service Manager Codex credential-group routing', () => {
 
         const result = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark');
 
-        expect(selectSpy.mock.calls[0][1]).toBe('gpt-5.6-luna');
-        expect(result.actualModel).toBe('gpt-5.6-luna');
+        expect(selectSpy.mock.calls[0][1]).toBe('gpt-6-luna');
+        expect(result.actualModel).toBe('gpt-6-luna');
         expect(result.modelFallbackFrom).toBe('gpt-5.3-codex-spark');
-        expect(result.modelFallbackTo).toBe('gpt-5.6-luna');
+        expect(result.modelFallbackTo).toBe('gpt-6-luna');
         expect(result.modelFallbackReason).toBe('SPARK_ALIAS');
     });
 
-    test('maps Spark-fast requests to Luna-fast at entry', async () => {
+    test('maps Spark-fast requests to standard Luna at entry', async () => {
         writeGroupConfig({
             groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
             keyAssignments: [{ keyId: 'key-1', routingMode: 'auto', primaryGroupId: 'group-a' }]
@@ -663,11 +694,11 @@ describe('Service Manager Codex credential-group routing', () => {
 
         const result = await getApiServiceWithFallback(config, 'gpt-5.3-codex-spark-fast');
 
-        expect(selectSpy.mock.calls[0][1]).toBe('gpt-5.6-luna-fast');
+        expect(selectSpy.mock.calls[0][1]).toBe('gpt-6-luna');
         expect(result).toMatchObject({
-            actualModel: 'gpt-5.6-luna-fast',
+            actualModel: 'gpt-6-luna',
             modelFallbackFrom: 'gpt-5.3-codex-spark-fast',
-            modelFallbackTo: 'gpt-5.6-luna-fast',
+            modelFallbackTo: 'gpt-6-luna',
             modelFallbackReason: 'SPARK_ALIAS'
         });
     });
@@ -686,13 +717,13 @@ describe('Service Manager Codex credential-group routing', () => {
         });
         const manager = await initialize(firstConfig);
 
-        const first = await getApiServiceWithFallback(firstConfig, 'gpt-5.4-mini');
+        const first = await getApiServiceWithFallback(firstConfig, 'gpt-6-sol');
         expect(first.uuid).toBe('codex-b');
 
         manager.providerStatus[providerType].find(item => item.uuid === 'codex-a').config.isHealthy = true;
         const sameSessionConfig = createConfig({ sessionId: 'same-session' });
         sameSessionConfig.providerPools = firstConfig.providerPools;
-        const sameSession = await getApiServiceWithFallback(sameSessionConfig, 'gpt-5.4-mini');
+        const sameSession = await getApiServiceWithFallback(sameSessionConfig, 'gpt-6-sol');
         expect(sameSession.uuid).toBe('codex-b');
         expect(sameSessionConfig._codexRouting).toMatchObject({
             selectedGroupId: 'group-b',
@@ -701,7 +732,7 @@ describe('Service Manager Codex credential-group routing', () => {
 
         const newSessionConfig = createConfig({ sessionId: 'new-session' });
         newSessionConfig.providerPools = firstConfig.providerPools;
-        const newSession = await getApiServiceWithFallback(newSessionConfig, 'gpt-5.4-mini');
+        const newSession = await getApiServiceWithFallback(newSessionConfig, 'gpt-6-sol');
         expect(newSession.uuid).toBe('codex-a');
         expect(newSessionConfig._codexRouting).toMatchObject({
             selectedGroupId: 'group-a',
@@ -724,7 +755,7 @@ describe('Service Manager Codex credential-group routing', () => {
         const manager = await initialize(config);
         const selectSpy = jest.spyOn(manager, 'selectProviderWithFallback');
 
-        const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
+        const result = await getApiServiceWithFallback(config, 'gpt-6-sol');
 
         expect(['codex-a', 'codex-b']).toContain(result.uuid);
         expect(selectSpy).toHaveBeenCalledTimes(1);
@@ -748,7 +779,7 @@ describe('Service Manager Codex credential-group routing', () => {
         const manager = await initialize(config);
         const selectSpy = jest.spyOn(manager, 'selectProviderWithFallback');
 
-        const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
+        const result = await getApiServiceWithFallback(config, 'gpt-6-sol');
 
         expect(['codex-a', 'codex-b']).toContain(result.uuid);
         expect(selectSpy).toHaveBeenCalledTimes(1);
@@ -807,8 +838,8 @@ describe('Service Manager Codex credential-group routing', () => {
         });
         await initialize(config);
 
-        const first = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
-        const second = await getApiServiceWithFallback(config, 'gpt-5.4-mini', {
+        const first = await getApiServiceWithFallback(config, 'gpt-6-sol');
+        const second = await getApiServiceWithFallback(config, 'gpt-6-sol', {
             excludeProviderUuids: [first.uuid]
         });
 
@@ -832,23 +863,23 @@ describe('Service Manager Codex credential-group routing', () => {
         });
     });
 
-    test('pool routing does not process GPT-5.4 exhaustion as a model fallback', async () => {
+    test('pool routing does not process GPT-6 Sol exhaustion as a model fallback', async () => {
         writeGroupConfig({ groups: [], keyAssignments: [{ keyId: 'key-1', routingMode: 'pool' }] });
         const config = createConfig({
             providers: [
-                provider('codex-a', { notSupportedModels: ['gpt-5.4-mini'] }),
-                provider('codex-b', { notSupportedModels: ['gpt-5.4-mini'] })
+                provider('codex-a', { notSupportedModels: ['gpt-6-sol'] }),
+                provider('codex-b', { notSupportedModels: ['gpt-6-sol'] })
             ],
             keyData: { routingMode: 'pool' }
         });
         await initialize(config);
 
-        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toMatchObject({
+        await expect(getApiServiceWithFallback(config, 'gpt-6-sol')).rejects.toMatchObject({
             code: 'MODEL_NOT_SUPPORTED'
         });
     });
 
-    test('fixed routing sends 5.4 requests to GPT-5.4 Mini when the credential supports it', async () => {
+    test('fixed routing sends Sol requests to GPT-6 Sol when the credential supports it', async () => {
         writeGroupConfig({
             groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
             keyAssignments: [{
@@ -858,7 +889,7 @@ describe('Service Manager Codex credential-group routing', () => {
             }]
         });
         const config = createConfig({
-            providers: [provider('codex-a', { supportedModels: ['gpt-5.4-mini'] })],
+            providers: [provider('codex-a', { supportedModels: ['gpt-6-sol'] })],
             keyData: {
                 routingMode: 'fixed',
                 fixedCredential: { providerType, uuid: 'codex-a' }
@@ -866,12 +897,12 @@ describe('Service Manager Codex credential-group routing', () => {
         });
         await initialize(config);
 
-        const result = await getApiServiceWithFallback(config, 'gpt-5.4-mini');
+        const result = await getApiServiceWithFallback(config, 'gpt-6-sol');
 
-        expect(result).toMatchObject({ uuid: 'codex-a', actualModel: 'gpt-5.4-mini', isFallback: false });
+        expect(result).toMatchObject({ uuid: 'codex-a', actualModel: 'gpt-6-sol', isFallback: false });
     });
 
-    test('fixed routing fails closed when the credential does not support GPT-5.4 Mini', async () => {
+    test('fixed routing fails closed when the credential does not support GPT-6 Sol', async () => {
         writeGroupConfig({
             groups: [{ id: 'group-a', credentialUuids: ['codex-a'] }],
             keyAssignments: [{
@@ -881,7 +912,7 @@ describe('Service Manager Codex credential-group routing', () => {
             }]
         });
         const config = createConfig({
-            providers: [provider('codex-a', { supportedModels: ['gpt-5.6-luna'] })],
+            providers: [provider('codex-a', { supportedModels: ['gpt-6-luna'] })],
             keyData: {
                 routingMode: 'fixed',
                 fixedCredential: { providerType, uuid: 'codex-a' }
@@ -889,7 +920,7 @@ describe('Service Manager Codex credential-group routing', () => {
         });
         await initialize(config);
 
-        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toMatchObject({
+        await expect(getApiServiceWithFallback(config, 'gpt-6-sol')).rejects.toMatchObject({
             code: 'MODEL_NOT_SUPPORTED',
             status: 404
         });
@@ -907,7 +938,7 @@ describe('Service Manager Codex credential-group routing', () => {
                     'openai-custom': [{
                         uuid: 'openai-fallback',
                         customName: 'fallback',
-                        supportedModels: ['gpt-5.4-mini']
+                        supportedModels: ['gpt-6-sol']
                     }]
                 },
                 providerFallbackChain: {
@@ -918,12 +949,12 @@ describe('Service Manager Codex credential-group routing', () => {
         const manager = await initialize(config);
         const selectSpy = jest.spyOn(manager, 'selectProviderWithFallback');
 
-        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini')).rejects.toMatchObject({
+        await expect(getApiServiceWithFallback(config, 'gpt-6-sol')).rejects.toMatchObject({
             status: 503,
             code: 'PROVIDER_CREDENTIALS_UNAVAILABLE'
         });
         expect(selectSpy).toHaveBeenCalledTimes(1);
-        expect(selectSpy.mock.calls[0]).toEqual(expect.arrayContaining([providerType, 'gpt-5.4-mini']));
+        expect(selectSpy.mock.calls[0]).toEqual(expect.arrayContaining([providerType, 'gpt-6-sol']));
         expect(selectSpy.mock.calls[0][2]).toMatchObject({ disableProviderFallback: true });
     });
 
@@ -943,11 +974,11 @@ describe('Service Manager Codex credential-group routing', () => {
         });
         await initialize(config);
 
-        const first = await getApiServiceWithFallback(config, 'gpt-5.4-mini', { acquireSlot: true });
+        const first = await getApiServiceWithFallback(config, 'gpt-6-sol', { acquireSlot: true });
         expect(first).toBeTruthy();
 
         await expect(
-            getApiServiceWithFallback(config, 'gpt-5.4-mini', { acquireSlot: true })
+            getApiServiceWithFallback(config, 'gpt-6-sol', { acquireSlot: true })
         ).rejects.toMatchObject({ details: expect.objectContaining({ reason: 'key_capacity_exhausted' }) });
     });
 
@@ -962,7 +993,7 @@ describe('Service Manager Codex credential-group routing', () => {
         });
         await initialize(config);
 
-        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini', { acquireSlot: true })).resolves.toBeTruthy();
-        await expect(getApiServiceWithFallback(config, 'gpt-5.4-mini', { acquireSlot: true })).resolves.toBeTruthy();
+        await expect(getApiServiceWithFallback(config, 'gpt-6-sol', { acquireSlot: true })).resolves.toBeTruthy();
+        await expect(getApiServiceWithFallback(config, 'gpt-6-sol', { acquireSlot: true })).resolves.toBeTruthy();
     });
 });

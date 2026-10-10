@@ -110,6 +110,7 @@ function isSupportedCodexModel(providerType, model) {
     const models = getProviderModels(providerType);
     if (models.includes(model)) return true;
     return /-(?:fast|ultrafast)$/i.test(String(model || ''))
+        && !/^gpt-image-2\.5-(?:fast|ultrafast)$/i.test(String(model || ''))
         && models.includes(String(model).replace(/-(?:fast|ultrafast)$/i, ''));
 }
 
@@ -2046,11 +2047,11 @@ async function getApiServiceWithFallbackInternal(config, requestedModel = null, 
         config._codexRouting.unavailableProviderCount = Number(selectionDiagnostics.unavailableProviderCount || 0);
     }
 
-    const sparkAliasMetadata = entryModelReason === 'SPARK_ALIAS' && requestedEntryModel && actualModel
+    const aliasMetadata = ['SPARK_ALIAS', 'IMAGE_MODEL_ALIAS'].includes(entryModelReason) && requestedEntryModel && actualModel
         ? {
             modelFallbackFrom: requestedEntryModel,
             modelFallbackTo: actualModel,
-            modelFallbackReason: 'SPARK_ALIAS'
+            modelFallbackReason: entryModelReason
         }
         : {};
     const fallbackMetadata = isFallback && actualModel !== actualModelName
@@ -2059,7 +2060,7 @@ async function getApiServiceWithFallbackInternal(config, requestedModel = null, 
             modelFallbackTo: actualModel,
             modelFallbackReason: selectedModelFallbackReason || options.modelFallbackReason || 'MODEL_UNAVAILABLE'
         }
-        : sparkAliasMetadata;
+        : aliasMetadata;
     finalizeCodexRouteResult(config, {
         selectedProviderUuid: selectedUuid,
         actualProviderType,

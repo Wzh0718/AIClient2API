@@ -72,7 +72,7 @@ export function sanitizeCodexModelParameters(model, body = {}) {
 
 export function getCodexModelIds(baseModels = []) {
     const models = Array.isArray(baseModels) ? baseModels : [];
-    const speedModels = models.filter(model => !GPT6_SOL_LUNA_MODELS.has(model));
+    const speedModels = models.filter(model => !GPT6_SOL_LUNA_MODELS.has(model) && model !== 'gpt-image-2.5');
     const ultrafastModels = models.filter(model =>
         model === 'gpt-5.6-sol' || model === GPT6_ASTRA_MODEL || model === GPT61_SOL_MODEL
     );

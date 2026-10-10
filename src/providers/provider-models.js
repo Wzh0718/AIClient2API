@@ -141,6 +141,7 @@ export const PROVIDER_MODELS = {
         'gpt-6.1-sol',
         'gpt-6-luna',
         'gpt-image-2',
+        'gpt-image-2.5',
         'gpt-image-2.5-flare',
         'gpt-image-2.5-sunburst',
     ],

@@ -76,6 +76,7 @@ export const MODEL_PROVIDER = {
 // 图像生成模型常量
 export const SUPPORTED_IMAGE_MODELS = new Set([
     'gpt-image-2',
+    'gpt-image-2.5',
     'gpt-image-2.5-flare',
     'gpt-image-2.5-sunburst',
     'grok-imagine-image-quality',
@@ -88,8 +89,13 @@ export const SUPPORTED_IMAGE_MODELS = new Set([
 
 const GPT_IMAGE_25_SNAPSHOT = /^(gpt-image-2\.5-(?:flare|sunburst))(?:-\d{4}-\d{2}-\d{2})?$/;
 
-export function isSupportedGptImageModel(model) {
+export function resolveGptImageModelAlias(model) {
     const normalized = String(model || '').trim();
+    return normalized === 'gpt-image-2.5' ? 'gpt-image-2.5-flare' : normalized;
+}
+
+export function isSupportedGptImageModel(model) {
+    const normalized = resolveGptImageModelAlias(model);
     return normalized === 'gpt-image-2' || GPT_IMAGE_25_SNAPSHOT.test(normalized);
 }
 

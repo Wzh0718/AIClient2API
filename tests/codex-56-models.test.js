@@ -32,7 +32,10 @@ describe('codex 5.6 model registration', () => {
             'gpt-image-2.5-flare',
             'gpt-image-2.5-sunburst'
         ]));
-        expect(models).not.toContain('gpt-image-2.5');
+        expect(models).toContain('gpt-image-2.5');
+        expect(codexModels).toContain('gpt-image-2.5');
+        expect(codexModels).not.toContain('gpt-image-2.5-fast');
+        expect(codexModels).not.toContain('gpt-image-2.5-ultrafast');
         expect(models).not.toContain('gpt-image-2.5-flare-2026-09-08');
     });
 

@@ -1,3 +1,5 @@
+import { resolveGptImageModelAlias } from '../../utils/constants.js';
+
 // No implicit cross-model fallback. Callers must provide an explicit, scoped fallback.
 export const DEFAULT_CODEX_FALLBACK_MODEL = null;
 
@@ -29,6 +31,11 @@ export function resolveCodexEntryModel({
     preserveRequestedModel = false
 } = {}) {
     if (!model) return { actualModel: model, reason: null };
+
+    const imageAlias = resolveGptImageModelAlias(model);
+    if (String(model).trim() === 'gpt-image-2.5') {
+        return { actualModel: imageAlias, reason: 'IMAGE_MODEL_ALIAS' };
+    }
 
     const sparkAlias = resolveCodexSparkAlias(model);
     if (sparkAlias) {

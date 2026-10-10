@@ -6,6 +6,18 @@ import {
 } from '../src/providers/openai/codex-model-routing.js';
 
 describe('Codex entry model routing policy', () => {
+    test.each([false, true])('maps Image 2.5 to flare with preserveRequestedModel=%s', preserveRequestedModel => {
+        expect(resolveCodexEntryModel({
+            model: 'gpt-image-2.5', supported: false, preserveRequestedModel
+        })).toEqual({ actualModel: 'gpt-image-2.5-flare', reason: 'IMAGE_MODEL_ALIAS' });
+    });
+
+    test.each(['gpt-image-2.5-fast', 'gpt-image-2.5-ultrafast', 'gpt-image-2.5-2026-09-08'])(
+        'does not register an additional Image 2.5 alias %s', model => {
+            expect(() => resolveCodexEntryModel({ model, supported: false })).toThrow('不支持的模型');
+        }
+    );
+
     test.each(['gpt-5.4-mini', 'gpt-5.4-mini-fast'])(
         'rejects retired GPT-5.4 mini model %s',
         model => {

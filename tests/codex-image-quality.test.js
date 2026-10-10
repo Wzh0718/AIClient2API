@@ -47,6 +47,7 @@ describe('Codex image generation tool options', () => {
     });
 
     test.each([
+        ['gpt-image-2.5', 'gpt-image-2.5-flare'],
         ['gpt-image-2.5-flare', 'gpt-image-2.5-flare'],
         ['gpt-image-2.5-sunburst', 'gpt-image-2.5-sunburst'],
         ['gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-flare-2026-09-08'],
@@ -70,20 +71,24 @@ describe('Codex image generation tool options', () => {
         }
     });
 
-    test('does not treat flavorless gpt-image-2.5 as a hosted image model', async () => {
+    test('maps the public Image 2.5 alias to flare and preserves image options', async () => {
         const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
 
         try {
             const body = await service.prepareRequestBody('gpt-image-2.5', {
                 model: 'gpt-image-2.5',
+                _imageToolOptions: { size: '1024x1024', quality: 'high', background: 'transparent' },
                 input: [{
                     role: 'user',
                     content: [{ type: 'input_text', text: 'hello' }]
                 }]
             }, true);
 
-            expect(body.model).toBe('gpt-image-2.5');
-            expect(body.tools?.some(tool => tool.type === 'image_generation' && tool.model === 'gpt-image-2.5')).toBeFalsy();
+            expect(body.model).toBe('gpt-6-luna');
+            expect(body.tools).toEqual([{
+                type: 'image_generation', model: 'gpt-image-2.5-flare',
+                size: '1024x1024', quality: 'high', background: 'transparent'
+            }]);
         } finally {
             service.stopCacheCleanup();
         }

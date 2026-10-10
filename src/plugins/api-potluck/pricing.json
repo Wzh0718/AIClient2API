@@ -71,6 +71,7 @@
         "gemini-3.8-flash-high": "gemini-3.8-flash",
         "gemini-3.8-flash-medium": "gemini-3.8-flash",
         "gemini-3.8-flash-tiered": "gemini-3.8-flash",
+        "gpt-image-2.5": "gpt-image-2.5-flare",
         "gpt-image-2.5-flare-2026-09-08": "gpt-image-2.5-flare",
         "gpt-image-2.5-sunburst-2026-09-08": "gpt-image-2.5-sunburst"
     },

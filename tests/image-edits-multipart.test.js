@@ -219,10 +219,11 @@ describe('/v1/images/edits multipart handling', () => {
         });
     });
 
-    test('preserves multiple image[] files as multiple Codex input_image parts', async () => {
+    test.each(['gpt-image-2', 'gpt-image-2.5'])('preserves multiple image[] files for %s as multiple Codex input_image parts', async model => {
         const req = makeMultipartRequest([
-            { name: 'model', value: 'gpt-image-2' },
+            { name: 'model', value: model },
             { name: 'prompt', value: 'blend these references' },
+            { name: 'quality', value: 'high' },
             { name: 'image[]', file: true, filename: 'first.png', contentType: 'image/png', value: 'first-image' },
             { name: 'image[]', file: true, filename: 'second.png', contentType: 'image/png', value: 'second-image' }
         ]);
@@ -244,6 +245,8 @@ describe('/v1/images/edits multipart handling', () => {
         expect(mockGenerateContent).toHaveBeenCalledTimes(1);
 
         const [, requestBody] = mockGenerateContent.mock.calls[0];
+        expect(mockGenerateContent.mock.calls[0][0]).toBe(model);
+        expect(requestBody._imageQuality).toBe('high');
         const imageParts = requestBody.input[0].content.filter(part => part.type === 'input_image');
 
         expect(imageParts).toHaveLength(2);
@@ -786,6 +789,7 @@ describe('/v1/images/generations request handling', () => {
     });
 
     test.each([
+        ['gpt-image-2.5', 'high'],
         ['gpt-image-2.5-flare', 'xhigh'],
         ['gpt-image-2.5-sunburst', 'max'],
         ['gpt-image-2.5-flare-2026-09-08', 'auto']
@@ -823,9 +827,9 @@ describe('/v1/images/generations request handling', () => {
         }));
     });
 
-    test('rejects flavorless gpt-image-2.5 generation requests', async () => {
+    test.each(['gpt-image-2.5-fast', 'gpt-image-2.5-ultrafast', 'gpt-image-2.5-2026-09-08', 'gpt-image-unknown'])('rejects unsupported image model %s', async model => {
         const req = makeJsonRequest({
-            model: 'gpt-image-2.5',
+            model,
             prompt: 'draw one green circle',
             n: 1,
             response_format: 'b64_json'
@@ -845,7 +849,7 @@ describe('/v1/images/generations request handling', () => {
 
         expect(handled).toBe(true);
         expect(res.statusCode).toBe(400);
-        expect(JSON.parse(res.body).error.message).toContain("model 'gpt-image-2.5' is not supported");
+        expect(JSON.parse(res.body).error.message).toContain(`model '${model}' is not supported`);
         expect(mockGenerateContent).not.toHaveBeenCalled();
     });
 

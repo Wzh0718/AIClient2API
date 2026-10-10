@@ -124,11 +124,13 @@ describe('api potluck cost estimator', () => {
         };
 
         const flare = estimateUsageCost(usage, 'gpt-image-2.5-flare');
+        const alias = estimateUsageCost(usage, 'gpt-image-2.5');
         const sunburst = estimateUsageCost(usage, 'gpt-image-2.5-sunburst');
         const dated = estimateUsageCost(usage, 'gpt-image-2.5-flare-2026-09-08');
         const image2 = estimateUsageCost(usage, 'gpt-image-2');
 
         expect(flare.usd).toBeCloseTo(image2.usd, 8);
+        expect(alias).toEqual(flare);
         expect(sunburst.usd).toBeCloseTo(image2.usd, 8);
         expect(dated.usd).toBeCloseTo(image2.usd, 8);
         expect(flare.missingPriceTokens).toBe(0);
