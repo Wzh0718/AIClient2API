@@ -98,12 +98,12 @@ describe('RuntimeHookBridge', () => {
         expect(published[0].args[0]).not.toHaveProperty('potluckApiKey');
     });
 
-    test('keeps separate GLM session decisions and only hashed affinity fields across workers', async () => {
+    test('keeps separate session hashes and only hashed affinity fields across workers', async () => {
         const messages = [];
         const bridge = new RuntimeHookBridge({ send: async message => { messages.push(message); } });
-        for (const [requestId, key, type, uuid] of [
-            ['route-a', 'private-session-a', 'glm-coding-plan', 'glm-a'],
-            ['route-b', 'private-session-b', 'openai-codex-oauth', 'codex-b']
+        for (const [requestId, key] of [
+            ['route-a', 'private-session-a'],
+            ['route-b', 'private-session-b']
         ]) {
             await bridge.handle('onContentGenerated', {
                 requestId,
@@ -113,8 +113,7 @@ describe('RuntimeHookBridge', () => {
                     promptCacheKey: key,
                     threadId: 'private-thread-' + requestId,
                     sessionId: 'private-client-session-' + requestId
-                },
-                _glmRouting: { reason: 'assigned', type, uuid, identity: 'private-binding-' + requestId }
+                }
             });
             await bridge.handle('onRequestCompleted', { requestId, response: { httpStatus: 200, completed: true } });
         }
@@ -125,17 +124,10 @@ describe('RuntimeHookBridge', () => {
         expect(finalEvents[0].thread_id_hash).toMatch(/^sha256:[a-f0-9]{32}$/);
         expect(finalEvents[0].session_id_hash).toMatch(/^sha256:[a-f0-9]{32}$/);
         expect(finalEvents[0].prompt_cache_key_hash).not.toBe(finalEvents[1].prompt_cache_key_hash);
-        expect(finalEvents[0].routing.glm).toMatchObject({
-            result: 'assigned', providerType: 'glm-coding-plan', actualModel: 'glm-5.3-flash'
-        });
-        expect(finalEvents[1].routing.glm).toMatchObject({
-            result: 'assigned', providerType: 'openai-codex-oauth', actualModel: null
-        });
         const serialized = JSON.stringify(messages);
         expect(serialized).not.toContain('private-session-');
         expect(serialized).not.toContain('private-thread-');
         expect(serialized).not.toContain('private-client-session-');
-        expect(serialized).not.toContain('private-binding-');
     });
 
     test('audits restricted routing without transmitting its raw member list', async () => {

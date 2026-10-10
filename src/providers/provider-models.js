@@ -145,7 +145,6 @@ export const PROVIDER_MODELS = {
         'gpt-image-2.5-flare',
         'gpt-image-2.5-sunburst',
     ],
-    'glm-coding-plan': ['glm-5.3-flash'],
     'grok-cli-oauth': [
         'grok-build-0.1',
         'grok-build-latest',

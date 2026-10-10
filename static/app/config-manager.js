@@ -265,7 +265,7 @@ function updateConfigProviderConfigs(configs) {
     // 渲染定时健康检查的提供商选择
     const scheduledHealthCheckProvidersEl = document.getElementById('scheduledHealthCheckProviders');
     if (scheduledHealthCheckProvidersEl) {
-        renderProviderTags(scheduledHealthCheckProvidersEl, configs.filter(item => item.id !== 'glm-coding-plan'), false);
+        renderProviderTags(scheduledHealthCheckProvidersEl, configs, false);
     }
 }
 
@@ -525,8 +525,6 @@ async function loadConfiguration() {
         if (imageSizeMaxPixelsEl) imageSizeMaxPixelsEl.value = data.IMAGE_SIZE_MAX_PIXELS ?? 8388608;
         if (codexFingerprintEnabledEl) codexFingerprintEnabledEl.checked = data.CODEX_FINGERPRINT_ENABLED === true;
         if (codexPotluckStickyProviderEnabledEl) codexPotluckStickyProviderEnabledEl.checked = data.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED || false;
-        const glmRoutingEnabledEl = document.getElementById('glmSessionRoutingEnabled');
-        if (glmRoutingEnabledEl) glmRoutingEnabledEl.checked = data.GLM_SESSION_ROUTING_ENABLED === true;
         
         if (cronNearMinutesEl) cronNearMinutesEl.value = data.CRON_NEAR_MINUTES || 1;
         if (cronRefreshTokenEl) cronRefreshTokenEl.checked = data.CRON_REFRESH_TOKEN || false;
@@ -753,7 +751,6 @@ async function saveConfiguration(options = {}) {
     config.IMAGE_SIZE_MAX_PIXELS = parseInt(document.getElementById('imageSizeMaxPixels')?.value || 8388608);
     config.CODEX_FINGERPRINT_ENABLED = document.getElementById('codexFingerprintEnabled')?.checked === true;
     config.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED = document.getElementById('codexPotluckStickyProviderEnabled')?.checked || false;
-    config.GLM_SESSION_ROUTING_ENABLED = document.getElementById('glmSessionRoutingEnabled')?.checked === true;
     config.CRON_NEAR_MINUTES = parseInt(document.getElementById('cronNearMinutes')?.value || 1);
     config.CRON_REFRESH_TOKEN = document.getElementById('cronRefreshToken')?.checked || false;
     config.LOGIN_EXPIRY = parseInt(document.getElementById('loginExpiry')?.value || 3600);

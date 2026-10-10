@@ -119,13 +119,13 @@ function makeResponse() {
 
 describe('Gemini native route and authentication contract', () => {
     test.each([
-        ['/openai-codex-oauth/v1/responses', undefined, true],
-        ['/openai-codex-oauth/v1/responses', 'openai-codex-oauth', false],
-        ['/openai-codex-oauth/v1/chat/completions', undefined, false]
-    ])('marks GLM eligibility for %s with provider header %s as %s', async (url, providerHeader, expected) => {
+        ['/openai-codex-oauth/v1/responses', undefined],
+        ['/openai-codex-oauth/v1/responses', 'openai-codex-oauth'],
+        ['/openai-codex-oauth/v1/chat/completions', undefined]
+    ])('routes Codex path %s with provider header %s', async (url, providerHeader) => {
         mockHandleAPIRequests.mockClear();
         const handler = createRequestHandler({
-            UI_ENABLED: false, MODEL_PROVIDER: 'openai-codex-oauth', GLM_SESSION_ROUTING_ENABLED: true,
+            UI_ENABLED: false, MODEL_PROVIDER: 'openai-codex-oauth',
             REQUIRED_API_KEY: 'contract-key'
         }, null);
         const req = {
@@ -138,8 +138,7 @@ describe('Gemini native route and authentication contract', () => {
         const [method, path, , , requestConfig] = mockHandleAPIRequests.mock.calls[0];
         expect(method).toBe('POST');
         expect(path).toBe(url.replace(/^\/openai-codex-oauth/, ''));
-        expect(requestConfig._explicitProviderSelection).toBe(true);
-        expect(requestConfig._glmPrefixedResponsesEligible).toBe(expected);
+        expect(requestConfig.MODEL_PROVIDER).toBe('openai-codex-oauth');
         mockHandleAPIRequests.mockClear();
         handleUIApiRequests.mockClear();
     });

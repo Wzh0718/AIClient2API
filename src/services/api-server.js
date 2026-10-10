@@ -985,7 +985,6 @@ const shutdownHandlers = registerWorkerShutdownHandlers({
             const result = manager?.applyProviderConfigSync?.(message);
             if (result?.applied) {
                 CONFIG.providerPools = manager.providerPools;
-                if (typeof message.glmRoutingEnabled === 'boolean') CONFIG.GLM_SESSION_ROUTING_ENABLED = message.glmRoutingEnabled;
                 for (const uuid of result.changedUuids) invalidateServiceAdapter(message.providerType, uuid);
                 sendToMaster({ type: 'provider_config_sync_ack', revision: result.revision });
             }

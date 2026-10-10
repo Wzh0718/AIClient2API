@@ -47,12 +47,6 @@ function getBaseProviderConfigs() {
             defaultPath: 'configs/codex/'
         },
         {
-            id: 'glm-coding-plan',
-            name: 'GLM Coding Plan',
-            usageName: 'GLM Coding Plan',
-            icon: 'fa-code'
-        },
-        {
             id: 'grok-cli-oauth',
             name: t('dashboard.routing.nodeName.grokCli'),
             usageName: 'Grok CLI',
@@ -296,9 +290,6 @@ function getProviderTypeFields(providerType) {
 
     // 基础配置字段定义
     const fieldConfigs = {
-        'glm-coding-plan': [{
-            id: 'GLM_API_KEY', label: 'GLM Coding Plan API Key', type: 'password', placeholder: 'Coding Plan Key'
-        }],
         'openai-custom': [
             {
                 id: 'OPENAI_API_KEY',

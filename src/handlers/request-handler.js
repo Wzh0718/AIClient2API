@@ -18,7 +18,6 @@ import { instrumentResponseForAudit } from '../utils/request-audit-lifecycle.js'
 import { runtimeMetrics } from '../runtime/runtime-metrics.js';
 import { formatSuccessLog } from '../runtime/success-log.js';
 import { extractApiKey, hashKeyId } from '../edge-auth/edge-auth-service.js';
-import { isGlmPrefixedResponsesEligible } from '../services/glm-session-routing.js';
 import { getProviderLeaseScope, closeProviderLeaseScope } from '../runtime/provider-lease-scope.js';
 
 /**
@@ -390,7 +389,6 @@ export function createRequestHandler(config, providerPoolManager) {
                     if (modelProviderHeader) {
                         if (isRegisteredProvider(modelProviderHeader)) {
                             currentConfig.MODEL_PROVIDER = modelProviderHeader;
-                            currentConfig._explicitProviderSelection = true;
                             logger.info(`[Config] MODEL_PROVIDER overridden by header to: ${currentConfig.MODEL_PROVIDER}`);
                         } else {
                             logger.warn(`[Config] Provider ${modelProviderHeader} in header is not available.`);
@@ -409,8 +407,6 @@ export function createRequestHandler(config, providerPoolManager) {
 
                         if (firstSegment && (isValidProvider || isAutoMode)) {
                             currentConfig.MODEL_PROVIDER = firstSegment;
-                            currentConfig._explicitProviderSelection = true;
-                            currentConfig._glmPrefixedResponsesEligible = isGlmPrefixedResponsesEligible(path, modelProviderHeader);
                             logger.info(`[Config] MODEL_PROVIDER overridden by path segment to: ${currentConfig.MODEL_PROVIDER}`);
                             pathSegments.shift();
                             path = '/' + pathSegments.join('/');

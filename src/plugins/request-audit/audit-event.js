@@ -5,7 +5,6 @@ import { getRequestAttempts } from '../../utils/request-attempts.js';
 import { CODEX_FINGERPRINT_CONTEXT_KEY } from '../../providers/openai/codex-fingerprint.js';
 import { estimateUsageCost } from '../api-potluck/cost-estimator.js';
 import { captureStatus } from './capture-status.js';
-import requestContext from '../../utils/context.js';
 
 function toNumber(value) {
     const number = Number(value);
@@ -244,17 +243,10 @@ export function buildRequestAuditEvent(context = {}) {
         ? selectedProviderUuid === actualProviderUuid ? 'consistent' : 'mismatch'
         : 'unverifiable';
     const routing = context._codexRouting || {};
-    const glmRouting = context._glmRoutingAudit || (context._glmRouting ? {
-        result: context._glmRouting.reason || null,
-        providerType: context._glmRouting.type || null,
-        providerUuidHash: hashSecret(context._glmRouting.uuid),
-        actualModel: context._glmRouting.type === 'glm-coding-plan' ? 'glm-5.3-flash' : null
-    } : null);
     const attempts = normalizeAttempts(context);
     const lastAttempt = attempts.at(-1) || null;
     const codexContext = context.processedRequestBody?.[CODEX_FINGERPRINT_CONTEXT_KEY] || {};
-    const upstreamResponseModel = requestContext.get('glmUpstreamResponseModel')
-        || context.codexEvidence?.upstreamResponseModel
+    const upstreamResponseModel = context.codexEvidence?.upstreamResponseModel
         || codexContext.upstreamResponseModel
         || lastAttempt?.upstreamResponseModel
         || null;
@@ -319,7 +311,6 @@ export function buildRequestAuditEvent(context = {}) {
             providerNameDisplay: sanitizeProviderName(context.providerName)
         },
         routing: {
-            ...(glmRouting ? { glm: glmRouting } : {}),
             routingMode: ['pool', 'auto', 'fixed', 'restricted'].includes(context._codexRouting?.routingMode)
                 ? context._codexRouting.routingMode
                 : null,

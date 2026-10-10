@@ -1,7 +1,6 @@
 import { describe, expect, test } from '@jest/globals';
 import { routeKeyToCredentialCandidates, resolveKeyRoutingAssignment } from '../src/services/codex-credential-group-service.js';
 import { getCodexRoutingConsistencyStatus } from '../src/services/codex-routing-integrity.js';
-import { shouldAttemptGlmSessionRouting } from '../src/services/glm-session-routing.js';
 
 const credentials = [
     { uuid: 'codex-a', providerType: 'openai-codex-oauth', isHealthy: true, providerWeight: 3 },
@@ -15,7 +14,7 @@ const groups = [
 const routing = { routingMode: 'restricted', restrictedCredentialUuids: ['codex-a', 'codex-c'] };
 
 describe('restricted Codex credential pool', () => {
-    test('keeps only selected credentials across groups and excludes GLM', () => {
+    test('keeps only selected credentials across groups', () => {
         const selected = routeKeyToCredentialCandidates({ keyRouting: routing, groups, credentials });
         expect(selected).toMatchObject({
             routingMode: 'restricted',
@@ -25,10 +24,6 @@ describe('restricted Codex credential pool', () => {
             spillover: false,
             errorCode: null
         });
-        expect(shouldAttemptGlmSessionRouting({
-            MODEL_PROVIDER: 'openai-codex-oauth',
-            potluckKeyData: routing
-        })).toBe(false);
     });
 
     test('uses the other selected credential when one is unavailable, never an outsider', () => {
@@ -73,7 +68,7 @@ describe('restricted Codex credential pool', () => {
             keyRouting: routing,
             groups,
             credentials: credentials.map(item => item.uuid === 'codex-c'
-                ? { ...item, providerType: 'glm-coding-plan' } : item)
+                ? { ...item, providerType: 'gemini-antigravity' } : item)
         }).errorCode).toBe('ROUTE_MISMATCH');
         expect(getCodexRoutingConsistencyStatus({
             routingMode: 'restricted',

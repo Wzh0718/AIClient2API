@@ -10,8 +10,6 @@ let usagePageDataPromise = null;
 let accountUsageSummaryByKey = new Map();
 let accountUsageSummaryMeta = null;
 let antigravityRecoveryRefreshTimer = null;
-let glmUsageState = null;
-let glmUsageError = null;
 const USAGE_REFRESH_POLL_INTERVAL_MS = 1500;
 const USAGE_REFRESH_WAIT_TIMEOUT_MS = 150000;
 const ANTIGRAVITY_PROVIDER_TYPE = 'gemini-antigravity';
@@ -162,7 +160,6 @@ async function loadSupportedProviders() {
  * 加载用量数据
  */
 export async function loadUsage() {
-    loadGlmAuditUsage();
     const loadingEl = document.getElementById('usageLoading');
     const errorEl = document.getElementById('usageError');
     const contentEl = document.getElementById('usageContent');
@@ -190,88 +187,6 @@ export async function loadUsage() {
             document.getElementById('usageErrorMessage').textContent = error.message;
         }
     }
-}
-
-async function loadGlmAuditUsage() {
-    try {
-        const response = await fetch('/api/request-audit/glm-usage', { headers: getAuthHeaders() });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const payload = await response.json();
-        glmUsageState = payload.data;
-        glmUsageError = null;
-    } catch (error) {
-        glmUsageState = null;
-        glmUsageError = error.message;
-    }
-    renderGlmUsageGroup(document.getElementById('usageContent'));
-}
-
-function renderGlmPeriod(label, period, incomplete) {
-    const requests = period?.requestCount || 0;
-    const tokens = requests && period.unknownTokenRequests
-        ? t('usage.glm.unknown')
-        : formatTokenCompact(period?.totalTokens || 0);
-    return `<div class="account-usage-period">
-        <div class="account-usage-period-label">${label}${incomplete ? ` · ${t('usage.glm.partial')}` : ''}</div>
-        <div class="account-usage-period-value">${tokens}</div>
-        <div class="account-usage-period-sub">${formatInteger(requests)} req</div>
-    </div>`;
-}
-
-function renderGlmUsageGroup(container) {
-    if (!container) return;
-    const previous = container.querySelector('.glm-usage-group');
-    const expanded = previous && !previous.classList.contains('collapsed');
-    previous?.remove();
-    if (!glmUsageState && !glmUsageError) return;
-    const nodes = glmUsageState?.nodes || [];
-    const historical = glmUsageState?.historical || [];
-    if (!nodes.length && !historical.length && !glmUsageError) return;
-    const empty = container.querySelector('.usage-empty');
-    empty?.remove();
-    container.classList.add('usage-provider-groups');
-    const group = document.createElement('section');
-    group.className = `usage-provider-group is-full-width glm-usage-group${expanded ? '' : ' collapsed'}`;
-    group.dataset.provider = 'glm-coding-plan';
-    const coverage = glmUsageState?.coverage || {};
-    const renderNode = node => {
-        const periods = node.periods || {};
-        const name = node.name || t('usage.glm.historical');
-        const state = node.historical ? t('usage.glm.historical')
-            : node.disabled ? t('usage.glm.disabled') : node.verified ? t('usage.glm.verified') : t('usage.glm.unverified');
-        const noRequests = !periods.month?.requestCount;
-        return `<article class="glm-usage-node">
-            <div class="glm-usage-node-heading"><strong>${escapeHtml(name)}</strong><span>${escapeHtml(state)}</span></div>
-            ${noRequests ? `<small class="glm-usage-empty">${t('usage.glm.noRequests')}</small>` : ''}
-            <div class="account-usage-period-grid">
-                ${renderGlmPeriod(t('usage.glm.today'), periods.today, coverage.today)}
-                ${renderGlmPeriod(t('usage.glm.week'), periods.week, coverage.week)}
-                ${renderGlmPeriod(t('usage.glm.month'), periods.month, coverage.month)}
-            </div>
-        </article>`;
-    };
-    const total = glmUsageState?.total?.month;
-    group.innerHTML = `<div class="usage-group-header">
-        <button type="button" class="glm-usage-toggle" aria-expanded="${expanded ? 'true' : 'false'}">
-            <i class="fas fa-chevron-right toggle-icon" aria-hidden="true"></i>
-            <i class="fas fa-chart-bar provider-icon" aria-hidden="true"></i>
-            <span class="provider-name">GLM Coding Plan</span>
-            <span class="instance-count">${t('usage.group.instances', { count: nodes.length })}</span>
-        </button>
-        <div class="usage-group-actions"><span class="provider-last-update">${total ? `${t('usage.glm.month')} ${formatInteger(total.requestCount)} req${coverage.month ? ` · ${t('usage.glm.partial')}` : ''}` : ''}</span>
-            <button type="button" class="btn-refresh-provider glm-usage-refresh" aria-label="${t('usage.group.refresh')} GLM Coding Plan"><i class="fas fa-rotate"></i><span class="button-label">${t('usage.group.refresh')}</span></button></div>
-    </div><div class="usage-group-content glm-usage-content">
-        ${glmUsageError ? `<div class="usage-error-message">${escapeHtml(t('usage.glm.unavailable', { error: glmUsageError }))}</div>` : `
-            <p class="glm-usage-source">${t('usage.glm.source')}${coverage.month ? ` · ${t('usage.glm.partialNote')}` : ''}</p>
-            ${nodes.map(renderNode).join('')}
-            ${historical.map(item => renderNode({ name: `${t('usage.glm.historical')} · ${item.credentialHash.slice(-8)}`, historical: true, periods: item.periods })).join('')}`}
-    </div>`;
-    group.querySelector('.glm-usage-toggle').addEventListener('click', () => {
-        group.classList.toggle('collapsed');
-        group.querySelector('.glm-usage-toggle').setAttribute('aria-expanded', String(!group.classList.contains('collapsed')));
-    });
-    group.querySelector('.glm-usage-refresh').addEventListener('click', loadGlmAuditUsage);
-    container.appendChild(group);
 }
 
 /**
@@ -1127,7 +1042,6 @@ function renderUsageData(data, container) {
     if (!data?.providers || Object.keys(data.providers).length === 0) {
         container.classList.remove('usage-provider-groups');
         container.innerHTML = `<div class="usage-empty"><p>${t('usage.noData')}</p></div>`;
-        renderGlmUsageGroup(container);
         return;
     }
 
@@ -1142,7 +1056,6 @@ function renderUsageData(data, container) {
     displayOrder.forEach(type => {
         if (groupedProviders[type]) container.appendChild(createProviderGroup(type, groupedProviders[type]));
     });
-    renderGlmUsageGroup(container);
 }
 
 /**

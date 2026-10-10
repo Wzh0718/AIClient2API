@@ -715,9 +715,7 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
                 ...options,
                 selectionDiagnostics,
                 requestedModel,
-                allowedProviderUuids: config._glmRouting?.uuid
-                    ? group.credentialUuids.filter(uuid => uuid === config._glmRouting.uuid)
-                    : group.credentialUuids,
+                allowedProviderUuids: group.credentialUuids,
                 disableProviderFallback: true,
                 preferredProviderUuid,
                 excludeProviderUuids,

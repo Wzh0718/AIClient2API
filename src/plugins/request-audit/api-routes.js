@@ -4,7 +4,6 @@ import { existsSync, readFileSync } from 'fs';
 import { getRequestBody } from '../../utils/common.js';
 import { atomicWriteFile, withFileLock } from '../../utils/file-lock.js';
 import { captureStatus } from './capture-status.js';
-import { hashSecret } from './audit-event.js';
 
 let auditStore = null;
 let analysisStore = null;
@@ -300,7 +299,6 @@ function parseQuery(requestUrl) {
         until: requestUrl.searchParams.get('until') || undefined,
         model: requestUrl.searchParams.get('model') || undefined,
         provider: requestUrl.searchParams.get('provider') || undefined,
-        glmRouting: requestUrl.searchParams.get('glmRouting') || undefined,
         outcome: requestUrl.searchParams.get('outcome') || undefined,
         credential: requestUrl.searchParams.get('credential') || undefined,
         modelMismatch: requestUrl.searchParams.get('modelMismatch') || undefined,
@@ -392,39 +390,6 @@ export async function handleRequestAuditRoutes(method, path, req, res, config = 
     const store = getAuditStore(config);
     const materialized = getAnalysisStore(config);
     const filters = parseQuery(requestUrl);
-
-    if (path === '/api/request-audit/glm-usage') {
-        if (!gptRequestStore?.queryGlmUsage) {
-            sendJson(res, 503, { success: false, error: { message: 'GLM usage projection unavailable' } });
-            return true;
-        }
-        const usage = gptRequestStore.queryGlmUsage();
-        const filePath = config.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
-        let configured = [];
-        try {
-            configured = JSON.parse(readFileSync(filePath, 'utf8'))['glm-coding-plan'] || [];
-        } catch (error) {
-            if (existsSync(filePath)) throw error;
-        }
-        const hashes = new Set();
-        const empty = { today: null, week: null, month: null };
-        const nodes = configured.map(node => {
-            const credentialHash = hashSecret(node.uuid);
-            hashes.add(credentialHash);
-            return {
-                uuid: node.uuid,
-                name: node.customName || node.uuid,
-                disabled: node.isDisabled === true,
-                verified: node.glmVerified === true,
-                periods: usage.credentials[credentialHash] || empty
-            };
-        });
-        const historical = Object.entries(usage.credentials)
-            .filter(([hash]) => !hashes.has(hash))
-            .map(([credentialHash, periods]) => ({ credentialHash, periods }));
-        sendJson(res, 200, { success: true, data: { ...usage, credentials: undefined, nodes, historical } });
-        return true;
-    }
 
     if (path === '/api/request-audit/summary') {
         const summaryFilters = { ...filters };

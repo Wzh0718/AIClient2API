@@ -537,7 +537,6 @@ export class ProviderPoolManager {
         'openai-qwen-oauth': 'qwen3-coder-flash',
         'openai-iflow': 'qwen3-coder-plus',
         'openai-codex-oauth': 'gpt-6-luna',
-        'glm-coding-plan': 'glm-5.3-flash',
         'openaiResponses-custom': 'gpt-4o-mini',
         'forward-api': 'gpt-4o-mini',
         'grok-cli-oauth': 'grok-4.6',
@@ -1067,7 +1066,6 @@ export class ProviderPoolManager {
         const nodesToWarmup = [];
 
         for (const type in this.providerStatus) {
-            if (type === MODEL_PROVIDER.GLM_CODING_PLAN) continue;
             const pool = this.providerStatus[type];
             
             // 挑选当前提供商下需要预热的节点
@@ -5953,7 +5951,6 @@ export class ProviderPoolManager {
         
         for (const providerType in this.providerStatus) {
             // Only check selected provider types
-            if (providerType === MODEL_PROVIDER.GLM_CODING_PLAN) continue;
             if (!selectedProviderTypes.includes(providerType)) {
                 continue;
             }
@@ -6057,7 +6054,6 @@ export class ProviderPoolManager {
         
         for (const providerType in this.providerStatus) {
             // Only check selected provider types
-            if (providerType === MODEL_PROVIDER.GLM_CODING_PLAN) continue;
             if (!selectedProviderTypes.includes(providerType)) {
                 this._log('debug', `[ScheduledHealthCheck] Skipping provider type ${providerType}: not in selected types`);
                 continue;

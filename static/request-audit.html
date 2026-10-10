@@ -863,7 +863,6 @@
               <label>原始 Path<input id="requestPath" autocomplete="off" spellcheck="false" placeholder="/openai-codex-oauth/v1/responses"></label>
               <label>凭据 Hash<input id="credential" autocomplete="off" spellcheck="false" placeholder="sha256:..."></label>
               <label>Provider<input id="providerFilter" autocomplete="off" spellcheck="false" placeholder="openai-codex-oauth"></label>
-              <label>GLM 分流<select id="glmRoutingFilter"><option value="">全部</option><option value="assigned">首次分配</option><option value="affinity">亲和命中</option><option value="no_session_id">无会话标识</option><option value="disabled_or_no_glm">未进入 GLM</option></select></label>
               <label>模型不一致<select id="modelMismatch"><option value="">全部</option><option value="true">仅不一致</option></select></label>
             </div>
           </details>
@@ -1061,8 +1060,6 @@
       const outcome = document.getElementById('outcome').value;
       if (model) params.set('model', model);
       if (provider) params.set('provider', provider);
-      const glmRouting = document.getElementById('glmRoutingFilter').value;
-      if (glmRouting) params.set('glmRouting', glmRouting);
       if (outcome) params.set('outcome', outcome);
       params.set('limit', document.getElementById('limit').value || '50');
       return params;
@@ -1385,7 +1382,6 @@
             <div class="detail-grid">
               <div class="detail-box"><span>来源协议</span><strong>${escapeHtml(event.request?.fromProvider || '-')}</strong></div>
               <div class="detail-box"><span>上游渠道</span><strong>${escapeHtml(event.request?.toProvider || '-')}</strong></div>
-              ${event.routing?.glm ? `<div class="detail-box"><span>GLM 会话分流</span><strong>${escapeHtml(event.routing.glm.result || '-')}</strong><small class="muted">${escapeHtml(event.routing.glm.providerType || 'Codex')} · ${escapeHtml(event.routing.glm.actualModel || '原 GPT 模型')} · 节点 ${escapeHtml(event.routing.glm.providerUuidHash || '-')}</small></div>` : ''}
               ${models.detail}
               <div class="detail-box"><span>计费模型</span><strong>${escapeHtml(event.request?.billingModel || '未知')}</strong></div>
               <div class="detail-box"><span>总成本</span><strong>${escapeHtml(cost.main)}</strong><small class="muted">${escapeHtml(cost.sub)}</small></div>
@@ -1762,7 +1758,7 @@
         document.getElementById('rawCaptureManualHelp').textContent = '将使用手动输入的完整 key 在浏览器本地计算 hash 后保存。';
       }
     });
-    for (const id of ['keySelect', 'keyInput', 'modelFilter', 'outcome', 'since', 'until', 'clientIp', 'requestPath', 'credential', 'providerFilter', 'glmRoutingFilter', 'modelMismatch']) {
+    for (const id of ['keySelect', 'keyInput', 'modelFilter', 'outcome', 'since', 'until', 'clientIp', 'requestPath', 'credential', 'providerFilter', 'modelMismatch']) {
       document.getElementById(id).addEventListener('change', () => loadAudit());
     }
     function applyTheme(theme) {

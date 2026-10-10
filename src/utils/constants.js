@@ -66,7 +66,6 @@ export const MODEL_PROVIDER = {
     QWEN_API: 'openai-qwen-oauth',
     IFLOW_API: 'openai-iflow',
     CODEX_API: 'openai-codex-oauth',
-    GLM_CODING_PLAN: 'glm-coding-plan',
     FORWARD_API: 'forward-api',
     GROK_WEB: 'grok-web',
     GROK_CLI: 'grok-cli-oauth',

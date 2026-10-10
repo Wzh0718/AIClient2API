@@ -24,7 +24,6 @@ import { resolveOriginalCodexTurnId } from '../providers/openai/codex-turn-state
 import { beginRequestAttempt, finishRequestAttempt, getSuccessfulOutboundModel } from './request-attempts.js';
 import { matchesModelFamily } from '../providers/openai/codex-model-routing.js';
 import requestContext from './context.js';
-import { GLM_MODEL, resolveGlmSessionRoute, shouldAttemptGlmSessionRouting } from '../services/glm-session-routing.js';
 import { assertCodexRoutingIntegrity } from '../services/codex-routing-integrity.js';
 import {
     preserveTemporaryRouteResponseModel,
@@ -1700,9 +1699,6 @@ function appendCustomModelsToModelList(clientModelList, customEntries, providerT
  * @returns {string} The protocol prefix (e.g., 'gemini', 'openai', 'claude').
  */
 export function getProtocolPrefix(provider) {
-    if (provider === 'glm-coding-plan' || provider?.startsWith('glm-coding-plan-')) {
-        return requestContext.get('glmProtocol') || MODEL_PROTOCOL_PREFIX.OPENAI_RESPONSES;
-    }
     // Special case for Codex - it needs its own protocol
     if (provider === 'openai-codex-oauth') {
         return MODEL_PROTOCOL_PREFIX.CODEX;
@@ -2543,7 +2539,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 : maxRetries,
             providerPoolManager
         });
-        if (shouldSwitchNow && toProvider !== MODEL_PROVIDER.GLM_CODING_PLAN) {
+        if (shouldSwitchNow) {
             const isCodexTransient = isCodexTransientCredentialError(error);
             const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity || error.isGeminiMalformedFunctionCall;
             if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
@@ -3066,7 +3062,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                 : maxRetries,
             providerPoolManager
         });
-        if (shouldSwitchNow && toProvider !== MODEL_PROVIDER.GLM_CODING_PLAN) {
+        if (shouldSwitchNow) {
             const isCodexTransient = isCodexTransientCredentialError(error);
             const isProviderTransient = isCodexTransient || isAntigravityTransientCapacity || error.isGeminiMalformedFunctionCall;
             if (isAntigravityTransientCapacity) providerPoolManager.recordGeminiSchedulingEvent?.('retryAttempts');
@@ -3482,8 +3478,6 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     }
 
     CONFIG._codexCacheAffinityScope = extractCodexCacheAffinityScope(originalRequestBody);
-    const glmClientAuth = req.headers?.authorization || req.headers?.['x-api-key'];
-    CONFIG._glmClientIdentity = glmClientAuth ? crypto.createHash('sha256').update(String(glmClientAuth)).digest('hex') : null;
     CONFIG._codexOverloadFailoverKey = resolveCodexOverloadFailoverKey(CONFIG._codexCacheAffinityScope);
     const inboundCodexFingerprintContext = extractInboundCodexFingerprintContext(req, originalRequestBody);
     inboundCodexFingerprintContext.callerKeyHash = CONFIG.potluckApiKey
@@ -3622,29 +3616,6 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
 
     logger.debug(`[Content Generation] Model: ${model}, Stream: ${isStream}`);
 
-    // Route only after temporary-key and custom-model rules have settled.
-    // The Redis binding is checked even after the switch is disabled so that
-    // established sessions keep their original upstream.
-    if (shouldAttemptGlmSessionRouting(CONFIG, { temporaryRoute, customModelConfig })) {
-        const glmRoute = await resolveGlmSessionRoute({
-            config: CONFIG,
-            body: originalRequestBody,
-            endpointType,
-            manager: providerPoolManager
-        });
-        if (glmRoute) {
-            CONFIG._glmRouting = { ...glmRoute, requestedModel: clientRequestedModel };
-            if (glmRoute.type === MODEL_PROVIDER.GLM_CODING_PLAN) {
-                CONFIG.MODEL_PROVIDER = MODEL_PROVIDER.GLM_CODING_PLAN;
-                CONFIG._glmRequestedModel = clientRequestedModel;
-                requestContext.set('glmProtocol', fromProvider);
-                model = GLM_MODEL;
-                toProvider = MODEL_PROVIDER.GLM_CODING_PLAN;
-                service = null;
-            }
-        }
-    }
-
     let actualCustomName = CONFIG.customName;
     let actualAccountIdentity = CONFIG.codexAccountKey || CONFIG.codexAccountId || null;
     let actualAccountEmail = CONFIG.codexEmail || null;
@@ -3675,8 +3646,6 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         try {
             result = await getApiServiceWithFallback(CONFIG, model, {
                 acquireSlot: shouldSelectByPool,
-                ...(CONFIG._glmRouting?.uuid ? { allowedProviderUuids: [CONFIG._glmRouting.uuid] } : {}),
-                ...(CONFIG._glmRouting?.type === MODEL_PROVIDER.GLM_CODING_PLAN ? { disableProviderFallback: true } : {}),
                 abortSignal: selectionAbortController.signal,
                 queueKey,
                 queueRequestBytes,
@@ -3708,10 +3677,6 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         service = result.service;
         toProvider = result.actualProviderType;
         actualUuid = result.uuid || pooluuid;
-        if (CONFIG._glmRouting?.type === MODEL_PROVIDER.GLM_CODING_PLAN &&
-            (result.actualProviderType !== MODEL_PROVIDER.GLM_CODING_PLAN || actualUuid !== CONFIG._glmRouting.uuid)) {
-            throw Object.assign(new Error('Bound GLM node changed during selection'), { status: 503, code: 'GLM_BINDING_MISMATCH' });
-        }
         actualCustomName = result.serviceConfig?.customName || CONFIG.customName;
         actualAccountIdentity = result.serviceConfig?.codexAccountKey || result.serviceConfig?.codexAccountId || actualAccountIdentity;
         actualAccountEmail = result.serviceConfig?.codexEmail || actualAccountEmail;
@@ -3745,11 +3710,6 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         && /-fast$/i.test(clientRequestedModel)
         && (!originalRequestBody.service_tier || originalRequestBody.service_tier === 'default')) {
         processedRequestBody.model = model;
-    }
-    if (toProvider === MODEL_PROVIDER.GLM_CODING_PLAN && CONFIG._glmRouting) {
-        processedRequestBody._glmRouting = CONFIG._glmRouting;
-        processedRequestBody._glmClientIdentity = CONFIG._glmClientIdentity;
-        processedRequestBody._glmRequestedModel = clientRequestedModel;
     }
     if (isCodexProvider(toProvider)) {
         processedRequestBody[CODEX_FINGERPRINT_CONTEXT_KEY] = inboundCodexFingerprintContext;

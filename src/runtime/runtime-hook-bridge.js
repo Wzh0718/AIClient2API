@@ -10,17 +10,6 @@ function hashSecret(value, length = 32) {
     return `sha256:${createHash('sha256').update(String(value)).digest('hex').slice(0, length)}`;
 }
 
-function compactGlmRouting(route) {
-    if (!route || typeof route !== 'object') return undefined;
-    const providerType = ['glm-coding-plan', 'openai-codex-oauth'].includes(route.type) ? route.type : null;
-    return {
-        result: typeof route.reason === 'string' ? route.reason.slice(0, 64) : null,
-        providerType,
-        providerUuidHash: hashSecret(route.uuid, 16),
-        actualModel: providerType === 'glm-coding-plan' ? 'glm-5.3-flash' : null
-    };
-}
-
 function compactAffinityHashes(scope) {
     if (!scope || typeof scope !== 'object') return undefined;
     const hashes = {
@@ -145,7 +134,6 @@ function compactMetadata(context = {}) {
         potluckQuotaMode: context.potluckQuotaMode || null,
         _codexRouting: compactCodexRouting(context._codexRouting),
         _codexCacheAffinityHashes: compactAffinityHashes(context._codexCacheAffinityScope),
-        _glmRoutingAudit: compactGlmRouting(context._glmRouting),
         _modelRouting: compactModelRouting(context._modelRouting),
         _temporaryKeyModelRouteResult: compactTemporaryModelRoute(context._temporaryKeyModelRouteResult),
         originalRequestBody: context.originalRequestBody?.model
