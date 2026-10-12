@@ -208,6 +208,8 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         CODEX_CLOAKING_ENABLED: true, // Codex 出站客户端身份统一（UA/originator/version），默认开启；关闭后可识别的 Codex 客户端身份整组透传
         IMAGE_SIZE_MAX_PIXELS: 8388608, // 后处理允许的最大目标总像素（约 4K UHD）
         CODEX_POTLUCK_STICKY_PROVIDER_ENABLED: false, // API Potluck 分发 Key 是否固定到同一个 Codex 账号
+        CODEX_DYNAMIC_SESSION_ROUTING_ENABLED: false, // 灰度开关：auto Key 不再按凭据组调度，新会话在授权池内动态分配并绑定具体凭据
+        CODEX_DYNAMIC_SESSION_ROUTING_KEY_IDS: [], // 灰度名单：非空时仅对这些 Key 生效，为空表示总开关开启后对全部 auto Key 生效
         CODEX_STICKY_HOT_SHARD_ENABLED: true, // Codex sticky 热 key 是否自动拆分到多个账号
         CODEX_STICKY_HOT_SHARD_WINDOW_MS: 3600000, // 热 key 统计窗口，默认60分钟
         CODEX_STICKY_HOT_SHARD_MIN_REQUESTS: 100, // 窗口内达到多少次请求后开始分片
@@ -325,6 +327,8 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         { flag: '--codex-fingerprint-enabled', configKey: 'CODEX_FINGERPRINT_ENABLED', type: 'bool' },
         { flag: '--codex-cloaking-enabled', configKey: 'CODEX_CLOAKING_ENABLED', type: 'bool' },
         { flag: '--codex-potluck-sticky-provider-enabled', configKey: 'CODEX_POTLUCK_STICKY_PROVIDER_ENABLED', type: 'bool' },
+        { flag: '--codex-dynamic-session-routing-enabled', configKey: 'CODEX_DYNAMIC_SESSION_ROUTING_ENABLED', type: 'bool' },
+        { flag: '--codex-dynamic-session-routing-key-ids', configKey: 'CODEX_DYNAMIC_SESSION_ROUTING_KEY_IDS', type: 'stringList' },
         { flag: '--codex-sticky-hot-shard-enabled', configKey: 'CODEX_STICKY_HOT_SHARD_ENABLED', type: 'bool' },
         { flag: '--codex-sticky-hot-shard-window-ms', configKey: 'CODEX_STICKY_HOT_SHARD_WINDOW_MS', type: 'int' },
         { flag: '--codex-sticky-hot-shard-min-requests', configKey: 'CODEX_STICKY_HOT_SHARD_MIN_REQUESTS', type: 'int' },

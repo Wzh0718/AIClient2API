@@ -118,9 +118,9 @@ function hashAffinityScope(value) {
     return crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 16);
 }
 
-export function resolveCodexAffinityKey(config, providerType, requestedModel = null) {
+export function resolveCodexAffinityKey(config, providerType, requestedModel = null, { force = false } = {}) {
     if (
-        !isTruthyConfigFlag(config?.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED) ||
+        (!force && !isTruthyConfigFlag(config?.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED)) ||
         !config?.potluckApiKey ||
         !isCodexProviderType(providerType)
     ) {
@@ -144,7 +144,7 @@ export function resolveCodexAffinityKey(config, providerType, requestedModel = n
     return { key: `potluck:${hashAffinityScope(config.potluckApiKey)}:model:${requestedModel || ''}`, source: 'potluck_key' };
 }
 
-export function withStickyProviderAffinity(config, providerType, options = {}) {
+export function withStickyProviderAffinity(config, providerType, options = {}, { forceSticky = false } = {}) {
     const selectionOptions = { ...options };
     if (selectionOptions.routingStrategy === 'image-round-robin') {
         delete selectionOptions.preferredProviderUuid;
@@ -154,7 +154,7 @@ export function withStickyProviderAffinity(config, providerType, options = {}) {
         return selectionOptions;
     }
     if (!selectionOptions.stickyProviderKey) {
-        const affinity = resolveCodexAffinityKey(config, providerType, options.requestedModel);
+        const affinity = resolveCodexAffinityKey(config, providerType, options.requestedModel, { force: forceSticky });
         if (affinity) {
             selectionOptions.stickyProviderKey = affinity.key;
             selectionOptions.stickyProviderSource = affinity.source;
@@ -209,6 +209,20 @@ function updateCodexRoutingDiagnostics(config, patch = {}) {
         ...sanitizedPatch
     };
     return config._codexRouting;
+}
+
+function parseConfigIdList(value) {
+    const items = Array.isArray(value) ? value : String(value ?? '').split(',');
+    return items.map(item => String(item).trim()).filter(Boolean);
+}
+
+// Gray switch: auto keys skip credential groups and are scheduled over the whole
+// authorized pool with a per-session sticky binding. An empty allow-list means every key.
+function isCodexDynamicSessionRoutingActive(config, keyRouting) {
+    if (!isTruthyConfigFlag(config?.CODEX_DYNAMIC_SESSION_ROUTING_ENABLED)) return false;
+    if (keyRouting?.routingMode !== 'auto' && keyRouting?.routingMode !== 'pool') return false;
+    const allowedKeyIds = parseConfigIdList(config.CODEX_DYNAMIC_SESSION_ROUTING_KEY_IDS);
+    return allowedKeyIds.length === 0 || allowedKeyIds.includes(String(config.potluckKeyData?.id ?? ''));
 }
 
 function resolveCodexCredentialGroupAffinity(config, providerType) {
@@ -639,13 +653,14 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
         return { handled: true, selectedResult, availabilityError: null };
     }
 
-    if (keyRouting.routingMode === 'pool') {
+    const dynamicSessionRouting = isCodexDynamicSessionRoutingActive(config, keyRouting);
+    if (keyRouting.routingMode === 'pool' || dynamicSessionRouting) {
         const keyHash = config.potluckKeyData?.id
             ? `sha256:${crypto.createHash('sha256').update(String(config.potluckKeyData.id)).digest('hex').slice(0, 16)}`
             : 'none';
         logger.info(`[Codex Routing] pool selection key=${keyHash} mode=pool revision=${keyRouting.routingConfigRevision || 0}`);
         const poolKeyId = config.potluckKeyData?.id || null;
-        const poolOptions = {
+        const basePoolOptions = {
             ...options,
             selectionDiagnostics,
             requestedModel,
@@ -653,6 +668,12 @@ async function selectCodexCredentialGroupProvider(config, providerType, requeste
             routingMode: 'pool',
             poolKeyId
         };
+        // The pool selector's round-robin branch outranks the sticky branch, so dynamic
+        // session routing must not declare routingMode/poolKeyId or sessions would not stay bound.
+        const { routingMode: _poolMode, poolKeyId: _poolKeyId, ...stickyBaseOptions } = basePoolOptions;
+        const poolOptions = dynamicSessionRouting
+            ? withStickyProviderAffinity(config, providerType, stickyBaseOptions, { forceSticky: true })
+            : basePoolOptions;
         let selectedResult;
         try {
             selectedResult = await selectFromPool(poolOptions);
