@@ -516,7 +516,7 @@ function getProviderTypeFields(providerType) {
                 id: 'codexFingerprintMode',
                 label: t('modal.provider.codexFingerprintMode'),
                 type: 'select',
-                value: 'off',
+                value: 'session',
                 options: [
                     { value: 'off', label: t('modal.provider.codexFingerprintOff') },
                     { value: 'device', label: t('modal.provider.codexFingerprintDevice') },

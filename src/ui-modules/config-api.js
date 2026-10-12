@@ -12,6 +12,7 @@ import { HEALTH_CHECK, PASSWORD, NETWORK, RETRY } from '../utils/constants.js';
 import { withFileLock, atomicWriteFile } from '../utils/file-lock.js';
 import { validateCredentials } from './auth.js';
 import { ANTIGRAVITY_ELASTIC_MODEL_ORDER } from '../providers/antigravity-model-order.js';
+import { buildCodexRuntimeConfigEvent } from '../runtime/codex-runtime-config-sync.js';
 
 function parseBooleanConfig(value) {
     if (typeof value === 'boolean') return value;
@@ -127,6 +128,11 @@ export async function reloadConfig(providerPoolManager) {
             Object.keys(serviceInstances).forEach(key => delete serviceInstances[key]);
             initApiService(CONFIG, false, { preserveProviderPools: true });
 
+            // 多 worker：execution worker 不会读到 control worker 的内存配置，需显式下发 Codex 运行时开关。
+            if (process.env.RUNTIME_WORKER_ROLE === 'control' && typeof process.send === 'function') {
+                process.send(buildCodexRuntimeConfigEvent(CONFIG));
+            }
+
             logger.info('[UI API] Configuration reloaded successfully');
 
             return newConfig;
@@ -175,6 +181,9 @@ export async function handleGetConfig(req, res, currentConfig) {
         IMAGE_ASPECT_MISMATCH_THRESHOLD: currentConfig.IMAGE_ASPECT_MISMATCH_THRESHOLD ?? 0.10,
         IMAGE_SIZE_MAX_PIXELS: currentConfig.IMAGE_SIZE_MAX_PIXELS ?? 8388608,
         CODEX_FINGERPRINT_ENABLED: currentConfig.CODEX_FINGERPRINT_ENABLED === true,
+        CODEX_FINGERPRINT_ENABLED_SOURCE: process.env.CODEX_FINGERPRINT_ENABLED !== undefined ? 'env' : 'config',
+        CODEX_CLOAKING_ENABLED: currentConfig.CODEX_CLOAKING_ENABLED !== false,
+        CODEX_CLOAKING_ENABLED_SOURCE: process.env.CODEX_CLOAKING_ENABLED !== undefined ? 'env' : 'config',
         CODEX_POTLUCK_STICKY_PROVIDER_ENABLED: currentConfig.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED,
         CODEX_PREWARM_ENABLED: currentConfig.CODEX_PREWARM_ENABLED,
         CODEX_PREWARM_TIMES: currentConfig.CODEX_PREWARM_TIMES,
@@ -325,6 +334,7 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
             if (Number.isInteger(v) && v > 0) currentConfig.IMAGE_SIZE_MAX_PIXELS = v;
         }
         if (newConfig.CODEX_FINGERPRINT_ENABLED !== undefined) currentConfig.CODEX_FINGERPRINT_ENABLED = parseBooleanConfig(newConfig.CODEX_FINGERPRINT_ENABLED);
+        if (newConfig.CODEX_CLOAKING_ENABLED !== undefined) currentConfig.CODEX_CLOAKING_ENABLED = parseBooleanConfig(newConfig.CODEX_CLOAKING_ENABLED);
         if (newConfig.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED !== undefined) currentConfig.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED = parseBooleanConfig(newConfig.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED);
         if (newConfig.CODEX_PREWARM_ENABLED !== undefined) currentConfig.CODEX_PREWARM_ENABLED = parseBooleanConfig(newConfig.CODEX_PREWARM_ENABLED);
         if (newConfig.CODEX_PREWARM_TIMES !== undefined) {
@@ -543,6 +553,7 @@ async function _handleUpdateConfig(req, res, currentConfig, body) {
                     IMAGE_ASPECT_MISMATCH_THRESHOLD: currentConfig.IMAGE_ASPECT_MISMATCH_THRESHOLD,
                     IMAGE_SIZE_MAX_PIXELS: currentConfig.IMAGE_SIZE_MAX_PIXELS,
                     CODEX_FINGERPRINT_ENABLED: currentConfig.CODEX_FINGERPRINT_ENABLED,
+                    CODEX_CLOAKING_ENABLED: currentConfig.CODEX_CLOAKING_ENABLED,
                     CODEX_POTLUCK_STICKY_PROVIDER_ENABLED: currentConfig.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED,
                 CODEX_PREWARM_ENABLED: currentConfig.CODEX_PREWARM_ENABLED,
                 CODEX_PREWARM_TIMES: currentConfig.CODEX_PREWARM_TIMES,

@@ -440,25 +440,8 @@ export class CodexConverter extends BaseConverter {
             }
         }
 
-        // 在 input 开头注入特殊指令（如果配置允许）
-        // 这里我们默认开启，因为这是为了确保 Codex 遵循指令
-        if (codexRequest.input.length > 0 && codexRequest.instructions) {
-             const firstMsg = codexRequest.input[0];
-             const specialInstruction = "EXECUTE ACCORDING TO THE FOLLOWING INSTRUCTIONS!!!";
-             const firstText = firstMsg.content?.[0]?.text;
-             
-             if (firstMsg.role === 'user' && firstText !== specialInstruction) {
-                 codexRequest.input.unshift({
-                     type: "message",
-                     role: "user",
-                     content: [{
-                         type: "input_text",
-                         text: specialInstruction
-                     }]
-                 });
-             }
-        }
-
+        // 不再向 input 头部注入 "EXECUTE ACCORDING TO THE FOLLOWING INSTRUCTIONS!!!"：
+        // 原生 Codex 与 CPA 都不会发送该内容，保留它会让请求带上可识别的非原生痕迹。
         return codexRequest;
     }
 

@@ -169,6 +169,13 @@ export function createCodexOAuthAxiosConfig(config = {}, options = {}) {
     return configureAxiosProxy(axiosConfig, config, 'openai-codex-oauth');
 }
 
+const CODEX_TERMINAL_REFRESH_ERRORS = new Set([
+    'invalid_grant',
+    'refresh_token_reused',
+    'refresh_token_expired',
+    'refresh_token_invalidated'
+]);
+
 export async function postCodexOAuthRefreshRequest(httpClient, url, data, headers, timeoutMs = 30000) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -531,7 +538,8 @@ class CodexAuth {
                 new URLSearchParams({
                     grant_type: 'refresh_token',
                     client_id: CODEX_OAUTH_CONFIG.clientId,
-                    refresh_token: refreshToken
+                    refresh_token: refreshToken,
+                    scope: 'openid profile email'
                 }).toString(),
                 {
                     'Content-Type': 'application/x-www-form-urlencoded',
@@ -554,7 +562,11 @@ class CodexAuth {
             }, claims);
         } catch (error) {
             logger.error(`${CODEX_OAUTH_CONFIG.logPrefix} Token refresh failed:`, error.response?.data || error.message);
-            throw new Error(`Failed to refresh tokens: ${error.response?.data?.error_description || error.message}`);
+            const failure = new Error(`Failed to refresh tokens: ${error.response?.data?.error_description || error.message}`);
+            const upstreamError = error.response?.data?.error;
+            const errorCode = typeof upstreamError === 'string' ? upstreamError : upstreamError?.code;
+            if (errorCode) failure.refreshErrorCode = String(errorCode);
+            throw failure;
         }
     }
 
@@ -958,6 +970,9 @@ export async function refreshCodexTokensWithRetry(refreshToken, config = {}, max
         } catch (error) {
             lastError = error;
             logger.warn(`${CODEX_OAUTH_CONFIG.logPrefix} Retry ${i + 1}/${maxRetries} failed:`, error.message);
+
+            // refresh token 已被消费/失效时重试只会扩大风险（reused 可能令整条令牌链失效），直接失败。
+            if (CODEX_TERMINAL_REFRESH_ERRORS.has(error.refreshErrorCode)) throw error;
 
             if (i < maxRetries - 1) {
                 // 指数退避

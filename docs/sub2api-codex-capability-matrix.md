@@ -19,6 +19,7 @@
 | 全局紧急关闭 | 缺失 | `CODEX_FINGERPRINT_ENABLED` 默认 true，false 等价 off | 新增 |
 | 存量账号迁移与备份 | 缺失 | 文件锁、原子写入、迁移前 `.bak`、执行 worker 不持久化 | 新增 |
 | 管理端模式选择与全局状态 | 缺失 | Codex Provider 选择器、全局开关、脱敏审计摘要 | 新增 |
+| 多 worker 全局开关与审计同步 | 开关只更新 control worker，执行 worker 需重启 | `codex_runtime_config_sync` 下发并清理 Codex adapter；审计摘要经 `codex_fingerprint_audit` 回传 control（2026-10-12） | 修复 |
 | WebSocket 专属 ingress 恢复流程 | 当前项目无同等 WS Codex forward 链 | 不移植 | 不适用 |
 
 ## 指纹实现约束

@@ -23,6 +23,8 @@ jest.mock('../src/utils/proxy-utils.js', () => ({
 
 const variants = ['gpt-6.1-sol', 'gpt-6.1-sol-fast', 'gpt-6.1-sol-ultrafast'];
 const tiers = ['default', 'priority', 'ultrafast'];
+// 出站请求不发送 default 档位（对齐原生 Codex），上游响应仍可回报 default。
+const outboundTiers = [undefined, 'priority', 'ultrafast'];
 const services = [];
 function createService(config = {}) {
     const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth', ...config });
@@ -55,7 +57,7 @@ describe('GPT-6.1 Sol Codex support', () => {
                 top_logprobs: 1, include: ['reasoning.encrypted_content', 'message.output_text.logprobs']
             }, true);
             expect(body.model).toBe('gpt-6.1-sol');
-            expect(body.service_tier).toBe(tiers[variants.indexOf(model)]);
+            expect(body.service_tier).toBe(outboundTiers[variants.indexOf(model)]);
             expect(body.reasoning.effort).toBe(expected);
             expect(body).not.toHaveProperty('temperature');
             expect(body).not.toHaveProperty('top_p');
@@ -121,7 +123,7 @@ describe('GPT-6.1 Sol Codex support', () => {
         expect(output.choices[0].message.content).toBe('2');
         const chatBody = axios.request.mock.calls[0][0].data;
         expect(chatBody.model).toBe('gpt-6.1-sol');
-        expect(chatBody.service_tier).toBe(tiers[variants.indexOf(model)]);
+        expect(chatBody.service_tier).toBe(outboundTiers[variants.indexOf(model)]);
         expect(chatBody.reasoning.effort).toBe('low');
         expect(chatBody.input[0].content).toContainEqual({ type: 'input_image', image_url: imageUrl });
         expect(chatBody.tools[0]).toMatchObject({ type: 'function', name: 'probe' });
@@ -141,7 +143,7 @@ describe('GPT-6.1 Sol Codex support', () => {
         const streamBody = axios.request.mock.calls[1][0].data;
         expect(streamBody.model).toBe('gpt-6.1-sol');
         expect(streamBody.reasoning.effort).toBe('high');
-        expect(streamBody.service_tier).toBe(tiers[variants.indexOf(model)]);
+        expect(streamBody.service_tier).toBe(outboundTiers[variants.indexOf(model)]);
         expect(streamBody.input[0].content[1]).toEqual({ type: 'input_image', image_url: imageUrl });
         expect(streamBody.tools[0]).toMatchObject({ type: 'function', name: 'probe' });
         expect(axios.request).toHaveBeenCalledTimes(2);

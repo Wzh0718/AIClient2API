@@ -10,7 +10,7 @@ This branch adds three related capabilities without storing business prompts or 
 
 Set `codexTurnStateReuseEnabled: true` on an individual `openai-codex-oauth` credential to enable server reuse. The cache key includes the caller key hash, credential identity and configuration revision, outbound model, original session, and original turn ID. Requests without both an original session and turn ID are pass-through only. Client and response values may be up to 8 KiB and are still relayed opaquely, but the server cache accepts a value only after a successful upstream response and only when its UTF-8 byte length is exactly 292. Cached values stay in bounded memory for 30 idle minutes and are shared between local workers through non-durable IPC. Their length is observable; their value is never written to request audit records or logs.
 
-Credential configuration overrides client `Version`, `User-Agent`, `Originator`, and beta feature headers. Otherwise valid client values are retained before compatibility defaults are applied. Authorization and account identity always come from the selected credential.
+Codex client identity (`User-Agent`, `originator`, `version`, `x-codex-beta-features`) is decided as one group. With `CODEX_CLOAKING_ENABLED` (default on) every request uses the configured values or the default `codex_cli_rs/0.162.1 (Windows 10.0.19045; x86_64) unknown` identity. With cloaking off, a recognised Codex client identity is passed through as a whole; a mismatched originator, an unrecognised UA, or a version too old for GPT-6 Sol/Luna falls back to the default group instead of mixing values. Authorization and account identity always come from the selected credential. See `docs/cpa-codex-protocol-alignment.md`.
 
 ## GPT request records
 

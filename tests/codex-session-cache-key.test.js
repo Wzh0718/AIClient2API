@@ -41,10 +41,10 @@ describe('Codex session cache key handling', () => {
             const body = await service.prepareRequestBody('gpt-6-sol', { prompt_cache_key: key, input: [] }, false);
             const headers = service.buildHeaders(body.prompt_cache_key, false, { inboundHeaders: { 'session-id': key, 'thread-id': key } });
             expect(body.prompt_cache_key).toBe(key);
-            expect(headers.Conversation_id).toMatch(/^aic2a-[a-f0-9]{32}$/);
-            expect(headers['Session-Id']).toBe(headers.Conversation_id);
-            expect(headers['thread-id']).toBe(headers.Conversation_id);
-            expect(service.buildHeaders(key).Conversation_id).toBe(headers.Conversation_id);
+            expect(headers['session-id']).toMatch(/^aic2a-[a-f0-9]{32}$/);
+            expect(headers['thread-id']).toBe(headers['session-id']);
+            expect(headers).not.toHaveProperty('Conversation_id');
+            expect(service.buildHeaders(key)['session-id']).toBe(headers['session-id']);
         } finally { service.stopCacheCleanup(); }
     });
 
@@ -53,8 +53,8 @@ describe('Codex session cache key handling', () => {
         try {
             for (const key of ['a', 'x'.repeat(256)]) {
                 const headers = service.buildHeaders(key, true, { inboundHeaders: { session_id: key, 'thread-id': key } });
-                expect(headers.Conversation_id).toBe(key);
-                expect(headers['Session-Id']).toBe(key);
+                expect(headers).not.toHaveProperty('Conversation_id');
+                expect(headers['session-id']).toBe(key);
                 expect(headers['thread-id']).toBe(key);
                 expect(headers.session_id).toBeUndefined();
             }
@@ -66,22 +66,37 @@ describe('Codex session cache key handling', () => {
         const ids = { mode, installationId: 'installation', sessionId: 'account-session', threadId: 'account-thread', windowId: 'window' };
         try {
             const headers = service.buildHeaders('缓存', true, { ids, inboundHeaders: { session_id: '会话', 'thread-id': '线程' } });
-            expect(headers.Conversation_id).toBe(service.toSafeCacheHeaderValue('缓存'));
-            expect(headers['Session-Id']).toBe(mode === 'device' ? service.toSafeCacheHeaderValue('会话') : ids.sessionId);
+            expect(headers['session-id']).toBe(mode === 'device' ? service.toSafeCacheHeaderValue('会话') : ids.sessionId);
             expect(headers['thread-id']).toBe(mode === 'device' ? service.toSafeCacheHeaderValue('线程') : ids.threadId);
-            expect(headers['x-codex-installation-id']).toBe(ids.installationId);
+            expect(headers).not.toHaveProperty('x-codex-installation-id');
         } finally { service.stopCacheCleanup(); }
     });
 
-    test('retains configured and inbound client versions and user agents', () => {
+    test('cloaking (default) forces one consistent identity; configured values win', () => {
         const configured = new CodexApiService({ CODEX_VERSION: '0.163.0', CODEX_USER_AGENT: 'configured-agent' });
-        const inbound = new CodexApiService({});
-        const state = { inboundHeaders: { version: '0.164.0', 'user-agent': 'inbound-agent' } };
+        const cloaked = new CodexApiService({});
+        const state = { inboundHeaders: { version: '0.164.0', 'user-agent': 'codex_cli_rs/0.164.0 (Mac OS 15.0; arm64) iTerm', originator: 'codex_cli_rs' } };
         try {
             expect(configured.buildHeaders(null, false, state)).toMatchObject({ version: '0.163.0', 'user-agent': 'configured-agent' });
-            expect(inbound.buildHeaders(null, false, state)).toMatchObject({ version: '0.164.0', 'user-agent': 'inbound-agent' });
-            expect(inbound.buildHeaders(null, false, { inboundHeaders: { version: '0.154.0' } }, 'gpt-6-luna').version).toBe('0.162.0');
-        } finally { configured.stopCacheCleanup(); inbound.stopCacheCleanup(); }
+            expect(cloaked.buildHeaders(null, false, state)).toMatchObject({
+                version: '0.162.1',
+                originator: 'codex_cli_rs',
+                'user-agent': 'codex_cli_rs/0.162.1 (Windows 10.0.19045; x86_64) unknown'
+            });
+        } finally { configured.stopCacheCleanup(); cloaked.stopCacheCleanup(); }
+    });
+
+    test('with cloaking disabled, passes a recognised Codex identity through as a group', () => {
+        const service = new CodexApiService({ CODEX_CLOAKING_ENABLED: false });
+        const ua = 'codex-tui/0.164.0 (Mac OS 15.0; arm64) iTerm.app (codex-tui; 0.164.0)';
+        try {
+            expect(service.buildHeaders(null, false, { inboundHeaders: { 'user-agent': ua, version: '0.164.0' } }))
+                .toMatchObject({ 'user-agent': ua, originator: 'codex-tui', version: '0.164.0' });
+            // originator 与 UA 前缀不一致时整组回落默认身份，避免混搭。
+            expect(service.buildHeaders(null, false, { inboundHeaders: { 'user-agent': ua, originator: 'Codex Desktop' } }))
+                .toMatchObject({ originator: 'codex_cli_rs', 'user-agent': 'codex_cli_rs/0.162.1 (Windows 10.0.19045; x86_64) unknown' });
+            expect(service.buildHeaders(null, false, { inboundHeaders: { 'user-agent': 'curl/8.0' } }).originator).toBe('codex_cli_rs');
+        } finally { service.stopCacheCleanup(); }
     });
 
     test('uses the upstream Codex client version required for GPT-6 Sol and Luna', () => {
@@ -90,9 +105,9 @@ describe('Codex session cache key handling', () => {
         try {
             const headers = service.buildHeaders(null, false);
 
-            expect(headers.version).toBe('0.162.0');
-            expect(headers['user-agent']).toContain('codex-tui/0.162.0');
-            expect(service.buildUsageHeaders()['user-agent']).toContain('codex-tui/0.162.0');
+            expect(headers.version).toBe('0.162.1');
+            expect(headers['user-agent']).toContain('codex_cli_rs/0.162.1');
+            expect(service.buildUsageHeaders()['user-agent']).toContain('codex_cli_rs/0.162.1');
         } finally {
             service.stopCacheCleanup();
         }

@@ -53,7 +53,15 @@ import { beginRequestAttempt, finishRequestAttempt } from '../../utils/request-a
 
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
 const CODEX_MODELS = getCodexModelIds(baseModels);
-const CODEX_VERSION = '0.162.0';
+const CODEX_VERSION = '0.162.1';
+// 默认出站身份对齐本机原生 Codex CLI 形态（2026-10-12 抓包：Desktop 主请求带 x-oai-attestation，
+// 无法生成，故不冒充 Desktop）。终端段取本机抓包值 unknown。
+const CODEX_DEFAULT_ORIGINATOR = 'codex_cli_rs';
+const CODEX_DEFAULT_BETA_FEATURES = 'remote_compaction_v2';
+function defaultCodexUserAgent(version) {
+    return `${CODEX_DEFAULT_ORIGINATOR}/${version} (Windows 10.0.19045; x86_64) unknown`;
+}
+const CODEX_CLIENT_UA_PATTERN = /^(codex_cli_rs|codex-tui|codex_vscode|codex_exec|Codex Desktop)\/(\d+\.\d+\.\d+\S*)\s/;
 function codexVersionForModel(model, version) {
     if (!/^gpt-6-(?:sol|luna)$/i.test(model)) return version;
     const parts = String(version).match(/^(\d+)\.(\d+)\.(\d+)/);
@@ -64,9 +72,14 @@ function codexVersionForModel(model, version) {
         : CODEX_VERSION;
 }
 export const IMAGE_MODELS = new Set(['gpt-image-2', 'gpt-image-2.5', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst']);
-const IMAGE_GENERATION_FUNCTION_NAMES = new Set(['image_gen.imagegen', 'image_gen__imagegen']);
 const IMAGE_TOOL_STRING_FIELDS = ['size', 'quality', 'background', 'output_format', 'input_fidelity', 'moderation'];
 const IMAGE_TOOL_NUMERIC_FIELDS = ['output_compression', 'partial_images'];
+// CPA 删除、Codex 后端不接受的 Responses 参数。temperature/top_p 因按模型有条件保留不在此列；
+// prompt_cache_options 由质量门禁测试要求原样透传以便定位上游 400，也不在此列。
+const CODEX_UNSUPPORTED_BODY_KEYS = [
+    'truncation', 'user', 'max_output_tokens', 'max_completion_tokens',
+    'prompt_cache_breakpoint', 'generate'
+];
 
 function normalizeCodexTerminalError(parsed) {
     if (!parsed || typeof parsed !== 'object') return null;
@@ -248,15 +261,38 @@ function applyImageToolOptions(imageToolConfig, options) {
     }
 }
 
-function sanitizeCodexReasoningInput(input) {
+const CODEX_MAX_INPUT_ID_LENGTH = 64;
+
+// 确定性缩短：同一原值总得到同一结果，保证 function_call 与 function_call_output 的 call_id 仍然配对。
+export function shortenCodexInputId(value) {
+    if (typeof value !== 'string' || value.length <= CODEX_MAX_INPUT_ID_LENGTH) return value;
+    const digest = crypto.createHash('sha256').update(value).digest('hex').slice(0, 32);
+    return `${value.slice(0, CODEX_MAX_INPUT_ID_LENGTH - 33)}_${digest}`;
+}
+
+export function sanitizeCodexInputItemIds(input) {
     if (!Array.isArray(input)) return input;
     return input.map(item => {
+        if (!item || typeof item !== 'object') return item;
+        const idTooLong = typeof item.id === 'string' && item.id.length > CODEX_MAX_INPUT_ID_LENGTH;
+        const callIdTooLong = typeof item.call_id === 'string' && item.call_id.length > CODEX_MAX_INPUT_ID_LENGTH;
+        if (!idTooLong && !callIdTooLong) return item;
+        const sanitized = { ...item };
+        if (idTooLong) sanitized.id = shortenCodexInputId(item.id);
+        if (callIdTooLong) sanitized.call_id = shortenCodexInputId(item.call_id);
+        return sanitized;
+    });
+}
+
+function sanitizeCodexReasoningInput(input) {
+    if (!Array.isArray(input)) return input;
+    return sanitizeCodexInputItemIds(input.map(item => {
         if (!item || typeof item !== 'object' || item.type !== 'reasoning') return item;
         const sanitized = { ...item };
         delete sanitized.id;
         if (!Array.isArray(sanitized.summary)) sanitized.summary = [];
         return sanitized;
-    });
+    }));
 }
 
 function parseRejectedFieldError(error) {
@@ -342,7 +378,6 @@ export class CodexApiService {
         this.conversationCache = new Map(); // key: model-userId, value: {id, expire}
         this.startCacheCleanup();
 
-        this.imageGenTool = {type: 'image_generation', output_format: 'png'};
         this.fingerprintRequestState = new WeakMap();
     }
 
@@ -546,7 +581,7 @@ export class CodexApiService {
         // fingerprintState.turnState = await resolveCodexTurnStateForRequestAsync({
         //     config: this.config, context: fingerprintState.context, model: body.model || selectedModel
         // });
-        const headers = this.buildHeaders(body.prompt_cache_key, true, fingerprintState, body.model || selectedModel);
+        const headers = this.buildHeaders(body.prompt_cache_key, true, fingerprintState, body.model || selectedModel, body.service_tier);
 
         let overloadRetryCount = 0;
         let rateLimitRetryCount = 0;
@@ -710,7 +745,7 @@ export class CodexApiService {
         // fingerprintState.turnState = await resolveCodexTurnStateForRequestAsync({
         //     config: this.config, context: fingerprintState.context, model: body.model || selectedModel
         // });
-        const headers = this.buildHeaders(body.prompt_cache_key, true, fingerprintState, body.model || selectedModel);
+        const headers = this.buildHeaders(body.prompt_cache_key, true, fingerprintState, body.model || selectedModel, body.service_tier);
 
         let overloadRetryCount = 0;
         let rateLimitRetryCount = 0;
@@ -875,49 +910,80 @@ export class CodexApiService {
     /**
      * 构建请求头
      */
-    buildHeaders(cacheId, stream = true, fingerprintState = null, model = '') {
-        const inboundHeaders = fingerprintState?.inboundHeaders || {};
-        const getInboundHeader = (name) => Object.entries(inboundHeaders)
-            .find(([key, value]) => key.toLowerCase() === name.toLowerCase() && value !== undefined && value !== null && String(value).trim())?.[1];
+    /**
+     * 决定出站客户端身份（user-agent / originator / version / beta）。三者成组决定，避免混搭：
+     * - CODEX_CLOAKING_ENABLED（默认开）：统一使用默认身份或显式配置值；
+     * - 关闭时：入站 UA 可识别为 Codex 客户端才整组透传，否则回落默认身份。
+     */
+    resolveClientIdentity(model, getInboundHeader) {
         const configuredVersion = String(this.config.CODEX_VERSION || '').trim();
         const configuredBeta = String(this.config.CODEX_BETA_FEATURES || '').trim();
         const configuredUserAgent = String(this.config.CODEX_USER_AGENT || '').trim();
         const configuredOriginator = String(this.config.CODEX_ORIGINATOR || '').trim();
-        const version = codexVersionForModel(model, configuredVersion || getInboundHeader('version') || CODEX_VERSION);
+        const cloaking = this.config.CODEX_CLOAKING_ENABLED !== false && this.config.CODEX_CLOAKING_ENABLED !== 'false';
+
+        if (!cloaking) {
+            const inboundUserAgent = String(getInboundHeader('user-agent') || '').trim();
+            const match = inboundUserAgent.match(CODEX_CLIENT_UA_PATTERN);
+            const inboundOriginator = String(getInboundHeader('originator') || '').trim();
+            const inboundVersion = String(getInboundHeader('version') || '').trim() || match?.[2] || '';
+            // GPT-6 Sol/Luna 要求较新客户端版本；旧版本无法整组透传，回落默认身份而不是只抬高 version 造成混搭。
+            if (match && (!inboundOriginator || inboundOriginator === match[1])
+                && codexVersionForModel(model, inboundVersion) === inboundVersion) {
+                return {
+                    userAgent: inboundUserAgent,
+                    originator: match[1],
+                    version: String(getInboundHeader('version') || '').trim() || null,
+                    betaFeatures: String(getInboundHeader('x-codex-beta-features') || '').trim() || null
+                };
+            }
+        }
+
+        const version = codexVersionForModel(model, configuredVersion || CODEX_VERSION);
+        return {
+            userAgent: configuredUserAgent || defaultCodexUserAgent(version),
+            originator: configuredOriginator || CODEX_DEFAULT_ORIGINATOR,
+            version,
+            betaFeatures: configuredBeta || CODEX_DEFAULT_BETA_FEATURES
+        };
+    }
+
+    buildHeaders(cacheId, stream = true, fingerprintState = null, model = '', serviceTier = '') {
+        const inboundHeaders = fingerprintState?.inboundHeaders || {};
+        const getInboundHeader = (name) => Object.entries(inboundHeaders)
+            .find(([key, value]) => key.toLowerCase() === name.toLowerCase() && value !== undefined && value !== null && String(value).trim())?.[1];
+        const identity = this.resolveClientIdentity(model, getInboundHeader);
+        // 头集合对齐本机原生 Codex 抓包：无 host/Connection/Conversation_id/x-oai-web-search-eligible，
+        // x-codex-installation-id 只放在 body client_metadata。
         const headers = {
-            'version': version,
-            'x-codex-beta-features': configuredBeta || getInboundHeader('x-codex-beta-features') || 'powershell_utf8',
-            'x-oai-web-search-eligible': 'true',
             'authorization': `Bearer ${this.accessToken}`,
             'chatgpt-account-id': this.accountId,
             'content-type': 'application/json',
-            'user-agent': configuredUserAgent || getInboundHeader('user-agent') || `codex-tui/${CODEX_VERSION} (Windows 10.0.26100; x86_64) WindowsTerminal (codex-tui; ${CODEX_VERSION})`,
-            'originator': configuredOriginator || getInboundHeader('originator') || 'codex-tui',
-            'host': 'chatgpt.com',
-            'Connection': 'Keep-Alive'
+            'user-agent': identity.userAgent,
+            'originator': identity.originator
         };
+        if (identity.version) headers['version'] = identity.version;
+        if (identity.betaFeatures) headers['x-codex-beta-features'] = identity.betaFeatures;
+        if (model) {
+            const tier = ['priority', 'ultrafast'].includes(serviceTier) ? `;tier=${serviceTier}` : '';
+            headers['x-codex-routing-hint'] = `model=${model}${tier}`;
+        }
 
         for (const name of [
-            'x-codex-turn-metadata', 'x-codex-window-id', 'x-codex-installation-id',
-            'x-client-request-id', 'thread-id'
+            'x-codex-turn-metadata', 'x-codex-window-id', 'x-client-request-id', 'thread-id'
         ]) {
             const value = getInboundHeader(name);
             if (value !== undefined && value !== null && String(value).trim()) {
                 headers[name] = name === 'thread-id' ? this.toSafeCacheHeaderValue(value) : String(value);
             }
         }
-        // 入站兼容多种 session header，出站只保留 canonical Session-Id。
+        // 入站兼容多种 session header，出站只保留原生形式 session-id。
         const inboundSession = ['session-id', 'session_id']
             .map(name => getInboundHeader(name))
             .find(value => value !== undefined && value !== null && String(value).trim());
         const sessionHeader = inboundSession || cacheId;
         if (sessionHeader) {
-            headers['Session-Id'] = this.toSafeCacheHeaderValue(sessionHeader);
-        }
-
-        // 设置 Conversation_id；prompt_cache_key 继续保留并参与现有 sticky/cache 逻辑。
-        if (cacheId) {
-            headers['Conversation_id'] = this.toSafeCacheHeaderValue(cacheId);
+            headers['session-id'] = this.toSafeCacheHeaderValue(sessionHeader);
         }
 
         // 必须最后改写，让账号级指纹覆盖入站身份，同时维持唯一 canonical Session-Id。
@@ -1041,6 +1107,7 @@ export class CodexApiService {
         delete cleanedBody.prompt_cache_retention;
         delete cleanedBody.safety_identifier;
         delete cleanedBody.stream_options;
+        for (const unsupportedKey of CODEX_UNSUPPORTED_BODY_KEYS) delete cleanedBody[unsupportedKey];
         cleanedBody.input = sanitizeCodexReasoningInput(cleanedBody.input);
 
         // 【关键修复】确保传给上游的模型名称不带速度后缀
@@ -1072,24 +1139,22 @@ export class CodexApiService {
                 .join(', ');
             logger.info(`[Codex] Image model detected: ${upstreamModel} -> ${effectiveUpstreamModel} with image_generation tool${imageToolLogDetails ? `, ${imageToolLogDetails}` : ''}`);
         } else {
-            // 为普通 Codex 模型增加默认工具
+            // 为普通 Codex 模型增加默认 web_search（原生 Codex 默认每个请求都声明，
+            // 且历史含 web_search_call 而缺少声明会触发上游 502）。
+            // 不再默认注入 image_generation：原生 Codex 0.145+ 已不发托管工具，客户端自带的原样透传。
             if (!cleanedBody.tools) {
                 cleanedBody.tools = [];
             }
             if (Array.isArray(cleanedBody.tools)) {
                 const hasWebSearch = cleanedBody.tools.some(t => t.type === 'web_search');
                 if (!hasWebSearch) {
-                    cleanedBody.tools.push({type: 'web_search'});
+                    // 形状对齐本机 Codex Desktop 抓包（web_search = "live"）。
+                    cleanedBody.tools.push({type: 'web_search', external_web_access: true});
                 }
-                const hasHostedImageGeneration = cleanedBody.tools.some(tool => tool?.type === 'image_generation');
-                const hasImageGenerationFunction = cleanedBody.tools.some(tool => {
-                    if (tool?.type !== 'function') return false;
-                    const name = tool.name || tool.function?.name;
-                    return IMAGE_GENERATION_FUNCTION_NAMES.has(name);
-                });
-                if (!hasHostedImageGeneration && !hasImageGenerationFunction) {
-                    cleanedBody.tools.push(this.imageGenTool);
-                }
+            }
+            // 原生 Codex 每个请求都显式携带 tool_choice: "auto"。
+            if (cleanedBody.tool_choice === undefined) {
+                cleanedBody.tool_choice = 'auto';
             }
         }
 
@@ -1171,6 +1236,10 @@ export class CodexApiService {
         if (isGpt61SolModel(effectiveUpstreamModel)) delete result.reasoning_effort;
 
         if (!["default", "priority", "fast", "ultrafast"].includes(result.service_tier)) {
+            delete result.service_tier;
+        }
+        // 原生 Codex 不发送 default 档位（本机配置 service_tier="default" 时抓包中无该字段）；计费只区分 priority/fast/ultrafast。
+        if (result.service_tier === 'default') {
             delete result.service_tier;
         }
 
@@ -1665,7 +1734,8 @@ export class CodexApiService {
 
     buildUsageHeaders() {
         return {
-            'user-agent': `codex-tui/${CODEX_VERSION} (Windows 10.0.26100; x86_64) WindowsTerminal (codex-tui; ${CODEX_VERSION})`,
+            'user-agent': String(this.config.CODEX_USER_AGENT || '').trim() || defaultCodexUserAgent(CODEX_VERSION),
+            'originator': String(this.config.CODEX_ORIGINATOR || '').trim() || CODEX_DEFAULT_ORIGINATOR,
             'authorization': `Bearer ${this.accessToken}`,
             'chatgpt-account-id': this.accountId,
             'accept': '*/*',

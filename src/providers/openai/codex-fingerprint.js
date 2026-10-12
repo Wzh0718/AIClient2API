@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 
 export const CODEX_FINGERPRINT_MODES = Object.freeze(['off', 'device', 'session', 'full']);
-export const DEFAULT_CODEX_FINGERPRINT_MODE = 'off';
+export const DEFAULT_CODEX_FINGERPRINT_MODE = 'session';
 export const CODEX_FINGERPRINT_VERSION = 1;
 export const CODEX_FINGERPRINT_CONTEXT_KEY = '_codexFingerprintContext';
 
@@ -115,13 +115,13 @@ export function applyCodexFingerprintHeaders(headers = {}, ids) {
     for (const name of rewrittenHeaderNames) {
         deleteHeaderCaseInsensitive(headers, name);
     }
-    headers['x-codex-installation-id'] = ids.installationId;
+    // 原生 Codex 不以请求头发送 installation id，只放在 client_metadata 与 turn-metadata 中。
 
     const metadataFields = { installation_id: ids.installationId };
     if (ids.mode !== 'device') {
         headers['x-codex-window-id'] = ids.windowId;
         headers['x-client-request-id'] = ids.threadId;
-        headers['Session-Id'] = ids.sessionId;
+        headers['session-id'] = ids.sessionId;
         headers['thread-id'] = ids.threadId;
         Object.assign(metadataFields, {
             session_id: ids.sessionId,

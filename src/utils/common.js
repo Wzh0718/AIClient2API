@@ -175,7 +175,12 @@ const CODEX_FINGERPRINT_HEADER_NAMES = Object.freeze([
     'session-id',
     'session_id',
     'thread-id',
-    'x-codex-turn-state'
+    'x-codex-turn-state',
+    // 客户端身份三元组：仅在关闭 CODEX_CLOAKING_ENABLED 时透传给上游。
+    'user-agent',
+    'originator',
+    'version',
+    'x-codex-beta-features'
 ]);
 
 export function extractInboundCodexFingerprintContext(req, requestBody = {}) {
@@ -829,7 +834,10 @@ export async function captureSafeUpstreamErrorDiagnostic(error) {
     return defineSafeUpstreamDiagnostic(error, buildSafeUpstreamDiagnostic(error, { payload, rawText, readTruncated }));
 }
 
-function isDefinitiveProviderAuthFailure(error) {
+const HTML_CHALLENGE_MARKERS = ['<html', '<!doctype html', 'cf-ray', 'just a moment', 'attention required'];
+const DEACTIVATION_MARKERS = ['account_deactivated', 'deactivated_workspace'];
+
+export function isDefinitiveProviderAuthFailure(error) {
     const status = Number(getErrorStatusCode(error));
     const responseText = extractReadableErrorText(error?.response?.data);
     const codeText = [
@@ -849,19 +857,22 @@ function isDefinitiveProviderAuthFailure(error) {
     }
 
     if (status === 403) {
+        // Cloudflare/WAF 挑战页是网络层拦截，不是凭据失效；裸 "forbidden" 同理，只作普通错误处理。
+        if (HTML_CHALLENGE_MARKERS.some(marker => searchableText.includes(marker))) return false;
         return [
             'authentication_error',
             'token_invalidated',
             'invalid token',
             'expired token',
             'unauthorized',
-            'forbidden',
             're-authenticate',
-            'signing in again'
+            'signing in again',
+            ...DEACTIVATION_MARKERS
         ].some(marker => searchableText.includes(marker));
     }
 
     return [
+        ...DEACTIVATION_MARKERS,
         'token_invalidated',
         'authentication_error',
         'invalid token',

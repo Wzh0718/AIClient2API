@@ -28,7 +28,9 @@ import { RuntimeHookPoller } from '../runtime/runtime-hook-poller.js';
 import { RuntimeHookHealthState } from '../runtime/runtime-hook-health-state.js';
 import { resolveRuntimeBatchConfig } from '../runtime/runtime-batch-config.js';
 import { migrateCodexFingerprintProviderPoolsFile } from '../utils/codex-fingerprint-migration.js';
-import { invalidateServiceAdapter } from '../providers/adapter.js';
+import { invalidateServiceAdapter, serviceInstances } from '../providers/adapter.js';
+import { CODEX_RUNTIME_CONFIG_SYNC_TYPE, applyCodexRuntimeConfigEvent } from '../runtime/codex-runtime-config-sync.js';
+import { CODEX_FINGERPRINT_AUDIT_SYNC_TYPE, applyRemoteCodexFingerprintAudit } from '../providers/openai/codex-fingerprint-audit.js';
 import { runtimeImageCapacity } from '../runtime/runtime-image-capacity.js';
 import { buildKeyConfigSyncAck } from '../runtime/multi-worker-runtime.js';
 import { getPricingDiagnostics } from '../plugins/api-potluck/cost-estimator.js';
@@ -1015,6 +1017,17 @@ const shutdownHandlers = registerWorkerShutdownHandlers({
                 message.providerUuid,
                 message.identity
             ).catch(error => logger.error('[Provider Identity] Failed to reconcile discovered identity:', error.message));
+            return true;
+        }
+        if (message.type === CODEX_FINGERPRINT_AUDIT_SYNC_TYPE && RUNTIME_WORKER_ROLE === 'control') {
+            applyRemoteCodexFingerprintAudit(message.uuid, message.summary);
+            return true;
+        }
+        if (message.type === CODEX_RUNTIME_CONFIG_SYNC_TYPE && IS_EXECUTION_WORKER) {
+            const result = applyCodexRuntimeConfigEvent(message, CONFIG, serviceInstances);
+            if (result.applied) {
+                logger.info(`[Codex Runtime Sync] Applied revision ${result.revision}, invalidated ${result.invalidated} adapter(s)`);
+            }
             return true;
         }
         if (message.type === 'request_audit_raw_capture_sync' && IS_EXECUTION_WORKER) {

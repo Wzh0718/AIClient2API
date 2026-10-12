@@ -503,6 +503,7 @@ async function loadConfiguration() {
         const imageAspectMismatchThresholdEl = document.getElementById('imageAspectMismatchThreshold');
         const imageSizeMaxPixelsEl = document.getElementById('imageSizeMaxPixels');
         const codexFingerprintEnabledEl = document.getElementById('codexFingerprintEnabled');
+        const codexCloakingEnabledEl = document.getElementById('codexCloakingEnabled');
         const codexPotluckStickyProviderEnabledEl = document.getElementById('codexPotluckStickyProviderEnabled');
 
         if (systemPromptFilePathEl) systemPromptFilePathEl.value = data.SYSTEM_PROMPT_FILE_PATH || 'configs/input_system_prompt.txt';
@@ -523,7 +524,17 @@ async function loadConfiguration() {
         if (imagePromptAspectConstraintEnabledEl) imagePromptAspectConstraintEnabledEl.checked = data.IMAGE_PROMPT_ASPECT_CONSTRAINT_ENABLED !== false;
         if (imageAspectMismatchThresholdEl) imageAspectMismatchThresholdEl.value = data.IMAGE_ASPECT_MISMATCH_THRESHOLD ?? 0.10;
         if (imageSizeMaxPixelsEl) imageSizeMaxPixelsEl.value = data.IMAGE_SIZE_MAX_PIXELS ?? 8388608;
-        if (codexFingerprintEnabledEl) codexFingerprintEnabledEl.checked = data.CODEX_FINGERPRINT_ENABLED === true;
+        if (codexFingerprintEnabledEl) {
+            codexFingerprintEnabledEl.checked = data.CODEX_FINGERPRINT_ENABLED === true;
+            // 环境变量会在每次重载时覆盖 config.json，此时页面修改不会生效，直接锁定并提示。
+            codexFingerprintEnabledEl.disabled = data.CODEX_FINGERPRINT_ENABLED_SOURCE === 'env';
+            codexFingerprintEnabledEl.title = data.CODEX_FINGERPRINT_ENABLED_SOURCE === 'env' ? t('config.advanced.codexEnvLocked') : '';
+        }
+        if (codexCloakingEnabledEl) {
+            codexCloakingEnabledEl.checked = data.CODEX_CLOAKING_ENABLED !== false;
+            codexCloakingEnabledEl.disabled = data.CODEX_CLOAKING_ENABLED_SOURCE === 'env';
+            codexCloakingEnabledEl.title = data.CODEX_CLOAKING_ENABLED_SOURCE === 'env' ? t('config.advanced.codexEnvLocked') : '';
+        }
         if (codexPotluckStickyProviderEnabledEl) codexPotluckStickyProviderEnabledEl.checked = data.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED || false;
         
         if (cronNearMinutesEl) cronNearMinutesEl.value = data.CRON_NEAR_MINUTES || 1;
@@ -750,6 +761,7 @@ async function saveConfiguration(options = {}) {
     config.IMAGE_ASPECT_MISMATCH_THRESHOLD = parseFloat(document.getElementById('imageAspectMismatchThreshold')?.value || 0.10);
     config.IMAGE_SIZE_MAX_PIXELS = parseInt(document.getElementById('imageSizeMaxPixels')?.value || 8388608);
     config.CODEX_FINGERPRINT_ENABLED = document.getElementById('codexFingerprintEnabled')?.checked === true;
+    config.CODEX_CLOAKING_ENABLED = document.getElementById('codexCloakingEnabled')?.checked !== false;
     config.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED = document.getElementById('codexPotluckStickyProviderEnabled')?.checked || false;
     config.CRON_NEAR_MINUTES = parseInt(document.getElementById('cronNearMinutes')?.value || 1);
     config.CRON_REFRESH_TOKEN = document.getElementById('cronRefreshToken')?.checked || false;

@@ -78,7 +78,7 @@ export async function migrateCodexFingerprintProviderPoolsFile({
             currentPools = JSON.parse(await fs.readFile(filePath, 'utf8'));
         } catch (error) {
             if (error.code !== 'ENOENT') {
-                safeMigrationLog(logger, '读取 provider pool 失败，保留运行时默认 session', { error: error.message });
+                safeMigrationLog(logger, '读取 provider pool 失败，运行时对缺失模式回落到默认 session', { error: error.message });
             }
         }
 

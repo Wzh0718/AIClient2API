@@ -16,7 +16,10 @@ function provider(overrides = {}) {
 }
 
 describe('Codex OAuth fingerprint convergence', () => {
-    test('defaults eligible Codex OAuth providers to off and requires explicit global opt-in', () => {
+    test('defaults eligible Codex OAuth providers to session once the global switch is on', () => {
+        expect(resolveCodexFingerprintMode(provider(), { CODEX_FINGERPRINT_ENABLED: true })).toBe('session');
+        expect(resolveCodexFingerprintMode(provider({ codexFingerprintMode: 'bogus' }), { CODEX_FINGERPRINT_ENABLED: true })).toBe('session');
+        expect(resolveCodexFingerprintMode(provider({ codexFingerprintMode: 'off' }), { CODEX_FINGERPRINT_ENABLED: true })).toBe('off');
         expect(resolveCodexFingerprintMode(provider(), {})).toBe('off');
         expect(resolveCodexFingerprintMode(provider({ codexFingerprintMode: 'device' }), {})).toBe('off');
         expect(resolveCodexFingerprintMode(provider({ codexFingerprintMode: 'device' }), { CODEX_FINGERPRINT_ENABLED: true })).toBe('device');
@@ -99,7 +102,8 @@ describe('Codex OAuth fingerprint convergence', () => {
             'thread-id': 'original-thread'
         };
         applyCodexFingerprintHeaders(headers, device);
-        expect(headers['x-codex-installation-id']).toBe(device.installationId);
+        // 原生 Codex 不以请求头发送 installation id，改写后只保留在 client_metadata。
+        expect(headers['x-codex-installation-id']).toBeUndefined();
         expect(headers['session-id']).toBe('original-session');
         expect(headers.session_id).toBe('original-session-underscore');
         expect(headers['thread-id']).toBe('original-thread');
@@ -126,9 +130,10 @@ describe('Codex OAuth fingerprint convergence', () => {
 
         const headerMetadata = JSON.parse(headers['x-codex-turn-metadata']);
         const bodyMetadata = JSON.parse(body.client_metadata['x-codex-turn-metadata']);
-        expect(headers['x-codex-installation-id']).toBe(ids.installationId);
-        expect(headers['Session-Id']).toBe(ids.sessionId);
-        expect(headers['session-id']).toBeUndefined();
+        expect(headers['x-codex-installation-id']).toBeUndefined();
+        expect(body.client_metadata['x-codex-installation-id']).toBe(ids.installationId);
+        expect(headers['session-id']).toBe(ids.sessionId);
+        expect(headers['Session-Id']).toBeUndefined();
         expect(headers['thread-id']).toBe(ids.threadId);
         expect(body.client_metadata.session_id).toBe(ids.sessionId);
         expect(body.client_metadata.thread_id).toBe(ids.threadId);
@@ -178,8 +183,8 @@ describe('Codex OAuth fingerprint convergence', () => {
         expect(headers.Session_id).toBeUndefined();
         expect(headers.SESSION_ID).toBeUndefined();
         expect(headers['X-Codex-Installation-Id']).toBeUndefined();
-        expect(headers['Session-Id']).toBe(ids.sessionId);
+        expect(headers['session-id']).toBe(ids.sessionId);
         expect(headers.session_id).toBeUndefined();
-        expect(headers['x-codex-installation-id']).toBe(ids.installationId);
+        expect(headers['x-codex-installation-id']).toBeUndefined();
     });
 });

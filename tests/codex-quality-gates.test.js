@@ -86,7 +86,7 @@ describe('Codex proxy quality gates', () => {
         ['session_id', 'underscore-session'],
         ['Session_id', 'legacy-session'],
         ['Session-Id', 'canonical-session']
-    ])('accepts inbound %s but emits only canonical Session-Id', (inputName, inputValue) => {
+    ])('accepts inbound %s but emits only the native session-id header', (inputName, inputValue) => {
         const service = createService();
 
         try {
@@ -97,7 +97,7 @@ describe('Codex proxy quality gates', () => {
             const sessionHeaders = Object.entries(headers)
                 .filter(([name]) => ['session-id', 'session_id'].includes(name.toLowerCase()));
 
-            expect(sessionHeaders).toEqual([['Session-Id', inputValue]]);
+            expect(sessionHeaders).toEqual([['session-id', inputValue]]);
         } finally {
             service.stopCacheCleanup();
         }
@@ -375,16 +375,20 @@ describe('Codex proxy quality gates', () => {
         }
     });
 
-    test('raises older inbound Codex versions for GPT-6 Sol and Luna', () => {
-        const service = createService();
+    test('falls back to the default identity group when a passed-through client is too old for GPT-6 Sol and Luna', () => {
+        const service = createService({ CODEX_CLOAKING_ENABLED: false });
         try {
-            const state = { inboundHeaders: { version: '0.154.0' }, context: {}, ids: null };
-            expect(service.buildHeaders(null, false, state, 'gpt-6-luna').version).toBe('0.162.0');
-            expect(service.buildHeaders(null, false, state, 'gpt-6-sol').version).toBe('0.162.0');
-            expect(service.buildHeaders(null, false, state, 'gpt-6-astra').version).toBe('0.154.0');
-            expect(service.buildHeaders(null, false, {
-                ...state, inboundHeaders: { version: '0.157.0' }
-            }, 'gpt-6-luna').version).toBe('0.157.0');
+            const inbound = version => ({
+                inboundHeaders: { version, 'user-agent': `codex_cli_rs/${version} (Windows 10.0.19045; x86_64) unknown`, originator: 'codex_cli_rs' },
+                context: {}, ids: null
+            });
+            const old = inbound('0.154.0');
+            expect(service.buildHeaders(null, false, old, 'gpt-6-luna')).toMatchObject({
+                version: '0.162.1', 'user-agent': 'codex_cli_rs/0.162.1 (Windows 10.0.19045; x86_64) unknown'
+            });
+            expect(service.buildHeaders(null, false, old, 'gpt-6-sol').version).toBe('0.162.1');
+            expect(service.buildHeaders(null, false, old, 'gpt-6-astra').version).toBe('0.154.0');
+            expect(service.buildHeaders(null, false, inbound('0.157.0'), 'gpt-6-luna').version).toBe('0.157.0');
         } finally {
             service.stopCacheCleanup();
         }

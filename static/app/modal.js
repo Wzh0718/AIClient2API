@@ -1482,8 +1482,18 @@ function renderProviderConfig(provider) {
 
     // Codex 指纹配置之外的运行时状态只读展示；不渲染原始 ID/token。
     if (currentProviderType === 'openai-codex-oauth') {
-        const mode = provider.codexFingerprintMode || 'off';
+        const mode = provider.codexFingerprintMode || 'session';
         const globalEnabled = window.currentSafeConfig?.CODEX_FINGERPRINT_ENABLED === true;
+        if (!window.currentSafeConfig && window.apiClient?.get) {
+            // 未访问过配置页时先补拉脱敏配置，避免全局开关被误显示为“已关闭”。
+            window.apiClient.get('/config').then(data => {
+                window.currentSafeConfig = data;
+                const el = document.querySelector('[data-codex-fingerprint-global]');
+                if (el) el.textContent = data?.CODEX_FINGERPRINT_ENABLED === true
+                    ? t('modal.provider.codexFingerprintOn')
+                    : t('modal.provider.codexFingerprintOffStatus');
+            }).catch(() => {});
+        }
         const migrated = provider.codexFingerprintMigrated === true;
         const audit = provider.codexFingerprintAudit && typeof provider.codexFingerprintAudit === 'object'
             ? provider.codexFingerprintAudit : {};
@@ -1497,7 +1507,7 @@ function renderProviderConfig(provider) {
                     <label>${escapeHtml(t('modal.provider.codexFingerprintStatus'))}</label>
                     <div class="form-text">
                         ${escapeHtml(t('modal.provider.codexFingerprintMode'))}: <strong>${escapeHtml(mode)}</strong>
-                        · ${escapeHtml(t('modal.provider.codexFingerprintGlobal'))}: <strong>${escapeHtml(globalEnabled ? t('modal.provider.codexFingerprintOn') : t('modal.provider.codexFingerprintOffStatus'))}</strong>
+                        · ${escapeHtml(t('modal.provider.codexFingerprintGlobal'))}: <strong data-codex-fingerprint-global="true">${escapeHtml(globalEnabled ? t('modal.provider.codexFingerprintOn') : t('modal.provider.codexFingerprintOffStatus'))}</strong>
                         · ${escapeHtml(t('modal.provider.codexFingerprintMigrated'))}: <strong>${escapeHtml(migrated ? t('modal.provider.codexFingerprintYes') : t('modal.provider.codexFingerprintNo'))}</strong>
                         · ${escapeHtml(t('modal.provider.codexFingerprintRewrittenAt'))}: <strong>${escapeHtml(String(rewrittenAt))}</strong>
                         · ${escapeHtml(t('modal.provider.codexFingerprintLastResult'))}: <strong>${escapeHtml(result)}</strong>

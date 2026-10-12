@@ -221,7 +221,7 @@ describe('Codex image generation tool options', () => {
         }
     });
 
-    test('keeps default image_generation injection for unrelated functions', async () => {
+    test('does not inject hosted image_generation for ordinary requests but keeps default web_search', async () => {
         const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
 
         try {
@@ -231,7 +231,8 @@ describe('Codex image generation tool options', () => {
                 tools: [{ type: 'function', name: 'lookup_weather', parameters: { type: 'object', properties: {} } }]
             }, true);
 
-            expect(body.tools.filter(tool => tool.type === 'image_generation')).toHaveLength(1);
+            expect(body.tools.filter(tool => tool.type === 'image_generation')).toHaveLength(0);
+            expect(body.tools.filter(tool => tool.type === 'web_search')).toHaveLength(1);
         } finally {
             service.stopCacheCleanup();
         }
@@ -255,7 +256,7 @@ describe('Codex image generation tool options', () => {
         }
     });
 
-    test('injects hosted image_generation for retired Spark model names the same as other Codex models', async () => {
+    test('treats retired Spark model names like other Codex models and does not inject image_generation', async () => {
         const service = new CodexApiService({ MODEL_PROVIDER: 'openai-codex-oauth' });
 
         try {
@@ -264,7 +265,7 @@ describe('Codex image generation tool options', () => {
                 input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }]
             }, true);
 
-            expect(body.tools.some(tool => tool.type === 'image_generation')).toBe(true);
+            expect(body.tools.some(tool => tool.type === 'image_generation')).toBe(false);
         } finally {
             service.stopCacheCleanup();
         }

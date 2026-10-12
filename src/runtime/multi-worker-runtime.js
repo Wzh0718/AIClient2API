@@ -708,6 +708,7 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
     const latestProviderConfigEvents = new Map();
     let latestRawCaptureConfigEvent = null;
     let latestPotluckKeyConfigEvent = null;
+    let latestCodexRuntimeConfigEvent = null;
     const ready = new Set();
     let shuttingDown = false;
 
@@ -753,6 +754,9 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
                         potluckKeyConfigAcks.notePublished(latestPotluckKeyConfigEvent.epoch, latestPotluckKeyConfigEvent.revision, [id]);
                         child.send({ ...latestPotluckKeyConfigEvent, targetWorkerId: id });
                     }
+                    if (latestCodexRuntimeConfigEvent && child.connected) {
+                        child.send({ ...latestCodexRuntimeConfigEvent, targetWorkerId: id });
+                    }
                 }
                 if (role === 'control') {
                     for (const worker of workers.values()) {
@@ -793,6 +797,16 @@ export function startMultiWorkerRuntime({ env = process.env, args = process.argv
                     type: 'provider_config_sync_status',
                     ...providerConfigAcks.snapshot([...workers.values()].filter(worker => worker.role === 'execution').map(worker => worker.id))
                 });
+            }
+            if (message?.type === 'codex_fingerprint_audit' && role === 'execution') {
+                const control = workers.get('control-1');
+                if (control?.child.connected) control.child.send(message);
+            }
+            if (message?.type === 'codex_runtime_config_sync' && role === 'control') {
+                latestCodexRuntimeConfigEvent = { ...message };
+                for (const worker of workers.values()) {
+                    if (worker.role === 'execution' && worker.child.connected) worker.child.send(message);
+                }
             }
             if (message?.type === 'request_audit_raw_capture_sync' && role === 'control') {
                 latestRawCaptureConfigEvent = { ...message };
