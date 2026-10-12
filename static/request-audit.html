@@ -872,9 +872,9 @@
         <div id="summaryFeedback" class="audit-feedback" role="status" hidden><span id="summaryMessage"></span><button id="retrySummary" class="btn btn-secondary" type="button" hidden>重试汇总</button></div>
         <section class="stats-grid" aria-label="完整时间窗汇总">
           <div class="stat-card"><div class="label">请求数</div><div class="value" id="requestCount">0</div><small id="successRate">成功率 —</small></div>
-          <div class="stat-card"><div class="label">输入 Tokens</div><div class="value" id="promptTokens">0</div><small>完整筛选窗口</small></div>
-          <div class="stat-card"><div class="label">缓存 Tokens</div><div class="value" id="cachedTokens">0</div><small id="cacheHitRatio">缓存率 0.00%</small></div>
-          <div class="stat-card"><div class="label">输出 Tokens</div><div class="value" id="completionTokens">0</div><small id="totalTokens">总计 0</small></div>
+          <div class="stat-card"><div class="label">输入 Tokens</div><div class="value" id="promptTokens">0.00M</div><small>完整筛选窗口</small></div>
+          <div class="stat-card"><div class="label">缓存 Tokens</div><div class="value" id="cachedTokens">0.00M</div><small id="cacheHitRatio">缓存率 0.00%</small></div>
+          <div class="stat-card"><div class="label">输出 Tokens</div><div class="value" id="completionTokens">0.00M</div><small id="totalTokens">总计 0.00M</small></div>
           <div class="stat-card"><div class="label">总成本</div><div class="value" id="totalCost">—</div><small>USD · 完整窗口</small></div>
           <div class="stat-card"><div class="label">平均延迟</div><div class="value" id="averageLatency">—</div><small id="p95Latency">P95 —</small></div>
         </section>
@@ -951,6 +951,7 @@
     let rawCaptureState = null;
 
     const fmt = value => Number(value || 0).toLocaleString('zh-CN');
+    const fmtTokensM = value => `${(Number(value || 0) / 1_000_000).toFixed(2)}M`;
     const formatDuration = value => {
       if ((typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '') return '—';
       const number = Number(value);
@@ -1213,10 +1214,10 @@
     function renderSummary(data) {
       const summary = data.summary || {};
       fillMetric('requestCount', summary.requestCount);
-      fillMetric('promptTokens', summary.promptTokens);
-      fillMetric('cachedTokens', summary.cachedTokens);
-      fillMetric('completionTokens', summary.completionTokens);
-      document.getElementById('totalTokens').textContent = `总计 ${fmt(summary.totalTokens)}`;
+      fillMetric('promptTokens', summary.promptTokens, fmtTokensM);
+      fillMetric('cachedTokens', summary.cachedTokens, fmtTokensM);
+      fillMetric('completionTokens', summary.completionTokens, fmtTokensM);
+      document.getElementById('totalTokens').textContent = `总计 ${fmtTokensM(summary.totalTokens)}`;
       const windowCost = data.cost || {};
       const hasWindowCost = Number(windowCost.pricedRequestCount || 0) + Number(windowCost.estimatedRequestCount || 0) > 0;
       document.getElementById('totalCost').textContent = hasWindowCost ? fmtUsd(windowCost.usd) : '—';
