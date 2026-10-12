@@ -122,4 +122,19 @@ describe('Codex request body alignment with CLIProxyAPI', () => {
         expect(result[3]).toBe(input[3]);
         expect(input[0].call_id).toBe(longId);
     });
+
+    test('passes remote compaction v2 items through unchanged (compaction_trigger and replayed compaction)', async () => {
+        const compaction = { id: 'cmp_' + 'a'.repeat(50), type: 'compaction', encrypted_content: 'gAAAA-encrypted' };
+        const body = await prepare({
+            input: [
+                compaction,
+                { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'continue' }] },
+                { type: 'compaction_trigger' }
+            ]
+        });
+
+        expect(body.input[0]).toEqual(compaction);
+        expect(body.input[2]).toEqual({ type: 'compaction_trigger' });
+    });
 });
+

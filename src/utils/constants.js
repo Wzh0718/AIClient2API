@@ -100,7 +100,10 @@ export function isSupportedGptImageModel(model) {
 
 export function isSupportedImageApiModel(model) {
     const normalized = String(model || '').trim();
-    return SUPPORTED_IMAGE_MODELS.has(normalized) || isSupportedGptImageModel(normalized);
+    if (SUPPORTED_IMAGE_MODELS.has(normalized) || isSupportedGptImageModel(normalized)) return true;
+    // /v1/models 暴露的 Codex 图像 -fast 变体（priority 档位）；gpt-image-2.5 别名没有 -fast 变体。
+    const base = normalized.replace(/-fast$/i, '');
+    return base !== normalized && base !== 'gpt-image-2.5' && isSupportedGptImageModel(base);
 }
 
 // 视频生成模型常量

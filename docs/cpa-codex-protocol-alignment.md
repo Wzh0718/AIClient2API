@@ -48,8 +48,32 @@
 | 403 分类 | Cloudflare/HTML 页面和裸 `forbidden` 不判凭据失效；`account_deactivated`/`deactivated_workspace` 判失效 | 部分对齐 CPA（未实现 30 分钟冷却） |
 | OAuth 刷新 | 带 `scope=openid profile email`；`invalid_grant`/`refresh_token_reused`/`refresh_token_expired`/`refresh_token_invalidated` 不重试 | CPA |
 
+## Responses 转换（2026-10-12 补齐）
+
+| 项 | 修复前 | 现在 | 来源 |
+| --- | --- | --- | --- |
+| 非流式 Responses 输出 | 重建输出：`function_call` 丢 `call_id`（回传结果 400），丢弃 `web_search_call`/`compaction`/`custom_tool_call`，reasoning 改成假 message 且丢 `encrypted_content`，清空 `annotations` | 原样透传上游 `response`，仅还原缩短的工具名并补齐 usage 字段，与流式一致 | CPA |
+| 流式 Responses 输出 | 原样透传，但超过 64 字符被缩短的函数名不还原 | 透传并还原 `function_call` 名称（含 `response.completed` 的 output） | CPA |
+| 请求工具 | 所有带 `name` 的工具都改写成 `function`，`namespace`/`custom` 等被破坏 | 只改写 `function` 工具；`namespace`、`custom`、`local_shell`、`web_search`、`file_search`、`mcp`、`tool_search` 等原样透传 | CPA / 原生抓包 |
+| input 中的 `function_call` 名称 | 不随工具定义缩短，多轮回放名称不一致 | 与缩短后的工具定义保持一致 | CPA |
+| `include` | 强制覆盖为 `["reasoning.encrypted_content"]` | 保留客户端请求的 `web_search_call.action.sources` | CPA |
+| 图像 `-fast` 变体 | `/v1/models` 列出但生图/改图接口返回 400 | `gpt-image-2-fast`、`gpt-image-2.5-flare-fast`、`gpt-image-2.5-sunburst-fast` 可用 | 本项目 |
+
+## 真实验证（2026-10-12，单 Codex OAuth 账号，多 worker 验证容器）
+
+全部通过：
+- 7 个文本模型与 8 个 `-fast`/`-ultrafast` 变体（Responses 非流式）；
+- Chat 流式/非流式，Responses 流式；
+- 工具调用往返：Chat、Responses 非流式与流式、`namespace` 工具、`custom` 工具、Claude Messages `tool_use`；
+- 联网搜索（非流式含 `web_search_call` 与 sources，流式）；
+- 非流式 reasoning `encrypted_content` 回传多轮；
+- 远程压缩 v2（流式与非流式各自压缩 + 回放）；
+- Claude Messages 流式/非流式文本；
+- 文生图（`gpt-image-2`、`gpt-image-2.5`、`sunburst`、两个 `-fast` 变体）与改图（单图、两图、`-fast`）。
+
 ## 刻意保留的差异
 
 - `reasoning.summary` 缺省仍为 `auto`：原生主对话也会发送 summary。
 - `instructions` 缺省为空字符串（原生不发该字段，CPA 同本项目）。
-- 未实现：`/responses/compact`、WebSocket 出站、`x-oai-attestation`、TLS 指纹仿真。
+- 远程压缩：原生 Codex 0.162 的 remote compaction v2 不调用 `/responses/compact`，而是在普通 `/responses` 流式请求的 input 末尾追加 `{"type":"compaction_trigger"}`，上游返回 `compaction` 输出项，下一轮再把该项放回 input。本项目 `/v1/responses` 已原样透传这两类项（2026-10-12 用真实账号验证：压缩返回 `compaction` 项，带回后模型能正确引用压缩前上下文）。CPA 实现的 v1 `/responses/compact` 对 ChatGPT Codex 后端已返回 404，故不提供该路由。
+- 未实现：WebSocket 出站、`x-oai-attestation`、TLS 指纹仿真。

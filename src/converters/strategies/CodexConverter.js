@@ -70,6 +70,14 @@ function resolveCodexSpeedModel(model, serviceTier) {
     return { model, serviceTier: suppliedTier };
 }
 
+// 原生 Responses 工具类型：转发给 Codex 时原样保留，不改写为 function 工具。
+const CODEX_PASSTHROUGH_TOOL_TYPES = new Set([
+    'namespace', 'custom', 'local_shell', 'web_search', 'web_search_preview', 'file_search',
+    'mcp', 'tool_search', 'computer_use_preview', 'code_interpreter'
+]);
+// 客户端可额外请求、且 Codex 后端接受的 include 项（对齐 CPA）。
+const CODEX_PASSTHROUGH_INCLUDE = new Set(['web_search_call.action.sources']);
+
 export class CodexConverter extends BaseConverter {
     constructor() {
         super('codex');
@@ -279,7 +287,12 @@ export class CodexConverter extends BaseConverter {
         codexRequest.stream = true;
         codexRequest.store = false;
         codexRequest.parallel_tool_calls = true;
-        codexRequest.include = ['reasoning.encrypted_content'];
+        // 始终请求加密推理内容；客户端显式请求的联网搜索来源一并保留（对齐 CPA）。
+        const clientInclude = Array.isArray(responsesRequest.include) ? responsesRequest.include : [];
+        codexRequest.include = [
+            'reasoning.encrypted_content',
+            ...clientInclude.filter(entry => CODEX_PASSTHROUGH_INCLUDE.has(entry))
+        ];
         const resolvedSpeed = resolveCodexSpeedModel(
             responsesRequest.model,
             responsesRequest.service_tier
@@ -322,7 +335,15 @@ export class CodexConverter extends BaseConverter {
                 if (item.role === 'system') {
                     item = { ...item, role: 'developer' };
                 }
-                
+
+                // 历史中的 function_call 名称与缩短后的工具定义保持一致（多轮回放时上游按名匹配）。
+                if (item.type === 'function_call' && item.name) {
+                    const shortName = this._getReqState(requestId).toolNameMap.get(item.name);
+                    if (shortName && shortName !== item.name) {
+                        item = { ...item, name: shortName };
+                    }
+                }
+
                 return item;
             });
         }
@@ -591,6 +612,9 @@ export class CodexConverter extends BaseConverter {
             if (this.normalizeCodexBuiltinTool(t)) {
                 continue;
             }
+            if (CODEX_PASSTHROUGH_TOOL_TYPES.has(t.type)) {
+                continue;
+            }
             if (t.type === 'function' && t.function?.name) {
                 names.push(t.function.name);
             } else if (t.name) {
@@ -651,6 +675,11 @@ export class CodexConverter extends BaseConverter {
             // 处理 Claude 的 web_search
             if (tool.type === "web_search_20250305") {
                 return { type: "web_search" };
+            }
+
+            // 原生 Responses 工具（namespace/custom/local_shell 等）原样透传，不能改写成 function。
+            if (CODEX_PASSTHROUGH_TOOL_TYPES.has(tool.type)) {
+                return tool;
             }
 
             if (tool.type !== 'function' && !tool.name) {
@@ -724,8 +753,43 @@ export class CodexConverter extends BaseConverter {
      * 获取原始工具名称
      */
     getOriginalToolName(shortName, requestId) {
-        const state = this._getReqState(requestId);
-        return state.reverseToolNameMap.get(shortName) || shortName;
+        const own = this.requestStates.get(requestId || 'default');
+        return own?.reverseToolNameMap.get(shortName)
+            || this.requestStates.get('default')?.reverseToolNameMap.get(shortName)
+            || shortName;
+    }
+
+    /**
+     * 还原单个输出项上被缩短的 function 工具名；未缩短时返回原对象。
+     */
+    restoreToolNameOnItem(item, requestId) {
+        if (!item || item.type !== 'function_call' || !item.name) return item;
+        const original = this.getOriginalToolName(item.name, requestId);
+        return original === item.name ? item : { ...item, name: original };
+    }
+
+    restoreResponsesOutputToolNames(output, requestId) {
+        if (!Array.isArray(output)) return [];
+        return output.map(item => this.restoreToolNameOnItem(item, requestId));
+    }
+
+    /**
+     * 流式透传时仅还原工具名，其余事件原样返回。
+     */
+    restoreToolNamesInResponsesEvent(chunk, requestId) {
+        if (!chunk || typeof chunk !== 'object') return chunk;
+        if (chunk.item?.type === 'function_call') {
+            const item = this.restoreToolNameOnItem(chunk.item, requestId);
+            return item === chunk.item ? chunk : { ...chunk, item };
+        }
+        const output = chunk.response?.output;
+        if (Array.isArray(output)) {
+            const restored = this.restoreResponsesOutputToolNames(output, requestId);
+            return restored.every((item, index) => item === output[index])
+                ? chunk
+                : { ...chunk, response: { ...chunk.response, output: restored } };
+        }
+        return chunk;
     }
 
     /**
@@ -853,99 +917,37 @@ export class CodexConverter extends BaseConverter {
     /**
      * Codex → OpenAI Responses 响应转换
      */
-    toOpenAIResponsesResponse(rawJSON, model) {
+    toOpenAIResponsesResponse(rawJSON, model, requestId) {
         const root = typeof rawJSON === 'string' ? JSON.parse(rawJSON) : rawJSON;
         if (root.type !== 'response.completed') {
             return null;
         }
 
-        const response = root.response;
-        const unixTimestamp = response.created_at || Math.floor(Date.now() / 1000);
-
-        const output = [];
-
-        if (response.output && Array.isArray(response.output)) {
-            for (const item of response.output) {
-                if (item.type === 'reasoning') {
-                    let reasoningText = '';
-                    if (Array.isArray(item.summary)) {
-                        const summaryItem = item.summary.find(s => s.type === 'summary_text');
-                        if (summaryItem) reasoningText = summaryItem.text;
-                    }
-                    if (reasoningText) {
-                        output.push({
-                            id: `msg_${uuidv4().replace(/-/g, '')}`,
-                            type: "message",
-                            role: "assistant",
-                            status: "completed",
-                            content: [{
-                                type: "reasoning",
-                                text: reasoningText
-                            }]
-                        });
-                    }
-                } else if (item.type === 'message') {
-                    let contentText = '';
-                    if (Array.isArray(item.content)) {
-                        const contentItem = item.content.find(c => c.type === 'output_text');
-                        if (contentItem) contentText = contentItem.text;
-                    }
-                    if (contentText) {
-                        output.push({
-                            id: `msg_${uuidv4().replace(/-/g, '')}`,
-                            type: "message",
-                            role: "assistant",
-                            status: "completed",
-                            content: [{
-                                type: "output_text",
-                                text: contentText,
-                                annotations: []
-                            }]
-                        });
-                    }
-                } else if (item.type === 'function_call') {
-                    output.push({
-                        id: item.call_id || `call_${uuidv4().replace(/-/g, '')}`,
-                        type: "function_call",
-                        name: this.getOriginalToolName(item.name),
-                        arguments: typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments),
-                        status: "completed"
-                    });
-                } else if (item.type === 'image_generation_call') {
-                    output.push({
-                        id: item.id || `ig_${uuidv4().replace(/-/g, '')}`,
-                        type: "image_generation_call",
-                        status: item.status || "completed",
-                        action: item.action || "generate",
-                        background: item.background,
-                        output_format: item.output_format || "png",
-                        quality: item.quality,
-                        result: item.result,
-                        revised_prompt: item.revised_prompt,
-                        size: item.size
-                    });
-                }
-            }
-        }
-
+        // 与流式透传保持一致：原样返回上游 response（保留 call_id、web_search_call、reasoning
+        // encrypted_content、annotations、compaction 等），仅还原被缩短的工具名并补齐 usage 字段。
+        const upstream = root.response || {};
+        const usage = upstream.usage || {};
         return {
-            id: response.id || `resp_${uuidv4().replace(/-/g, '')}`,
-            object: "response",
-            created_at: unixTimestamp,
-            model: response.model || model,
-            ...(response.service_tier ? { service_tier: response.service_tier } : {}),
-            status: "completed",
-            output: output,
-            incomplete_details: response.incomplete_details || null,
+            ...upstream,
+            id: upstream.id || `resp_${uuidv4().replace(/-/g, '')}`,
+            object: 'response',
+            created_at: upstream.created_at || Math.floor(Date.now() / 1000),
+            model: upstream.model || model,
+            status: upstream.status || 'completed',
+            output: this.restoreResponsesOutputToolNames(upstream.output, requestId),
+            incomplete_details: upstream.incomplete_details || null,
             usage: {
-                input_tokens: response.usage?.input_tokens || 0,
-                output_tokens: response.usage?.output_tokens || 0,
-                total_tokens: response.usage?.total_tokens || 0,
+                ...usage,
+                input_tokens: usage.input_tokens || 0,
+                output_tokens: usage.output_tokens || 0,
+                total_tokens: usage.total_tokens || 0,
                 input_tokens_details: {
-                    cached_tokens: this.getCachedInputTokens(response.usage)
+                    ...(usage.input_tokens_details || {}),
+                    cached_tokens: this.getCachedInputTokens(usage)
                 },
                 output_tokens_details: {
-                    reasoning_tokens: response.usage?.output_tokens_details?.reasoning_tokens || 0
+                    ...(usage.output_tokens_details || {}),
+                    reasoning_tokens: usage.output_tokens_details?.reasoning_tokens || 0
                 }
             }
         };
@@ -1298,7 +1300,7 @@ export class CodexConverter extends BaseConverter {
      */
     toOpenAIResponsesStreamChunk(chunk, model, requestId) {
         if(true){
-            return chunk;
+            return this.restoreToolNamesInResponsesEvent(chunk, requestId);
         }
 
         const type = chunk.type;
