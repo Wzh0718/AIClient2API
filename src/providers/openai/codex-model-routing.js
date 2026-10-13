@@ -25,6 +25,16 @@ export function resolveCodexSparkAlias(model) {
     return SPARK_ALIAS_BY_MODEL[normalized] || null;
 }
 
+// A model the service does not offer is a client error: it must not surface as a 500
+// (which clients retry) nor count against any credential.
+export function createUnsupportedCodexModelError(model) {
+    const error = new Error(`[Codex] 不支持的模型: ${model}`);
+    error.status = 400;
+    error.statusCode = 400;
+    error.code = 'model_not_found';
+    return error;
+}
+
 export function resolveCodexEntryModel({
     model,
     supported,
@@ -44,7 +54,7 @@ export function resolveCodexEntryModel({
 
     if (preserveRequestedModel) return { actualModel: model, reason: null };
     if (!supported) {
-        throw new Error(`[Codex] 不支持的模型: ${model}`);
+        throw createUnsupportedCodexModelError(model);
     }
     return { actualModel: model, reason: null };
 }

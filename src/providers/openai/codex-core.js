@@ -32,6 +32,7 @@ import {
     resolveCodexFingerprintIds
 } from './codex-fingerprint.js';
 import { recordCodexFingerprintAudit } from './codex-fingerprint-audit.js';
+import { createUnsupportedCodexModelError } from './codex-model-routing.js';
 import { codexPromptCacheObservability } from './codex-prompt-cache-observability.js';
 import requestContext from '../../utils/context.js';
 import { performance } from 'node:perf_hooks';
@@ -553,7 +554,7 @@ export class CodexApiService {
 
         let selectedModel = model;
         if (!CODEX_MODELS.includes(model)) {
-            throw new Error(`[Codex] 不支持的模型: ${model}`);
+            throw createUnsupportedCodexModelError(model);
         }
 
         // 临时存储 monitorRequestId
@@ -717,7 +718,7 @@ export class CodexApiService {
 
         let selectedModel = model;
         if (!CODEX_MODELS.includes(model)) {
-            throw new Error(`[Codex] 不支持的模型: ${model}`);
+            throw createUnsupportedCodexModelError(model);
         }
 
         // 临时存储 monitorRequestId

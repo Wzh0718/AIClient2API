@@ -1,6 +1,7 @@
 import { describe, expect, test } from '@jest/globals';
 import {
     DEFAULT_CODEX_FALLBACK_MODEL,
+    createUnsupportedCodexModelError,
     matchesModelFamily,
     resolveCodexEntryModel
 } from '../src/providers/openai/codex-model-routing.js';
@@ -47,6 +48,21 @@ describe('Codex entry model routing policy', () => {
     test('rejects bare GPT-5.3 instead of aliasing it to Luna', () => {
         expect(() => resolveCodexEntryModel({ model: 'gpt-5.3', supported: false }))
             .toThrow('[Codex] 不支持的模型: gpt-5.3');
+    });
+
+    test('reports an unsupported model as a 400 client error instead of a 500', () => {
+        let caught;
+        try {
+            resolveCodexEntryModel({ model: 'not-a-real-model', supported: false });
+        } catch (error) {
+            caught = error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        expect(caught.message).toBe('[Codex] 不支持的模型: not-a-real-model');
+        expect(caught.status).toBe(400);
+        expect(caught.statusCode).toBe(400);
+        expect(caught.code).toBe('model_not_found');
+        expect(createUnsupportedCodexModelError('x').status).toBe(400);
     });
 
     test('does not default unknown Codex models to Luna', () => {

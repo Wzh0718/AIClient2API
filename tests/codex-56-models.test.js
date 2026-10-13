@@ -47,7 +47,8 @@ describe('codex 5.6 model registration', () => {
         expect(routingSource).not.toContain("'openai-codex-oauth:gpt-5.6': 'gpt-5.6-sol'");
         expect(routingSource).toContain('resolveCodexEntryModel');
         expect(modelRoutingSource).toContain('DEFAULT_CODEX_FALLBACK_MODEL = null');
-        expect(codexSource).toContain('不支持的模型');
+        expect(modelRoutingSource).toContain('不支持的模型');
+        expect(codexSource).toContain('createUnsupportedCodexModelError(model)');
         expect(codexSource).not.toContain('selectedModel = DEFAULT_CODEX_FALLBACK_MODEL;');
     });
 });
