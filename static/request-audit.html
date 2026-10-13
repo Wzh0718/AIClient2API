@@ -1484,7 +1484,13 @@
         const models = listModel(event);
         const cost = costDisplay(event.cost);
         const costNote = cost.missing || Number(event.cost?.estimatedUsd || 0) > 0 ? cost.sub : '';
-        const account = event.account?.accountEmail || event.account?.providerNameDisplay || '未知账号';
+        const attribution = event.account?.attribution;
+        const accountName = event.account?.accountEmail || event.account?.providerNameDisplay;
+        const account = attribution === 'none-before-selection' && !accountName
+          ? '未选凭据'
+          : accountName
+            ? (attribution === 'selected-not-sent' ? `${accountName}（未发出）` : accountName)
+            : attribution === 'selected-not-sent' ? '已选凭据（账号不可解析）' : '未知账号';
         const provider = event.request?.toProvider || '—';
         const key = event.potluckKey?.name || event.potluckKey?.prefix || '未命名';
         const providerHtml = `<div class="audit-cell"><span class="audit-truncate" title="${escapeHtml(account)}">${escapeHtml(account)}</span><small class="audit-truncate" title="${escapeHtml(provider)}">${escapeHtml(provider)}</small></div>`;

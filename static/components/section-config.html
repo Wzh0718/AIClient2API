@@ -352,6 +352,27 @@
                 </div>
                 <hr>
 
+                <div class="config-inline-heading">
+                    <span data-i18n="config.advanced.codexDynamicSessionRoutingTitle">Codex 动态会话路由（灰度）</span>
+                    <small data-i18n="config.advanced.codexDynamicSessionRoutingNote">开启后，auto 路由的 Key 不再按凭据组调度：新会话在该 Key 授权的全部可用凭据中动态分配，并把会话绑定到具体凭据。保存后立即对所有 worker 生效，无需重启。灰度名单为空表示对全部 auto Key 生效。</small>
+                </div>
+                <div class="form-row config-routing-toggle-row">
+                    <div class="form-group">
+                        <label for="codexDynamicSessionRoutingEnabled" data-i18n="config.advanced.codexDynamicSessionRoutingEnabled">启用动态会话路由</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="codexDynamicSessionRoutingEnabled">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="codexDynamicSessionRoutingKeyIds" data-i18n="config.advanced.codexDynamicSessionRoutingKeyIds">灰度 Key ID（逗号分隔，留空表示全部）</label>
+                        <input type="text" id="codexDynamicSessionRoutingKeyIds" class="form-control" placeholder="maki_xxx,maki_yyy">
+                    </div>
+                </div>
+                <hr>
+
                 <div class="form-row">
                     <div class="form-group">
                         <label for="warmupTarget" class="config-label-with-help">

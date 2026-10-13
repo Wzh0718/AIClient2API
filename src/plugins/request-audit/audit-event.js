@@ -222,6 +222,19 @@ function deriveStatus(context, response) {
     return { outcome: 'http_error', httpStatus: response.httpStatus, errorClass: context.errorClass || 'incomplete_response' };
 }
 
+/**
+ * 失败请求也要保留凭据归属：已使用 > 最后一次尝试 > 仅路由选中（未发出）> 选凭据前失败。
+ */
+export function resolveAuditAccountCandidate(context = {}) {
+    if (context.providerUuid) return { uuid: context.providerUuid, attribution: 'used' };
+    const attempts = Array.isArray(context.requestAttempts) ? context.requestAttempts : getRequestAttempts(context.processedRequestBody);
+    const attemptUuid = [...attempts].reverse().find(attempt => attempt?.providerUuid)?.providerUuid;
+    if (attemptUuid) return { uuid: attemptUuid, attribution: 'used' };
+    const selectedUuid = context._codexRouting?.selectedProviderUuid;
+    if (selectedUuid) return { uuid: selectedUuid, attribution: 'selected-not-sent' };
+    return { uuid: null, attribution: 'none-before-selection' };
+}
+
 export function buildRequestAuditEvent(context = {}) {
     const timestamp = context.timestamp || new Date().toISOString();
     const date = new Date(timestamp);
@@ -243,6 +256,9 @@ export function buildRequestAuditEvent(context = {}) {
         ? selectedProviderUuid === actualProviderUuid ? 'consistent' : 'mismatch'
         : 'unverifiable';
     const routing = context._codexRouting || {};
+    const accountCandidate = resolveAuditAccountCandidate(context);
+    // selectedAccount 由调用方按 accountCandidate.uuid 解析；uuid 不一致时不采用，避免串号。
+    const resolvedAccount = context.selectedAccount?.providerUuid === accountCandidate.uuid ? context.selectedAccount : {};
     const attempts = normalizeAttempts(context);
     const lastAttempt = attempts.at(-1) || null;
     const codexContext = context.processedRequestBody?.[CODEX_FINGERPRINT_CONTEXT_KEY] || {};
@@ -305,10 +321,11 @@ export function buildRequestAuditEvent(context = {}) {
             name: context.potluckKeyData?.name || null
         },
         account: {
-            providerUuidHash: hashSecret(context.providerUuid),
-            accountEmail: extractAccountEmail(context.accountEmail, context.accountIdentity, context.providerName),
-            providerNameHash: hashSecret(context.providerName),
-            providerNameDisplay: sanitizeProviderName(context.providerName)
+            providerUuidHash: hashSecret(accountCandidate.attribution === 'used' ? accountCandidate.uuid : null),
+            accountEmail: extractAccountEmail(context.accountEmail, context.accountIdentity, context.providerName, resolvedAccount.accountEmail, resolvedAccount.providerName),
+            providerNameHash: hashSecret(context.providerName || resolvedAccount.providerName),
+            providerNameDisplay: sanitizeProviderName(context.providerName || resolvedAccount.providerName),
+            attribution: accountCandidate.attribution
         },
         routing: {
             routingMode: ['pool', 'auto', 'fixed', 'restricted'].includes(context._codexRouting?.routingMode)

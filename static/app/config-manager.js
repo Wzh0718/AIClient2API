@@ -536,7 +536,11 @@ async function loadConfiguration() {
             codexCloakingEnabledEl.title = data.CODEX_CLOAKING_ENABLED_SOURCE === 'env' ? t('config.advanced.codexEnvLocked') : '';
         }
         if (codexPotluckStickyProviderEnabledEl) codexPotluckStickyProviderEnabledEl.checked = data.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED || false;
-        
+        const codexDynamicSessionRoutingEnabledEl = document.getElementById('codexDynamicSessionRoutingEnabled');
+        const codexDynamicSessionRoutingKeyIdsEl = document.getElementById('codexDynamicSessionRoutingKeyIds');
+        if (codexDynamicSessionRoutingEnabledEl) codexDynamicSessionRoutingEnabledEl.checked = data.CODEX_DYNAMIC_SESSION_ROUTING_ENABLED === true;
+        if (codexDynamicSessionRoutingKeyIdsEl) codexDynamicSessionRoutingKeyIdsEl.value = (data.CODEX_DYNAMIC_SESSION_ROUTING_KEY_IDS || []).join(',');
+
         if (cronNearMinutesEl) cronNearMinutesEl.value = data.CRON_NEAR_MINUTES || 1;
         if (cronRefreshTokenEl) cronRefreshTokenEl.checked = data.CRON_REFRESH_TOKEN || false;
         if (loginExpiryEl) loginExpiryEl.value = data.LOGIN_EXPIRY || 3600;
@@ -763,6 +767,11 @@ async function saveConfiguration(options = {}) {
     config.CODEX_FINGERPRINT_ENABLED = document.getElementById('codexFingerprintEnabled')?.checked === true;
     config.CODEX_CLOAKING_ENABLED = document.getElementById('codexCloakingEnabled')?.checked !== false;
     config.CODEX_POTLUCK_STICKY_PROVIDER_ENABLED = document.getElementById('codexPotluckStickyProviderEnabled')?.checked || false;
+    // 控件缺失时不下发，避免把服务端已有的灰度配置清空。
+    const dynamicRoutingEnabledEl = document.getElementById('codexDynamicSessionRoutingEnabled');
+    const dynamicRoutingKeyIdsEl = document.getElementById('codexDynamicSessionRoutingKeyIds');
+    if (dynamicRoutingEnabledEl) config.CODEX_DYNAMIC_SESSION_ROUTING_ENABLED = dynamicRoutingEnabledEl.checked === true;
+    if (dynamicRoutingKeyIdsEl) config.CODEX_DYNAMIC_SESSION_ROUTING_KEY_IDS = dynamicRoutingKeyIdsEl.value;
     config.CRON_NEAR_MINUTES = parseInt(document.getElementById('cronNearMinutes')?.value || 1);
     config.CRON_REFRESH_TOKEN = document.getElementById('cronRefreshToken')?.checked || false;
     config.LOGIN_EXPIRY = parseInt(document.getElementById('loginExpiry')?.value || 3600);

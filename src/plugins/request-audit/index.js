@@ -1,5 +1,5 @@
 import logger from '../../utils/logger.js';
-import { buildRequestAuditEvent, hashSecret, maskPotluckKey, normalizeUsage } from './audit-event.js';
+import { buildRequestAuditEvent, hashSecret, maskPotluckKey, normalizeUsage, resolveAuditAccountCandidate } from './audit-event.js';
 import { extractUsage as extractNormalizedUsage, mergeUsage as mergeNormalizedUsage } from '../../utils/usage-normalizer.js';
 import { getAnalysisStore, getAuditStore, handleRequestAuditRoutes, persistRawCaptureConfig, setAnalysisStore, setAuditStore, setGptDiagnosticsRunner, setGptRequestStore, setRawCaptureController } from './api-routes.js';
 import { createRequestAuditAnalyzerRunner } from './analyzer-runner.js';
@@ -178,10 +178,40 @@ function hasCapturableRequestBody(context = {}) {
         || isCapturableRequestBody(context.upstreamRequestBody);
 }
 
+let getProviderPoolManagerRef = null;
+
+async function ensureProviderPoolManagerRef() {
+    if (getProviderPoolManagerRef) return;
+    try {
+        getProviderPoolManagerRef = (await import('../../services/service-manager.js')).getProviderPoolManager;
+    } catch {
+        getProviderPoolManagerRef = () => null;
+    }
+}
+
+// 失败请求没有 providerUuid 时，按最后尝试/路由选中的凭据解析账号，避免审计显示“未知账号”。
+function resolveSelectedAccount(context = {}) {
+    if (context.accountEmail || context.providerName) return null;
+    const { uuid } = resolveAuditAccountCandidate(context);
+    if (!uuid) return null;
+    try {
+        const config = getProviderPoolManagerRef?.()?.findProviderByUuid?.(uuid);
+        if (!config) return null;
+        return {
+            providerUuid: uuid,
+            providerName: config.customName || null,
+            accountEmail: config.codexEmail || config.accountEmail || null
+        };
+    } catch {
+        return null;
+    }
+}
+
 async function enqueueFinalAudit(context = {}) {
     const requestId = getRequestId(context);
     if (!requestId || finalizedRequestIds.has(requestId)) return;
     cleanupPendingUsage(requestId);
+    await ensureProviderPoolManagerRef();
     const pending = pendingUsage.get(requestId) || {};
     const response = {
         ...(context.response || {}),
@@ -189,6 +219,7 @@ async function enqueueFinalAudit(context = {}) {
     };
     const event = buildRequestAuditEvent({
         ...context,
+        selectedAccount: resolveSelectedAccount(context),
         requestId,
         response,
         usage: pending.usage || {},
@@ -234,6 +265,7 @@ function cleanupPendingUsage(preserveRequestId = null) {
             if (context && !finalizedRequestIds.has(requestId)) {
                 const event = buildRequestAuditEvent({
                     ...context,
+                    selectedAccount: resolveSelectedAccount(context),
                     requestId,
                     usage: entry.usage || {},
                     outcome: 'audit_capture_failed',

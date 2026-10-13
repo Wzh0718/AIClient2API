@@ -18,6 +18,22 @@ describe('Codex runtime config sync', () => {
         expect(second.revision).toBeGreaterThan(first.revision);
     });
 
+    test('syncs the dynamic session routing switch and its allow-list to execution workers', () => {
+        const event = buildCodexRuntimeConfigEvent({
+            CODEX_DYNAMIC_SESSION_ROUTING_ENABLED: true,
+            CODEX_DYNAMIC_SESSION_ROUTING_KEY_IDS: ['key-a'],
+            REQUIRED_API_KEY: 'secret'
+        });
+        expect(event.config).toEqual({
+            CODEX_DYNAMIC_SESSION_ROUTING_ENABLED: true,
+            CODEX_DYNAMIC_SESSION_ROUTING_KEY_IDS: ['key-a']
+        });
+
+        const config = { CODEX_DYNAMIC_SESSION_ROUTING_ENABLED: false, CODEX_DYNAMIC_SESSION_ROUTING_KEY_IDS: [] };
+        expect(applyCodexRuntimeConfigEvent(event, config, {}).applied).toBe(true);
+        expect(config).toEqual({ CODEX_DYNAMIC_SESSION_ROUTING_ENABLED: true, CODEX_DYNAMIC_SESSION_ROUTING_KEY_IDS: ['key-a'] });
+    });
+
     test('applies a newer event, updates config and invalidates only Codex adapters', () => {
         const config = { CODEX_FINGERPRINT_ENABLED: false };
         const instances = {
