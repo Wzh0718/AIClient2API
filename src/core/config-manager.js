@@ -12,7 +12,9 @@ export let PROMPT_LOG_FILENAME = ''; // Make PROMPT_LOG_FILENAME exportable
 const ALL_MODEL_PROVIDERS = Object.values(MODEL_PROVIDER);
 const BYTES_PER_MB = 1024 * 1024;
 const ANTIGRAVITY_ELASTIC_ROUTING_DEFAULTS = Object.freeze({
-    enabled: true,
+    // 默认关闭：静默把请求降级到链上其他模型会让客户端计费/审计失真，
+    // 需要弹性降级的部署必须在 config.json 中显式 enabled: true。
+    enabled: false,
     maxQueueWaitMs: 30_000,
     preferOriginalWaitMs: 5_000,
     fallbackModels: [...ANTIGRAVITY_ELASTIC_MODEL_ORDER],

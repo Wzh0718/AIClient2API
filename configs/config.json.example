@@ -48,6 +48,13 @@
     "GROK_CF_CLEARANCE": "your-cf-clearance-cookie",
     "GROK_USER_AGENT": "Mozilla/5.0 ...",
     "GROK_BASE_URL": "https://grok.com",
+    "antigravityElasticRouting": {
+      "enabled": false,
+      "_comment": "Antigravity 弹性路由：默认关闭，请求严格按原模型执行，不再静默降级到链上其他模型。确需配额耗尽时自动降级，显式把 enabled 改为 true；fallbackModels 为空时使用内置链 gemini-2.5-flash-lite → gemini-3.1-flash-lite → gemini-2.5-flash → gemini-3.5-flash-lite → gemini-3-flash。",
+      "fallbackModels": [],
+      "maxQueueWaitMs": 30000,
+      "preferOriginalWaitMs": 5000
+    },
     "providerFallbackChain": {
       "gemini-cli-oauth": ["gemini-antigravity"],
       "gemini-antigravity": ["gemini-cli-oauth"],

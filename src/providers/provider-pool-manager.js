@@ -45,7 +45,8 @@ const ANTIGRAVITY_AVAILABILITY_SCOPE_CACHE_LIMIT = 256;
 const ANTIGRAVITY_MODEL_NOT_FOUND_TTL_MS = 60 * 60 * 1000;
 const ANTIGRAVITY_MODEL_NOT_FOUND_SYNC_INTERVAL_MS = 5000;
 const ANTIGRAVITY_ELASTIC_DEFAULTS = Object.freeze({
-    enabled: true,
+    // 与 config-manager 的默认值保持一致：弹性路由默认关闭，显式开启才生效。
+    enabled: false,
     maxQueueWaitMs: 30_000,
     preferOriginalWaitMs: 5_000,
     fallbackModels: ANTIGRAVITY_ELASTIC_MODEL_ORDER,
@@ -3870,7 +3871,8 @@ export class ProviderPoolManager {
             ? configured.fallbackModels.map(model => String(model || '').trim()).filter(Boolean)
             : ANTIGRAVITY_ELASTIC_DEFAULTS.fallbackModels;
         return {
-            enabled: configured.enabled !== false,
+            // 只有显式 true 才开启：缺省/缺字段一律视为关闭，避免静默降级。
+            enabled: configured.enabled === true,
             maxQueueWaitMs: positiveInteger(configured.maxQueueWaitMs, ANTIGRAVITY_ELASTIC_DEFAULTS.maxQueueWaitMs),
             preferOriginalWaitMs: positiveInteger(configured.preferOriginalWaitMs, ANTIGRAVITY_ELASTIC_DEFAULTS.preferOriginalWaitMs, { allowZero: true }),
             fallbackModels: configuredFallbacks,
@@ -3912,16 +3914,18 @@ export class ProviderPoolManager {
         };
     }
 
-    async _selectGeminiWithModelFallback(providerType, requestedModel, options, select) {
+    async _selectGeminiWithModelFallback(providerType, requestedModel, options, select, { allowModelFallback = true } = {}) {
         await this._hydrateAntigravityModelNotFound(providerType);
-        const availableModels = this._getAntigravityVerifiedModels(providerType);
+        const availableModels = allowModelFallback ? this._getAntigravityVerifiedModels(providerType) : [];
         const models = this._excludeAntigravityModelsNotFound(providerType, [
             requestedModel,
-            ...getAntigravityElasticFallbackModels(
-                requestedModel,
-                getConfiguredGeminiFallbackModels(this.globalConfig),
-                availableModels
-            )
+            ...(allowModelFallback
+                ? getAntigravityElasticFallbackModels(
+                    requestedModel,
+                    getConfiguredGeminiFallbackModels(this.globalConfig),
+                    availableModels
+                )
+                : [])
         ]);
         if (models.length === 0) throw this._createAntigravityModelNotFoundError(requestedModel);
         let lastError = null;
@@ -4477,12 +4481,18 @@ export class ProviderPoolManager {
 
         // Gemini stays on the same provider type, but model fallback is still
         // allowed when the requested model has no selectable credential.
+        // Antigravity 例外：弹性路由关闭时必须严格按原模型执行——静默降级
+        // 会让「请求 A 模型、实际跑 B 模型」对客户端完全不可见。gemini-cli
+        // 保持既有的模型降级行为不变。
         if (isGeminiProviderType(providerType)) {
+            const allowModelFallback = !isAntigravityProviderType(providerType)
+                || this._getAntigravityElasticRoutingConfig().enabled;
             return this._selectGeminiWithModelFallback(
                 providerType,
                 requestedModel,
                 options,
-                model => this.acquireSlot(providerType, model, options)
+                model => this.acquireSlot(providerType, model, options),
+                { allowModelFallback }
             );
         }
 
@@ -4659,12 +4669,16 @@ export class ProviderPoolManager {
 
         // Gemini stays on the same provider type, but model fallback is still
         // allowed when the requested model has no selectable credential.
+        // Antigravity 例外：弹性路由关闭时必须严格按原模型执行（同上）。
         if (isGeminiProviderType(providerType)) {
+            const allowModelFallback = !isAntigravityProviderType(providerType)
+                || this._getAntigravityElasticRoutingConfig().enabled;
             return this._selectGeminiWithModelFallback(
                 providerType,
                 requestedModel,
                 options,
-                model => this.selectProvider(providerType, model, options)
+                model => this.selectProvider(providerType, model, options),
+                { allowModelFallback }
             );
         }
 

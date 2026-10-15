@@ -731,6 +731,76 @@ describe('Antigravity elastic queue and model fallback', () => {
         expect(manager.getGeminiElasticQueueSnapshot()).toMatchObject({ waiting: 0, queuedBytes: 0 });
     });
 
+    test('does not silently fall back to another model when elastic routing is not configured (default off)', async () => {
+        // globalConfig 不含 antigravityElasticRouting：默认必须关闭弹性路由。
+        // 原模型冷却时只允许返回空/抛 429，绝不静默执行链上其他模型。
+        const manager = new ProviderPoolManager({
+            [providerType]: [provider('gemini-a', { [sourceModel]: coolingUntil(60_000) })]
+        }, {
+            persistenceEnabled: false,
+            globalConfig: {}
+        });
+
+        const acquireSpy = jest.spyOn(manager, 'acquireSlot');
+        let result = null;
+        let thrown = null;
+        try {
+            result = await manager.acquireSlotWithFallback(providerType, sourceModel);
+        } catch (error) {
+            thrown = error;
+        } finally {
+            const attemptedModels = acquireSpy.mock.calls.map(call => call[1]);
+            expect(attemptedModels).toEqual([sourceModel]);
+            acquireSpy.mockRestore();
+        }
+        expect(result).toBeNull();
+        if (thrown) {
+            expect([thrown.status, thrown.code]).toContain(429);
+        }
+    });
+
+    test('does not silently fall back when elastic routing is explicitly disabled', async () => {
+        const manager = new ProviderPoolManager({
+            [providerType]: [provider('gemini-a', { [sourceModel]: coolingUntil(60_000) })]
+        }, {
+            persistenceEnabled: false,
+            globalConfig: { antigravityElasticRouting: { enabled: false } }
+        });
+
+        const selectSpy = jest.spyOn(manager, 'selectProvider');
+        let result = null;
+        let thrown = null;
+        try {
+            result = await manager.selectProviderWithFallback(providerType, sourceModel);
+        } catch (error) {
+            thrown = error;
+        } finally {
+            const attemptedModels = selectSpy.mock.calls.map(call => call[1]);
+            expect(attemptedModels.every(model => model === sourceModel)).toBe(true);
+            expect(attemptedModels).not.toContain(firstFallback);
+            selectSpy.mockRestore();
+        }
+        expect(result).toBeNull();
+        if (thrown) {
+            expect([thrown.status, thrown.code]).toContain(429);
+        }
+    });
+
+    test('still selects the requested model directly when elastic routing is disabled and the model is healthy', async () => {
+        const manager = new ProviderPoolManager({
+            [providerType]: [provider('gemini-a')]
+        }, {
+            persistenceEnabled: false,
+            globalConfig: { antigravityElasticRouting: { enabled: false } }
+        });
+
+        const result = await manager.acquireSlotWithFallback(providerType, sourceModel);
+        expect(result).toMatchObject({
+            actualModel: sourceModel,
+            isFallback: false
+        });
+    });
+
     test('only wakes queued waiters of the provider whose slot was released', async () => {
         const manager = createManager([provider('gemini-a')]);
         let woken = false;

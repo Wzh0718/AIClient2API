@@ -14,7 +14,8 @@ describe('Antigravity elastic routing config', () => {
         const config = await initializeConfig([], configPath);
 
         expect(config.antigravityElasticRouting).toEqual(expect.objectContaining({
-            enabled: true,
+            // 弹性路由默认关闭，避免静默降级模型；需要时显式 enabled: true
+            enabled: false,
             maxQueueWaitMs: 12000,
             preferOriginalWaitMs: 5000,
             fallbackModels: [
